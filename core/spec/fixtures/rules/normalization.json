@@ -1,0 +1,18 @@
+{
+  "capability": "rules.parse",
+  "description": "host 归一化：大写转小写、去根点、去 *. 通配前缀；IPv6 字面量保留",
+  "input": {
+    "text": "10.0.0.13 API.Example.COM.\n10.0.0.13 *.wild.example.com\n2001:db8::1 v6.example.com\n[2001:db8::2] v6b.example.com\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 4,
+    "ips": 3,
+    "entries": {
+      "api.example.com": "10.0.0.13",
+      "wild.example.com": "10.0.0.13",
+      "v6.example.com": "2001:db8::1",
+      "v6b.example.com": "2001:db8::2"
+    }
+  }
+}

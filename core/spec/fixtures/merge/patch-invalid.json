@@ -1,0 +1,9 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 引入非法值时必须失败",
+  "input": {
+    "base": { "name": "gray", "dns_servers": ["10.1.0.53"] },
+    "patch": { "dns_servers": ["10.1.0.53:53"] }
+  },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers[0]" }
+}

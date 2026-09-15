@@ -1,0 +1,25 @@
+{
+  "capability": "rules.parse",
+  "description": "整行注释、行尾注释、空行、行首缩进都不影响解析",
+  "input": {
+    "text": "\n# full line\n   10.0.0.4  indented.example.com   # trailing\n\n#10.0.0.9 commented.out\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 1,
+    "ips": 1,
+    "entries": {
+      "indented.example.com": "10.0.0.4"
+    },
+    "skipped_reasons": [],
+    "stats": {
+      "total_lines": 5,
+      "blank_lines": 2,
+      "comment_lines": 2,
+      "data_lines": 1,
+      "accepted": 1,
+      "skipped": 0,
+      "conflicts": 0
+    }
+  }
+}

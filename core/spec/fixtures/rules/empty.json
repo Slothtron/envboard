@@ -1,0 +1,15 @@
+{
+  "capability": "rules.parse",
+  "description": "空输入不报错，得到空规则",
+  "input": {
+    "text": ""
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 0,
+    "ips": 0,
+    "entries": {},
+    "conflicts": [],
+    "skipped_reasons": []
+  }
+}

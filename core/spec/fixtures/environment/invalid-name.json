@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "环境名必须以小写字母开头，且只含 a-z0-9_-",
+  "input": { "name": "9Beta" },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.name" }
+}

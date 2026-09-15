@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "静态 hosts 的值必须是 IP",
+  "input": { "name": "prod", "hosts": { "api.example.com": "not-an-ip" } },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.hosts['api.example.com']" }
+}

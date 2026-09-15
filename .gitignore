@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Node（本包是 Python 包，根 package.json 只是 npm run verify 的入口壳；
+# 仍然覆盖，避免 npm 产生的任何本地状态被误入库）
+node_modules/
+npm-debug.log*
+
+# 本机状态（绝不应入库）
+.zvec-grep/
+.envboard-*.tmp
+envboard.json
+*.log
+
+# 真实 hosts 映射：含内网 IP 与内部域名，只在本机当导入源用，不入库。
+# 仓库里保留的是脱敏示例 examples/hosts.sample.txt。
+/examples/hosts.txt
+/examples/*.rules
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/

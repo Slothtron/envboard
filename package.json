@@ -1,0 +1,16 @@
+{
+  "name": "envboard",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Workspace root. The only purpose of this manifest is to expose a single, host-agnostic verification entrypoint (`npm run verify`) as required by AGENTS.md §7. The product itself is a Python package; there is no JS build.",
+  "scripts": {
+    "verify": "bash ci/verify.sh",
+    "verify:lint": "bash ci/verify.sh lint",
+    "verify:naming": "bash ci/verify.sh naming",
+    "verify:unit": "bash ci/verify.sh unit",
+    "typecheck": "bash ci/verify.sh typecheck"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

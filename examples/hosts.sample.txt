@@ -1,0 +1,43 @@
+# envboard hosts 输入示例（脱敏）
+#
+# 这是一份**给 envboard 导入用的** host↔ip 映射文件示例。格式刻意写得很杂，
+# 用来演示解析器到底容忍什么：
+#
+#   * 一行里多个 host 共用同一个 ip
+#   * 既有 `ip host…` 写法，也有 `host… ip` 反序写法
+#   * 整行注释、行尾注释、空行、行首缩进
+#   * 非法行自动忽略，且不影响同一行里其它合法的 host
+#   * 同一个 host 出现多次且 ip 不同 → **后出现者胜**
+#
+# 导入：
+#   envboard.rules.import  <本文件路径>  [规则名]
+# 或 Dashboard「规则文件」→ 粘贴 / 从文件导入。
+#
+# 注意：本文件里全是文档专用地址（RFC 5737）与 example.com 保留域名，
+# 可以安全入库。真实的 hosts 文件（examples/hosts.txt）已被 .gitignore 排除。
+
+# ---- 一组多 host 共用同一 ip（最常见的手写形态） ----
+192.0.2.10 api.example.com auth.example.com account.example.com
+192.0.2.11 cdn.example.com static.example.com
+192.0.2.12
+
+# ---- 反序写法：host… ip，与上面等价 ----
+beta.example.com 198.51.100.7
+gray.example.com canary.example.com 198.51.100.8
+
+# ---- 行尾注释、行首缩进、多余空格 ----
+   203.0.113.5   spaced.example.com   # 行首缩进 + 行尾注释
+
+# ---- 上一次灰度遗留，注释掉了 ----
+#203.0.113.99 legacy.example.com
+
+# ---- 以下都是非法行，导入时会被逐条忽略并报告 ----
+not-an-ip.example.com
+192.0.2.20
+192.0.2.21 bad_host_ok.example.com _also_bad.example.com
+300.1.2.3 out-of-range.example.com
+192.0.2.22 198.51.100.1
+
+# ---- 冲突演示：example.com 先指 192.0.2.30，后改指 192.0.2.31 ----
+192.0.2.30 example.com
+192.0.2.31 example.com

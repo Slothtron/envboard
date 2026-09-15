@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>envboard · 多环境 DNS 工作台</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#161d2c; --panel-2:#1d2637; --line:#28324a;
+    --fg:#e6ebf5; --muted:#8b97ad; --acc:#4c8dff; --ok:#31c48d; --warn:#e3a008; --err:#f05252;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+  a{color:var(--acc)}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+         padding:14px 18px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+  header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+  .tag{font:12px/1 var(--mono);padding:4px 8px;border-radius:999px;background:#22304a;color:#9fc0ff;border:1px solid #33456b}
+  .tag.on{background:#173c2c;color:#7ce0b0;border-color:#256b4c}
+  .grow{flex:1}
+  .muted{color:var(--muted)}
+  main{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:14px;padding:14px 18px 28px;align-items:start}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .panel h2{margin:0;padding:10px 13px;font-size:13px;font-weight:600;color:#b9c6dd;
+            background:var(--panel-2);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .panel .body{padding:12px 13px}
+  .env{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:9px;cursor:pointer;
+       border:1px solid transparent;margin-bottom:6px;background:#131a28}
+  .env:hover{border-color:#33456b}
+  .env.sel{border-color:var(--acc);background:#16233a}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:#5a6885}
+  .env .nm{font-family:var(--mono);font-weight:600}
+  .env .sub{font-size:12px;color:var(--muted);font-family:var(--mono);
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  label{display:block;font-size:12px;color:var(--muted);margin:9px 0 3px}
+  input,textarea,select{width:100%;background:#0d121d;color:var(--fg);
+       border:1px solid #2c3852;border-radius:8px;padding:7px 9px;font-family:var(--mono);font-size:13px}
+  textarea{min-height:76px;resize:vertical}
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc)}
+  button{background:#22304a;color:var(--fg);border:1px solid #33456b;border-radius:8px;
+         padding:7px 12px;font-size:13px;cursor:pointer;font-family:inherit}
+  button:hover{border-color:var(--acc)}
+  button.primary{background:#1d4ed8;border-color:#2f6fed}
+  button.primary:hover{background:#2456e0}
+  button.danger{background:#3a1d22;border-color:#6b2b33;color:#ffb3ba}
+  button.ghost{background:transparent}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12.5px}
+  th,td{text-align:left;padding:6px 9px;border-bottom:1px solid #232c40;white-space:nowrap}
+  th{color:var(--muted);font-weight:600;background:var(--panel-2);position:sticky;top:0}
+  tbody tr:hover{background:#182135}
+  .scroll{max-height:420px;overflow:auto}
+  .toast{position:fixed;right:16px;bottom:16px;max-width:460px;padding:10px 13px;border-radius:10px;
+         font-family:var(--mono);font-size:12.5px;box-shadow:0 8px 26px rgba(0,0,0,.45);z-index:20}
+  .toast.ok{background:#123426;border:1px solid #256b4c;color:#9ff0c8}
+  .toast.err{background:#3a1d22;border:1px solid #6b2b33;color:#ffc2c8}
+  .hint{font-size:12px;color:var(--muted);margin-top:5px}
+  code{font-family:var(--mono);background:#0d121d;padding:1px 5px;border-radius:5px;border:1px solid #232c40}
+</style>
+</head>
+<body>
+<header>
+  <h1>envboard</h1>
+  <span class="tag" id="activeTag">active: —</span>
+  <span class="tag" id="dnsTag">dns: —</span>
+  <span class="grow"></span>
+  <span class="muted" id="cfgPath" style="font-family:var(--mono);font-size:12px"></span>
+  <button class="ghost" id="btnReload">重新载入</button>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>环境 <span class="grow"></span><button class="ghost" id="btnNew" style="padding:3px 9px">+ 新建</button></h2>
+    <div class="body" id="envList"></div>
+  </section>
+
+  <section class="panel">
+    <h2>编辑环境 <span class="grow"></span><span class="muted" id="editMode" style="font-weight:400"></span></h2>
+    <div class="body">
+      <div class="row">
+        <div style="flex:1 1 160px"><label>名称（小写字母开头，a-z0-9_-）</label><input id="fName" placeholder="beta"></div>
+        <div style="flex:0 0 110px"><label>颜色</label><input id="fColor" placeholder="#4c8dff"></div>
+      </div>
+      <label>DNS 服务器（逗号分隔；留空 = 跟随操作系统 DNS）</label>
+      <input id="fDns" placeholder="10.0.0.53, 10.0.0.54">
+      <div class="hint">仅支持裸 IP 字面量：<code>mitmproxy_rs.dns.DnsResolver</code> 不接受 <code>ip:port</code> 或主机名。</div>
+      <label>域名后缀（可选）</label>
+      <input id="fSuffix" placeholder="beta.example.com">
+      <label>静态 hosts 覆盖（每行 <code>host=ip</code>，优先级最高，不查 DNS）</label>
+      <textarea id="fHosts" placeholder="api.example.com=10.0.0.11&#10;auth.example.com=10.0.0.12"></textarea>
+      <label>说明（可选）</label>
+      <input id="fDesc" placeholder="灰度环境">
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="btnSave">保存</button>
+        <button id="btnActivate">切换到此环境</button>
+        <span class="grow"></span>
+        <button class="danger" id="btnDelete">删除</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" style="grid-column:1/-1">
+    <h2>规则文件
+      <span class="grow"></span>
+      <span class="muted" id="rulesDir" style="font-weight:400;font-family:var(--mono);font-size:12px"></span>
+      <button class="ghost" id="btnRulesReload" style="padding:3px 9px">刷新</button>
+    </h2>
+    <div class="body">
+      <div class="hint">
+        规则文件是 <code>ip host…</code> 形式的静态覆盖，<b>按环境绑定</b> —— 切环境即切规则文件。
+        导入时 <code>host… ip</code> 反序写法同样接受；非法行会被自动忽略并逐条列出，不影响其余行。
+        环境自己的「静态 hosts 覆盖」优先于规则文件，两者都优先于 DNS 且永不过期。
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div style="flex:0 0 220px">
+          <label>当前环境的规则文件</label>
+          <select id="ruleBind"></select>
+        </div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button id="btnRuleBind">应用绑定</button></div>
+        <div style="flex:1 1 200px">
+          <label>规则名（导入目标 / 删除对象）</label>
+          <input id="ruleName" placeholder="hosts">
+        </div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button class="danger" id="btnRuleDelete">删除</button></div>
+      </div>
+      <label>粘贴 hosts 内容（每行一条；<code>ip host…</code> 或 <code>host… ip</code> 都行，可多 host 共用同一 ip）</label>
+      <textarea id="ruleText" placeholder="10.0.0.1 api.example.com auth.example.com&#10;beta.example.com 10.0.0.2&#10;# 注释、空行、非法行都会被忽略"></textarea>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:0 0 auto;align-self:flex-end"><button class="primary" id="btnRuleImport">导入并规范化</button></div>
+        <div style="flex:1 1 260px">
+          <label>或从服务器上的文件导入（路径）</label>
+          <input id="rulePath" placeholder="/path/to/hosts.txt">
+        </div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button id="btnRuleImportPath">从文件导入</button></div>
+      </div>
+      <div class="scroll" style="margin-top:10px">
+        <table>
+          <thead><tr><th>规则文件</th><th>entries</th><th>ip</th><th>绑定环境</th></tr></thead>
+          <tbody id="ruleBody"><tr><td colspan="4" class="muted">尚无数据</td></tr></tbody>
+        </table>
+      </div>
+      <div id="ruleReport"></div>
+    </div>
+  </section>
+
+  <section class="panel" style="grid-column:1/-1">
+    <h2>解析 / 映射
+      <span class="grow"></span>
+      <span class="muted" id="idxStats" style="font-weight:400"></span>
+    </h2>
+    <div class="body">
+      <div class="row">
+        <div style="flex:1 1 320px">
+          <label>正向解析 host → ip（逗号分隔）</label>
+          <input id="qHosts" placeholder="api.example.com, auth.example.com">
+        </div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button class="primary" id="btnResolve">解析（当前环境）</button></div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button class="primary" id="btnAllEnvs">对比所有环境</button></div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button id="btnRefresh">刷新 watchlist</button></div>
+      </div>
+      <div class="hint">「对比所有环境」会拿同一个域名分别向每套环境的 DNS 服务器各查一次 —— 这正是多环境工作台的主场景。</div>
+      <div class="row" style="margin-top:10px">
+        <div style="flex:0 0 190px">
+          <label>映射表范围</label>
+          <select id="mapEnv"><option value="*">全部环境</option></select>
+        </div>
+        <div style="flex:1 1 240px">
+          <label>过滤 host</label>
+          <input id="qFilter" placeholder="api.example.com…">
+        </div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button id="btnMappings">查询映射表</button></div>
+      </div>
+      <div class="scroll" style="margin-top:10px">
+        <table>
+          <thead><tr><th>env</th><th>host</th><th>ip</th><th>source</th><th>age(s)</th></tr></thead>
+          <tbody id="mapBody"><tr><td colspan="5" class="muted">尚无数据</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js" defer></script>
+</body>
+</html>

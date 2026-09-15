@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "裸 IPv6 字面量是合法的 DNS 服务器写法",
+  "input": { "name": "prod", "dns_servers": ["::1", "fd00::53"] },
+  "expect": { "ok": true, "name": "prod", "dns_servers": ["::1", "fd00::53"] }
+}

@@ -1,0 +1,17 @@
+{
+  "capability": "rules.parse",
+  "description": "一个 ip 后面跟多个 host（hosts 文件最常见写法）",
+  "input": {
+    "text": "10.0.0.1 api.example.com auth.example.com account.example.com\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 3,
+    "ips": 1,
+    "entries": {
+      "api.example.com": "10.0.0.1",
+      "auth.example.com": "10.0.0.1",
+      "account.example.com": "10.0.0.1"
+    }
+  }
+}

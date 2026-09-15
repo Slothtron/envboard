@@ -1,0 +1,16 @@
+{
+  "capability": "rules.parse",
+  "description": "Windows 编辑器常见的 BOM 与 CRLF 都要能处理",
+  "input": {
+    "text": "﻿10.0.0.14 crlf.example.com\r\n10.0.0.15 crlf2.example.com\r\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 2,
+    "ips": 2,
+    "entries": {
+      "crlf.example.com": "10.0.0.14",
+      "crlf2.example.com": "10.0.0.15"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "DNS 服务器不能写成主机名",
+  "input": { "name": "prod", "dns_servers": ["dns.example.com"] },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers[0]" }
+}

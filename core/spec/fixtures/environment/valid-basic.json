@@ -1,0 +1,19 @@
+{
+  "capability": "environment.validate",
+  "description": "beta 环境：一套自定义 DNS + 一个静态 hosts 覆盖",
+  "input": {
+    "name": "beta",
+    "dns_servers": ["10.0.0.53", "10.0.0.54"],
+    "domain_suffix": "beta.example.com",
+    "hosts": { "api.example.com": "10.0.0.11" },
+    "color": "#4c8dff",
+    "description": "灰度环境"
+  },
+  "expect": {
+    "ok": true,
+    "name": "beta",
+    "dns_servers": ["10.0.0.53", "10.0.0.54"],
+    "domain_suffix": "beta.example.com",
+    "hosts": { "api.example.com": "10.0.0.11" }
+  }
+}
