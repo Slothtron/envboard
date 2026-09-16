@@ -202,6 +202,18 @@ fn create_beta(harness: &Harness) -> EnvView {
         .unwrap()
 }
 
+/// 选项**只能**在写环境时给出（create/update）——它是持久化配置，不是"本次启动的开关"。
+fn create_beta_with_options(harness: &Harness, pairs: &[(&str, &str)]) -> EnvView {
+    harness
+        .manager
+        .create(&serde_json::json!({
+            "name": "beta",
+            "description": "灰度",
+            "options": options(pairs),
+        }))
+        .unwrap()
+}
+
 fn assert_in_range(view: &EnvView, harness: &Harness) {
     let (min, max) = harness.manager.config().port_range;
     assert!(
@@ -318,13 +330,9 @@ async fn start_and_stop_round_trip_updates_desired_state_and_health() {
 #[tokio::test]
 async fn stale_status_file_is_reported_as_unhealthy() {
     let harness = Harness::new();
-    create_beta(&harness);
     // FakeCore 只写一次、时间戳是"一小时前"
-    harness
-        .manager
-        .start_with_options("beta", &options(&[("fake_status", "stale")]))
-        .await
-        .unwrap();
+    create_beta_with_options(&harness, &[("fake_status", "stale")]);
+    harness.manager.start("beta").await.unwrap();
 
     match harness.manager.health("beta").await.unwrap() {
         InstanceHealth::Unhealthy { reason } => assert!(reason.contains("stale"), "got: {reason}"),
@@ -335,12 +343,8 @@ async fn stale_status_file_is_reported_as_unhealthy() {
 #[tokio::test]
 async fn missing_status_file_is_unhealthy_even_though_the_port_accepts() {
     let harness = Harness::new();
-    create_beta(&harness);
-    harness
-        .manager
-        .start_with_options("beta", &options(&[("fake_status", "absent")]))
-        .await
-        .unwrap();
+    create_beta_with_options(&harness, &[("fake_status", "absent")]);
+    harness.manager.start("beta").await.unwrap();
 
     // 这一条是"探活为辅"的关键证据：端口连得上，但没有状态文件 → 不能算 running。
     let view = harness.manager.get("beta").unwrap();
@@ -372,13 +376,13 @@ async fn config_echo_mismatch_is_detected() {
         .unwrap();
     harness
         .manager
-        .create(&serde_json::json!({"name": "beta", "rules": "beta"}))
+        .create(&serde_json::json!({
+            "name": "beta",
+            "rules": "beta",
+            "options": options(&[("fake_status", "rules_count_mismatch")]),
+        }))
         .unwrap();
-    harness
-        .manager
-        .start_with_options("beta", &options(&[("fake_status", "rules_count_mismatch")]))
-        .await
-        .unwrap();
+    harness.manager.start("beta").await.unwrap();
 
     match harness.manager.health("beta").await.unwrap() {
         InstanceHealth::ConfigMismatch { reason } => {
@@ -470,20 +474,73 @@ async fn auto_allocated_port_conflict_retries_once_with_a_new_port() {
 }
 
 #[tokio::test]
-async fn options_denylist_is_enforced_before_starting() {
+async fn options_denylist_is_enforced_when_the_environment_is_written() {
     let harness = Harness::new();
-    create_beta(&harness);
+    // 选项是**持久化配置**，所以 denylist 在写入时就裁决：不允许先存下来、再在启动时爆炸。
     let error = harness
         .manager
-        .start_with_options("beta", &options(&[("listen_port", "9999")]))
-        .await
+        .create(&serde_json::json!({
+            "name": "beta",
+            "options": {"listen_port": "9999"},
+        }))
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidConfig);
-    assert_eq!(error.field.as_deref(), Some("instance.options.listen_port"));
     assert_eq!(
-        harness.manager.health("beta").await.unwrap(),
-        InstanceHealth::Stopped,
-        "nothing must be started when the options are rejected"
+        error.field.as_deref(),
+        Some("environment.options.listen_port")
+    );
+    assert!(
+        harness.manager.get("beta").is_err(),
+        "a rejected environment must not be persisted"
+    );
+}
+
+#[tokio::test]
+async fn options_are_persisted_and_reach_the_next_start() {
+    let harness = Harness::new();
+    let created = create_beta_with_options(&harness, &[("ssl_insecure", "true")]);
+    assert_eq!(
+        created.options.get("ssl_insecure").map(String::as_str),
+        Some("true")
+    );
+
+    let started = harness.manager.start("beta").await.unwrap();
+    assert_eq!(
+        started.options.get("ssl_insecure").map(String::as_str),
+        Some("true"),
+        "the launched instance must get the persisted options"
+    );
+    assert_eq!(started.health.as_str(), "running");
+
+    // 运行中换选项：与换绑定同款 —— 启动时才固定，必须停机。
+    let error = harness
+        .manager
+        .update(
+            "beta",
+            &serde_json::json!({"options": {"block_global": "false"}}),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+
+    harness.manager.stop("beta").await.unwrap();
+    let updated = harness
+        .manager
+        .update(
+            "beta",
+            &serde_json::json!({"options": {"block_global": "false"}}),
+        )
+        .unwrap();
+    // 整体替换：旧键不会因为"没提它"而留下。
+    assert!(!updated.options.contains_key("ssl_insecure"));
+    assert_eq!(
+        updated.options.get("block_global").map(String::as_str),
+        Some("false")
+    );
+
+    let restarted = harness.manager.start("beta").await.unwrap();
+    assert_eq!(
+        restarted.options.get("block_global").map(String::as_str),
+        Some("false")
     );
 }
 

@@ -1,0 +1,14 @@
+{
+  "capability": "environment.validate",
+  "description": "选项值必须是字符串（这里是布尔），否则无法原样拼成 `--set key=value`",
+  "input": {
+    "name": "bad",
+    "listen": { "port": 16304 },
+    "options": { "ssl_insecure": true }
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.options.ssl_insecure"
+  }
+}

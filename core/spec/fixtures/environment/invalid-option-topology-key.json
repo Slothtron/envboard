@@ -1,0 +1,14 @@
+{
+  "capability": "environment.validate",
+  "description": "反例：选项键会改变进程拓扑（scripts 能再挂一个 addon 进来），必须拒绝",
+  "input": {
+    "name": "bad",
+    "listen": { "port": 16307 },
+    "options": { "scripts": "/tmp/evil.py" }
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.options.scripts"
+  }
+}

@@ -161,14 +161,17 @@ enum EnvCommand {
         /// 绑定规则名（需先 `envboard rules import`）。
         #[arg(long)]
         rules: Option<String>,
+        /// 透传给 core 的每实例选项，可重复，形如 `--option ssl_insecure=true`
+        /// （**持久化在环境上**，受 denylist 约束；改它要 `env edit`）。
+        #[arg(long = "option", value_name = "K=V")]
+        options: Vec<String>,
         #[arg(long, default_value = "")]
         description: String,
     },
     /// 修改已有环境（PATCH 语义：只改给出来的字段）。
     ///
-    /// **改名与换端口必须先停止**：它们是环境的身份，运行中改会让客户端代理配置、
-    /// 状态文件与进程记录同时对不上。描述与规则绑定是热改 —— 注入器按 mtime 重载，
-    /// 不必重启实例。
+    /// **改名、换端口、换绑定与换选项都必须先停止**：它们都是环境的启动契约，
+    /// 运行中改会让客户端代理配置、状态文件与进程记录同时对不上。描述是热改。
     Edit {
         name: String,
         /// 改名（新名字不能已存在）。
@@ -183,17 +186,18 @@ enum EnvCommand {
         /// 解除规则绑定（回到"不覆盖"）。与 `--rules` 互斥。
         #[arg(long, conflicts_with = "rules")]
         no_rules: bool,
+        /// 整体替换每实例选项（PATCH 到 `options`，**不是**逐键合并）。可重复。
+        #[arg(long = "option", value_name = "K=V")]
+        options: Vec<String>,
+        /// 清空全部每实例选项（回到"不透传"）。与 `--option` 互斥。
+        #[arg(long, conflicts_with = "options")]
+        no_options: bool,
         /// 改描述；给空串即清空。
         #[arg(long)]
         description: Option<String>,
     },
-    /// 标记为"期望运行"并尝试启动。
-    Start {
-        name: String,
-        /// 透传给 core 的选项，形如 `--option ssl_insecure=true`（受 denylist 约束）。
-        #[arg(long = "option", value_name = "K=V")]
-        options: Vec<String>,
-    },
+    /// 标记为"期望运行"并尝试启动（选项取环境上持久化的 `options`）。
+    Start { name: String },
     /// 停止并标记为"期望停止"。
     Stop { name: String },
     /// 重启。
@@ -459,6 +463,7 @@ fn thin_dispatch(client: ApiClient, cli: &Cli) -> Result<(), Error> {
                 name,
                 port,
                 rules,
+                options,
                 description,
             } => {
                 let mut body = serde_json::json!({"name": name, "description": description});
@@ -468,6 +473,9 @@ fn thin_dispatch(client: ApiClient, cli: &Cli) -> Result<(), Error> {
                 if let Some(port) = port {
                     body["listen"] = serde_json::json!({"port": port});
                 }
+                if !options.is_empty() {
+                    body["options"] = options_value(options)?;
+                }
                 print_json(&client.post("/api/environments", Some(&body))?, json)
             }
             EnvCommand::Edit {
@@ -476,26 +484,28 @@ fn thin_dispatch(client: ApiClient, cli: &Cli) -> Result<(), Error> {
                 port,
                 rules,
                 no_rules,
+                options,
+                no_options,
                 description,
             } => {
-                let patch = edit_patch(rename, *port, rules, *no_rules, description)?;
+                let patch = edit_patch(
+                    rename,
+                    *port,
+                    rules,
+                    *no_rules,
+                    options,
+                    *no_options,
+                    description,
+                )?;
                 print_json(
                     &client.patch(&format!("/api/environments/{name}"), &patch)?,
                     json,
                 )
             }
-            EnvCommand::Start { name, options } => {
-                if !options.is_empty() {
-                    return Err(Error::invalid_config(
-                        "instance.options",
-                        "per-instance options are only available in direct mode (no resident manager)",
-                    ));
-                }
-                print_json(
-                    &client.post(&format!("/api/environments/{name}/start"), None)?,
-                    json,
-                )
-            }
+            EnvCommand::Start { name } => print_json(
+                &client.post(&format!("/api/environments/{name}/start"), None)?,
+                json,
+            ),
             EnvCommand::Stop { name } => print_json(
                 &client.post(&format!("/api/environments/{name}/stop"), None)?,
                 json,
@@ -725,12 +735,15 @@ async fn resident(
 ///
 /// 只放**给出来的**字段：PATCH 语义是"改这几项"，没给的一律不动。
 /// `--no-rules` 显式写成 `null` —— 契约里 `rules: null` 就是"不覆盖"，
-/// 与"没给这个字段"是两件事。
+/// 与"没给这个字段"是两件事。`--option` / `--no-options` 同款：
+/// `options` 是**整体替换**（不是逐键合并），`null` 即清空回 `{}`。
 fn edit_patch(
     rename: &Option<String>,
     port: Option<u16>,
     rules: &Option<String>,
     no_rules: bool,
+    options: &[String],
+    no_options: bool,
     description: &Option<String>,
 ) -> Result<serde_json::Value, Error> {
     let mut patch = serde_json::Map::new();
@@ -745,6 +758,11 @@ fn edit_patch(
     } else if let Some(rules) = rules {
         patch.insert("rules".into(), serde_json::Value::from(rules.clone()));
     }
+    if no_options {
+        patch.insert("options".into(), serde_json::Value::Null);
+    } else if !options.is_empty() {
+        patch.insert("options".into(), options_value(options)?);
+    }
     if let Some(description) = description {
         patch.insert(
             "description".into(),
@@ -755,10 +773,33 @@ fn edit_patch(
         return Err(Error::invalid_config(
             "environment",
             "nothing to change: pass at least one of --rename/--port/--rules/--no-rules/\
-             --description (an empty patch would report success without doing anything)",
+             --option/--no-options/--description (an empty patch would report success without \
+             doing anything)",
         ));
     }
     Ok(serde_json::Value::Object(patch))
+}
+
+/// `--option K=V`（可重复）折成契约里的 `options` 对象。
+///
+/// denylist 的判定权在 core（`envboard_core_api::validate_options`），这里**不复制**
+/// 一份键表；CLI 只负责把 `K=V` 拆开。
+fn parse_options(raw: &[String]) -> Result<BTreeMap<String, String>, Error> {
+    let mut options = BTreeMap::new();
+    for item in raw {
+        let Some((key, value)) = item.split_once('=') else {
+            return Err(Error::invalid_config(
+                "instance.options",
+                format!("expected K=V, got {item:?}"),
+            ));
+        };
+        options.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    Ok(options)
+}
+
+fn options_value(raw: &[String]) -> Result<serde_json::Value, Error> {
+    Ok(serde_json::to_value(parse_options(raw)?)?)
 }
 
 async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Result<(), Error> {
@@ -774,6 +815,7 @@ async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Resu
             name,
             port,
             rules,
+            options,
             description,
         } => {
             let mut input = serde_json::Map::new();
@@ -785,6 +827,9 @@ async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Resu
             if let Some(port) = port {
                 input.insert("listen".into(), serde_json::json!({"port": port}));
             }
+            if !options.is_empty() {
+                input.insert("options".into(), options_value(&options)?);
+            }
             let view = manager.create(&serde_json::Value::Object(input))?;
             print_view(&view, json)
         }
@@ -794,14 +839,23 @@ async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Resu
             port,
             rules,
             no_rules,
+            options,
+            no_options,
             description,
         } => {
-            let patch = edit_patch(&rename, port, &rules, no_rules, &description)?;
+            let patch = edit_patch(
+                &rename,
+                port,
+                &rules,
+                no_rules,
+                &options,
+                no_options,
+                &description,
+            )?;
             print_view(&manager.update(&name, &patch)?, json)
         }
-        EnvCommand::Start { name, options } => {
-            let options = parse_options(&options)?;
-            let view = manager.start_with_options(&name, &options).await?;
+        EnvCommand::Start { name } => {
+            let view = manager.start(&name).await?;
             print_view(&view, json)?;
             if !json {
                 eprintln!(
@@ -910,16 +964,4 @@ fn quote_if_set(text: &str) -> String {
     } else {
         format!("\"{text}\"")
     }
-}
-
-fn parse_options(raw: &[String]) -> Result<BTreeMap<String, String>, Error> {
-    let mut options = BTreeMap::new();
-    for item in raw {
-        let (key, value) = item.split_once('=').ok_or_else(|| {
-            Error::invalid_config("instance.options", format!("expected K=V, got {item:?}"))
-        })?;
-        options.insert(key.trim().to_string(), value.trim().to_string());
-    }
-    // denylist 检查放在管理器里（core 侧也会再跑一遍）。
-    Ok(options)
 }

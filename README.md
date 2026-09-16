@@ -15,6 +15,7 @@
 | 能力 | 状态 |
 |---|---|
 | 环境 CRUD / **编辑** / 启停 / 显式重分配端口 / 规则绑定与热重载 | ✅ |
+| 每实例选项（`ssl_insecure`、`ssl_verify_upstream_trusted_ca` …）**持久化在环境上**，CLI 与工作台都能改 | ✅ |
 | 端口自动分配（区间内随机试绑，撞了就重试一次） | ✅ |
 | 按 host 改写上连目标（真 mitmproxy `server_connect`） | ✅ |
 | 共享 CA（所有实例一张，客户端只装一次） | ✅ |
@@ -56,7 +57,8 @@ envboard --state-dir ~/.envboard compare api.example.com   # 跨环境静态对�
 ### 改一个已经建好的环境
 
 建的时候没绑规则、端口想换一个、描述写错了 —— 都不必删了重建。工作台每行有「编辑」
-（同一个表单切到编辑模式，可改名字 / 端口 / 规则绑定 / 描述），命令行是 `env edit`：
+（同一个表单切到编辑模式，可改名字 / 端口 / 规则绑定 / 实例选项 / 描述），命令行是
+`env edit`：
 
 ```bash
 envboard env edit beta --rules beta            # 补绑规则（停止状态）
@@ -64,16 +66,39 @@ envboard env edit beta --port 16302            # 换端口
 envboard env edit beta --rename gamma          # 改名（期望状态、端口归属一起搬过去）
 envboard env edit beta --no-rules              # 解绑，回到"不覆盖"
 envboard env edit beta --description "灰度 v2" # 只改描述
+envboard env edit beta --option ssl_insecure=true                 # 透传给 core 的选项
+envboard env edit beta --option ssl_insecure=true --option block_global=false
+envboard env edit beta --no-options            # 清空全部选项（整体替换，不是逐键合并）
 envboard rules show beta                        # 改规则文件前先取回原文，免得盲覆盖
 ```
+
+`--option K=V` 也可以在建环境时直接给：`envboard env add beta --option ssl_insecure=true`。
+选项**持久化在环境上**，启动与崩溃恢复（reconcile）都从它取值 —— 常驻工作台下也带得上，
+不需要"先停工作台再用直连模式启动"。
+
+工作台「配置」表单里是同一份配置的两个入口（「概览」会显示当前生效值）：
+
+- **显式开关**：目前只做了 `ssl_insecure`（跳过上游证书校验）一个 —— 它是布尔选项里
+  语义最确定、最常用的一项，用勾选框比让人手写 `K=V` 更不容易错。开关是该项**唯一**的
+  编辑入口（文本框里重复写会报字段错误，避免同一份配置两个真相）；
+- **「其他实例选项」文本框**：上面开关之外的 core 选项，每行一个 `K=V`
+  （如 `ssl_verify_upstream_trusted_ca=/path/ca.pem`）。
+
+加第二个开关：`assets/index.html` 加一块控件，`assets/app.js` 的 `OPTION_SWITCHES` 加一条，
+键名两边一致即可（`formPayload` / `startEdit` / `syncEditLock` 会自动带上它）。
 
 三条规则（服务端裁决，工作台与 CLI 只是同一份语义的两个面）：
 
 - **描述随时可改**，改动不会重启实例；
 - **规则文件的内容热重载** —— 导入同名文件覆盖即可，注入器按 mtime 重读，不必重启；
-- **改名 / 换端口 / 换绑定必须先停止**。实例启动时才固定监听端口与规则文件路径，
-  运行中改这几项会让"配置说绑了 A、实例还按 B 干活"，所以服务端返回 `conflict`
-  并在消息里说明原因（工作台会把这三个输入框锁住，只放开描述）。
+- **改名 / 换端口 / 换绑定 / 换选项必须先停止**。实例启动时才固定监听端口、规则文件路径
+  与 `--set` 选项，运行中改这几项会让"配置说绑了 A、实例还按 B 干活"，所以服务端返回
+  `conflict` 并在消息里说明原因（工作台会把这些输入框锁住，只放开描述）。
+
+选项的键由 core 侧同一张 denylist 裁决（管理器自有键如 `listen_port` / `confdir`、
+会改变进程拓扑或加载第三方代码的键如 `mode` / `scripts` / `web*`、以及 `envboard_`
+前缀）；命中时**写入即失败**，错误路径是 `environment.options.<key>`，不会留下一份
+启动时才爆炸的坏配置。
 
 没有 mitmproxy 的机器可以用 `--core fake` 跑通管理器与全部测试（只监听端口、不改写）。
 
@@ -98,7 +123,7 @@ envboard rules show beta                        # 改规则文件前先取回原
 ## 架构
 
 ```
-core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、40 个 golden fixture
+core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、51 个 golden fixture
 core/rs/crates/
   envboard-core-api   ProxyCore trait、实例契约、错误码、端口（时钟/日志）  ← 根，无内部依赖
   envboard-domain     环境校验/合并、端口选择、reconcile 决策              ← 纯逻辑
@@ -108,7 +133,7 @@ core/rs/crates/
   envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
   envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
   envboard-cli        envboard 二进制
-  envboard-contract-tests  消费全部 40 个契约 fixture
+  envboard-contract-tests  消费全部 51 个契约 fixture
 adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
 ```
 
@@ -132,7 +157,7 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 | 层 | 手段 | 关键断言 |
 |---|---|---|
 | 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**包内文本不得引用本仓之外的本地文档**（见下） |
-| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 40 个 fixture 由实现消费；`rules.parse` 两侧一致 |
+| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 51 个 fixture 由实现消费；`rules.parse` 两侧一致 |
 | 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
 | 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
 | 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
@@ -200,7 +225,15 @@ envboard env list
   被规则覆盖的域名每个请求都会新建上连（多一次 TLS 握手）。这是"只改连到哪"的代价，
   不是缺陷；正确性不受影响。
 - **指向证书不匹配的测试机 → 上游校验失败 502**：这是 hosts 语义的必然（客户端看到的
-  域名不变，所以证书也按那个域名校验）。需要放行时透传 `ssl_insecure=true`。
+  域名不变，所以证书也按那个域名校验）。两条解法，按安全性与代价取舍：
+  - **保留校验**：把目标机证书链上的 CA 交给 mitmproxy。工具链的信任库是自带的
+    certifi（**不是操作系统信任库**），所以 `--option ssl_verify_upstream_trusted_ca=…`
+    是唯一入口，且该选项是**替换**默认库而不是追加 —— PEM 必须是
+    `certifi 的 cacert.pem + 你的内部根 CA` 拼起来（只给内部 CA 会让所有公网域名一起 502）。
+    目标机若只发叶子证书、不发中间证书，拼接时要把中间证书一起放进去。
+  - **放弃该环境的上游校验**：`--option ssl_insecure=true`（只建议用于内网测试环境）。
+  - 判据速查：日志里 `unable to get local issuer certificate` = 根/中间不在信任库；
+    `hostname mismatch` = 那台机器根本没有该域名的证书。
 - **客户端要改代理配置**（换端口即换环境）。工作台给出的那行 `export https_proxy=…`
   就是为此。
 - **`sni is None` 分支未经实测**：显式代理下 curl 总会带 SNI，构造不出该分支；目前只有
@@ -221,6 +254,6 @@ envboard env list
 - `capabilities.md` —— 能力清单、领域不变量、端口分配与生命周期语义、ProxyCore 能力矩阵
 - `rules.md` —— hosts 规则语法的 **BNF**（容错规则、跳过原因码、渲染的逐字节要求）
 - `errors.md` —— 统一错误码与健康状态表
-- `fixtures/` —— 40 个 golden case
+- `fixtures/` —— 51 个 golden case
 
 改实现之前先问"契约该不该改"；该改就改契约并同步 fixture。

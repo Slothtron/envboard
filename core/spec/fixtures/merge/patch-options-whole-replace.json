@@ -1,0 +1,18 @@
+{
+  "capability": "environment.merge",
+  "description": "options 是整体替换：patch 给出的对象就是新值，未提及的键随之消失（不是深合并）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": { "host": "127.0.0.1", "port": 16600 },
+      "options": { "ssl_insecure": "true", "block_global": "true" }
+    },
+    "patch": { "options": { "block_global": "false" } }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gray",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "options": { "block_global": "false" }
+  }
+}

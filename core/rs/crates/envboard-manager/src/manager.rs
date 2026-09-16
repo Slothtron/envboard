@@ -32,6 +32,8 @@ pub struct EnvView {
     pub name: String,
     pub listen: Listen,
     pub rules: Option<String>,
+    /// 透传给 core 的每实例选项（**已持久化**在环境定义里，启动与 reconcile 都用它）。
+    pub options: BTreeMap<String, String>,
     pub description: String,
     pub desired: Desired,
     pub health: InstanceHealth,
@@ -46,6 +48,7 @@ impl EnvView {
             "name": self.name,
             "listen": {"host": self.listen.host.to_string(), "port": self.listen.port},
             "rules": self.rules,
+            "options": self.options,
             "description": self.description,
             "desired": match self.desired { Desired::Running => "running", Desired::Stopped => "stopped" },
             "health": self.health.as_str(),
@@ -220,20 +223,15 @@ impl Manager {
     }
 
     /// 启动一个环境。失败时**留下标记**并如实返回错误（不吞）。
+    ///
+    /// 选项**只来自环境上持久化的 `options`**（没有"本次启动临时覆盖"的通道）：
+    /// 否则手动启动的实例与账本里的配置会分叉，reconcile 之后又按账本把它拉回另一套值。
     pub async fn start(&self, name: &str) -> Result<EnvView, Error> {
-        self.start_with_options(name, &BTreeMap::new()).await
-    }
-
-    pub async fn start_with_options(
-        &self,
-        name: &str,
-        options: &BTreeMap<String, String>,
-    ) -> Result<EnvView, Error> {
         let raw = self.require(name)?;
         let environment = Environment::from_json(&raw)?;
         let (rules_path, _) = self.resolve_rules(&environment)?;
 
-        match self.launch(name, &environment, rules_path, options).await {
+        match self.launch(name, &environment, rules_path).await {
             Ok(handle) => {
                 self.record_started(name, &handle, None);
             }
@@ -259,7 +257,7 @@ impl Manager {
                         environment.listen().port
                     ),
                 );
-                let retried = self.reallocate_and_retry(name, &environment, options).await;
+                let retried = self.reallocate_and_retry(name, &environment).await;
                 match retried {
                     Ok(handle) => self.record_started(name, &handle, Some(&error)),
                     Err(second) => {
@@ -511,12 +509,12 @@ impl Manager {
     ///
     /// * **改描述随时可以**（纯展示字段）；
     /// * **规则文件的内容是热更新** —— 注入器按 mtime 重载**已绑定的那个路径**，不必重启；
-    /// * **改身份（改名 / 换端口）与换绑定必须先是停止状态**。这不是保守，是事实：
-    ///   实例在启动时通过 `--set envboard_rules=<path>` 拿到规则路径，运行中换绑定
-    ///   它根本看不见 —— 于是"配置说绑了 A、实例还在按 B 干活"，正是那种
-    ///   "看起来成功了但到处都对不上"的故障（状态文件的 `rules_count` 回显会把这种
-    ///   不一致如实报成 `config_mismatch`）。改名/换端口同理：客户端代理配置、
-    ///   状态文件、进程记录会同时失效。
+    /// * **改身份（改名 / 换端口）、换绑定与换选项必须先是停止状态**。这不是保守，是事实：
+    ///   实例在启动时通过 `--set envboard_rules=<path>` 与 `--set <key>=<value>` 拿到规则
+    ///   路径与选项，运行中换它们根本看不见 —— 于是"配置说绑了 A、实例还在按 B 干活"，
+    ///   正是那种"看起来成功了但到处都对不上"的故障（状态文件的 `rules_count` /
+    ///   `options_echo` 回显会把这种不一致如实报成 `config_mismatch`）。改名/换端口同理：
+    ///   客户端代理配置、状态文件、进程记录会同时失效。
     pub fn update(&self, name: &str, patch: &Value) -> Result<EnvView, Error> {
         let raw = self.require(name)?;
         let environment = Environment::from_json(&raw)?;
@@ -525,22 +523,26 @@ impl Manager {
         let identity_changed =
             merged.name() != environment.name() || merged.listen() != environment.listen();
         let binding_changed = merged.rules() != environment.rules();
-        if (identity_changed || binding_changed) && self.is_live(name) {
+        let options_changed = merged.options() != environment.options();
+        if (identity_changed || binding_changed || options_changed) && self.is_live(name) {
             return Err(Error::new(
                 ErrorCode::Conflict,
                 format!(
                     "environment {name:?} is running; stop it before changing its name, listen \
-                     address or rules binding (an instance reads the rules path at launch, so a \
-                     new binding cannot take effect; the bound file's contents do reload live). \
-                     Description changes are allowed while running."
+                     address, rules binding or instance options (an instance reads the rules path \
+                     and the options at launch, so new values cannot take effect; the bound \
+                     file's contents do reload live). Description changes are allowed while \
+                     running."
                 ),
             ));
         }
 
-        // 改了端口/绑定，**旧的失败标记就不再成立**：`port_conflict` 记的是"这个端口被占"，
-        // `config_mismatch` 记的是"回显与这份配置对不上"。不清理的话，用户刚把端口换到空位上，
-        // 界面仍会按旧标记报冲突 —— 而且用的是**新**端口号，等于在说谎。
-        let mark_is_stale = merged.listen() != environment.listen() || binding_changed;
+        // 改了端口/绑定/选项，**旧的失败标记就不再成立**：`port_conflict` 记的是"这个端口被占"，
+        // `config_mismatch` 记的是"回显与这份配置对不上"（很可能正是某个选项造成的）。
+        // 不清理的话，用户刚把端口换到空位上，界面仍会按旧标记报冲突 —— 而且用的是**新**端口号，
+        // 等于在说谎。
+        let mark_is_stale =
+            merged.listen() != environment.listen() || binding_changed || options_changed;
 
         let mut state = self.state.lock().unwrap();
         if merged.name() != environment.name() && state.find(merged.name()).is_some() {
@@ -580,6 +582,9 @@ impl Manager {
         }
         if merged.rules() != environment.rules() {
             changed.push("rules");
+        }
+        if merged.options() != environment.options() {
+            changed.push("options");
         }
         if merged.description() != environment.description() {
             changed.push("description");
@@ -962,8 +967,8 @@ impl Manager {
         name: &str,
         environment: &Environment,
         rules_path: Option<std::path::PathBuf>,
-        options: &BTreeMap<String, String>,
     ) -> Result<InstanceHandle, Error> {
+        let options = environment.options();
         let spec = InstanceSpec {
             env: name.to_string(),
             listen: environment.listen(),
@@ -989,7 +994,6 @@ impl Manager {
         &self,
         name: &str,
         environment: &Environment,
-        options: &BTreeMap<String, String>,
     ) -> Result<InstanceHandle, Error> {
         let mut exclude = BTreeSet::new();
         exclude.insert(environment.listen().port);
@@ -1008,7 +1012,7 @@ impl Manager {
         self.logger
             .log(LogLevel::Info, &format!("{name}: re-allocated port {port}"));
         let (rules_path, _) = self.resolve_rules(&updated)?;
-        self.launch(name, &updated, rules_path, options).await
+        self.launch(name, &updated, rules_path).await
     }
 
     fn record_started(&self, name: &str, handle: &InstanceHandle, retried: Option<&Error>) {
@@ -1093,6 +1097,7 @@ impl Manager {
             name: name.clone(),
             listen,
             rules: environment.rules().map(str::to_string),
+            options: environment.options().clone(),
             description: environment.description().to_string(),
             desired: state.desired_of(&name),
             health: self.health_blocking(&name, &environment, state),

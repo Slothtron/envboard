@@ -1,0 +1,24 @@
+{
+  "capability": "environment.validate",
+  "description": "每实例选项：键与值都是字符串，归一化后原样保留（环境层不解释它们的含义）",
+  "input": {
+    "name": "beta",
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "options": {
+      "ssl_insecure": "true",
+      "ssl_verify_upstream_trusted_ca": "/home/u/.envboard/shared/wps-sre-ca.pem"
+    },
+    "description": "证书由私有 CA 签发的测试机"
+  },
+  "expect": {
+    "ok": true,
+    "name": "beta",
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "rules": null,
+    "options": {
+      "ssl_insecure": "true",
+      "ssl_verify_upstream_trusted_ca": "/home/u/.envboard/shared/wps-sre-ca.pem"
+    },
+    "description": "证书由私有 CA 签发的测试机"
+  }
+}
