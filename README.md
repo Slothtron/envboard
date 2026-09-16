@@ -211,8 +211,8 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 | 层 | 手段 | 关键断言 |
 |---|---|---|
 | 文本纪律 | `cargo test -p envboard-policy-tests`（`naming` / `doc_scope` / `toolchain`） | 代码身份零命中发包标识；**入库文本不得引用不在仓库里的本地文档**（见下） |
-| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 58 个 fixture 由实现消费；`rules.parse` 两侧一致 |
-| 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
+| 契约 | `cargo test -p envboard-contract-tests` | 58 个 fixture 的形状与语义都由实现消费；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 |
+| 跨语言对拍 | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
 | 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
 | 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
 | M0.5 spike | `scripts/spike_m0_5.py` | 共享 CA 配对、HTTPS 改写与 SNI、连接复用、PDEATHSIG |

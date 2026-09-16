@@ -1,10 +1,9 @@
 //! Rust 侧消费 `core/spec/fixtures` 的契约测试。
 //!
-//! 与 Python 侧的 `scripts/verify_contract.py` 是**同一套语义的两个宿主**：
-//! 都按能力分发、都只比对 `expect` 里出现的键、都把失败用例的 `code` / `field`
-//! 当作断言。两侧的差异只有"谁来跑"——`environment.*` / `port.allocate` /
-//! `instance.reconcile` 只有 Rust 实现，`rules.parse` 另有逐字节对拍
-//! （`scripts/verify_dual_impl.py`）。
+//! 本文件是契约的**唯一**形状与语义宿主：按能力分发、只比对 `expect` 里出现的键、
+//! 把失败用例的 `code` / `field` 当作断言，并额外钉住 fixture 本身的形状
+//! （见 `every_fixture_pins_the_contract_shape`）。`rules.parse` 另有跨语言逐字节
+//! 对拍：`envboard-rules` 的 `dual_impl` 测试。
 //!
 //! 注意：契约断言**不跟随实现**。改实现让测试通过之前，先问"契约该不该改"，
 //! 该改就改 `core/spec/` 并同步 fixture。
@@ -25,7 +24,7 @@ fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../core/spec/fixtures")
 }
 
-/// 能力 → fixture 目录。与 `scripts/verify_contract.py` 的注册表一一对应。
+/// 能力 → fixture 目录。这份注册表就是契约的一部分，改它要同时改 `core/spec/`。
 const CAPABILITIES: &[(&str, &str)] = &[
     ("environment.validate", "environment"),
     ("environment.merge", "merge"),
@@ -375,7 +374,7 @@ fn fixture_directories_match_the_capability_registry() {
     assert_eq!(
         present, declared,
         "fixtures/ 下的目录与 capabilities 注册表必须一一对应（新增能力要同时改 \
-         core/spec/capabilities.md、scripts/verify_contract.py 与这里）"
+         core/spec/capabilities.md 与这里）"
     );
 
     let total: usize = CAPABILITIES
@@ -386,6 +385,71 @@ fn fixture_directories_match_the_capability_registry() {
         total, 58,
         "契约 fixture 总数变了：请同时更新 core/spec/ 与 README 里的数字"
     );
+}
+
+// --------------------------------------------------------------------------- //
+// fixture 形状：确保"绿"不是靠空断言换来的
+// --------------------------------------------------------------------------- //
+
+/// `load_cases` 已经钉住了这些：`capability` 与所在目录一致、`description` 非空、
+/// 有 `input`、有 `expect.ok`。这里补上它**没管**的两条 —— 它们才是"防呆"的要害：
+///
+/// 1. **失败用例必须钉住错误码**：只写 `ok: false` 的用例，实现回任何错误都能通过；
+/// 2. **成功用例至少要钉一个归一化字段**：只写 `ok: true` 同理，等于没断言。
+///
+/// 另外断言每个 fixture 都是注册目录下的 `.json`（形状校验与 fixture 消费者同处一地，
+/// 所以这条判据放在这里，而不是另立一个门禁）。
+#[test]
+fn every_fixture_pins_the_contract_shape() {
+    let root = fixtures_root();
+    let mut checked = 0;
+
+    for (capability, directory) in CAPABILITIES {
+        let dir = root.join(directory);
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()))
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        paths.sort();
+
+        for path in paths {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            assert!(
+                path.extension().is_some_and(|ext| ext == "json"),
+                "{capability}: {} 只能是 .json 形式的 golden case",
+                path.display()
+            );
+            checked += 1;
+
+            let raw = std::fs::read_to_string(&path).expect("fixture must be readable");
+            let value: Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|error| panic!("{}: invalid JSON: {error}", path.display()));
+            let expect = value["expect"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{}/{name}: expect must be an object", directory));
+
+            match expect.get("ok").and_then(Value::as_bool) {
+                Some(true) => assert!(
+                    expect.len() >= 2,
+                    "{capability}/{name}: 成功用例必须至少钉一个归一化字段（只有 ok 等于没断言）"
+                ),
+                Some(false) => assert!(
+                    expect
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| !c.is_empty()),
+                    "{capability}/{name}: 失败用例必须钉住 expect.code（否则实现回任何错误都能通过）"
+                ),
+                None => panic!("{capability}/{name}: expect.ok must be a boolean"),
+            }
+        }
+    }
+
+    assert!(checked > 0, "一个 fixture 都没扫到：路径或注册表坏了");
 }
 
 #[test]

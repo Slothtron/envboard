@@ -30,7 +30,12 @@ cd "$ROOT"
 LOCKED=(--locked --offline)
 
 # 适配器宿主的解释器。**只用于跑适配器脚本**，探测不到时由 require_interpreter 响亮失败。
-if [[ -z "${PYTHON:-}" ]]; then
+#
+# 探测不到时把变量**赋成空串**而不是留着不定义：`set -u` 下未定义会让 `"$PYTHON" …`
+# 以 "unbound variable" 直接终止整个脚本（实测踩过：默认层跑到 artifact 就没了下文，
+# 连"缺解释器"这句话都来不及打）。空串只会让那一步失败，`run` 照旧继续往下走。
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     PYTHON=python3
   elif command -v python >/dev/null 2>&1; then
@@ -56,7 +61,7 @@ run() {
 
 # 缺解释器**响亮失败**，并给出两条出路；不静默跳过（跳过等于护栏消失）。
 require_interpreter() {
-  if [[ -n "${PYTHON:-}" ]]; then
+  if [[ -n "$PYTHON" ]]; then
     return 0
   fi
   echo ""
@@ -74,13 +79,7 @@ require_interpreter() {
 
 step_policy() {
   run "policy/gates" cargo test -p envboard-policy-tests "${LOCKED[@]}"
-  # ↓↓↓ 迁移期：编译检查还是 Python 脚本；`dual` 落地后它也被 Rust 侧取代
-  #     （见 envboard-policy-tests 的 PENDING 白名单）。
-  require_interpreter || return 0
-  run "policy/compile" step_compile
 }
-
-step_compile()   { "$PYTHON" scripts/compile_check.py; }
 
 # --------------------------------------------------------------------------- #
 # rust 层：格式 / lint / 编译 / 单测
@@ -107,13 +106,8 @@ step_rust() {
 # contract 层：fixture 形状 + 两侧消费
 # --------------------------------------------------------------------------- #
 
-step_contract_script() { "$PYTHON" scripts/verify_contract.py; }
-step_contract_rust()   { cargo test -p envboard-contract-tests "${LOCKED[@]}"; }
-
 step_contract() {
-  require_interpreter || return 0
-  run "contract-shape" step_contract_script
-  run "contract-tests" step_contract_rust
+  run "contract-tests" cargo test -p envboard-contract-tests "${LOCKED[@]}"
 }
 
 # --------------------------------------------------------------------------- #
@@ -130,7 +124,11 @@ step_clean() {
 
 step_pack() { step_clean; "$PYTHON" scripts/artifact_check.py; }
 
-step_artifact() { run "artifact" step_pack; }
+step_artifact() {
+  # 发布物检查这一阶段还要解释器（旧脚本）；S4 之后它是纯 cargo 步骤。
+  require_interpreter || return 0
+  run "artifact" step_pack
+}
 
 # --------------------------------------------------------------------------- #
 # adapter 层：宿主适配器（对拍 + 冒烟）
@@ -139,7 +137,7 @@ step_artifact() { run "artifact" step_pack; }
 # 它需要解释器，而且解释器缺失时要**响亮失败**，不静默跳过。
 # --------------------------------------------------------------------------- #
 
-step_dual() { "$PYTHON" scripts/verify_dual_impl.py; }
+step_dual() { cargo test -p envboard-rules --test dual_impl "${LOCKED[@]}" -- --ignored; }
 
 # 冒烟（不需要 mitmproxy）：二进制能跑、注入器物化与 --render 都通。
 step_smoke() {
@@ -202,7 +200,6 @@ case "$STEP" in
   adapter)       step_adapter ;;
   smoke)         step_smoke ;;
   dual)          step_dual ;;
-  compile)       step_compile ;;
   rust-fmt)      step_rust_fmt ;;
   rust-clippy)   step_rust_clippy ;;
   rust-check)    step_rust_check ;;

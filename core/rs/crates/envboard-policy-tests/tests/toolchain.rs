@@ -22,10 +22,7 @@ use common::{find_dirs, has_word, read_text, report, walk_relative, workspace_ro
 const PENDING: &[&str] = &[
     "package.json",
     "scripts/artifact_check.py",
-    "scripts/compile_check.py",
     "scripts/spike_m0_5.py",
-    "scripts/verify_contract.py",
-    "scripts/verify_dual_impl.py",
     "scripts/verify_live_v2.py",
 ];
 
