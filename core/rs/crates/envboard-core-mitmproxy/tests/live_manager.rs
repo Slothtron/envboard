@@ -239,9 +239,15 @@ async fn manager_drives_real_mitmdump_and_rules_really_take_effect() {
         "logs must survive a stop (the file is not tied to the running entry)"
     );
 
-    // 契约回显端到端：下发一个**不存在**的选项 —— 宿主会静默忽略，只有注入器能发现
-    let bogus = std::collections::BTreeMap::from([("no_such_option".to_string(), "1".to_string())]);
-    let _ = manager.start_with_options("beta", &bogus).await;
+    // 契约回显端到端：下发一个**不存在**的选项 —— 宿主会静默忽略，只有注入器能发现。
+    // 选项是环境的持久化配置，所以先写进环境（此时已停止）再启动。
+    manager
+        .update(
+            "beta",
+            &serde_json::json!({"options": {"no_such_option": "1"}}),
+        )
+        .unwrap();
+    let _ = manager.start("beta").await;
     match manager.health("beta").await.unwrap() {
         InstanceHealth::ConfigMismatch { reason } => assert!(
             reason.contains("no_such_option"),

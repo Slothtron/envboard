@@ -41,13 +41,14 @@ environment.validate  ←  environment.merge
 
 ### 环境（`Environment`）
 
-v1 有 8 个字段，v2 收成 4 个，v2.1 增加第 5 个 `proxy_auth`：
+v1 有 8 个字段，v2 收成 5 个，v2.1 增加第 6 个 `proxy_auth`：
 
 | 字段 | JSON 形状 | 约束 |
 |---|---|---|
 | `name` | `string` | 见下（唯一标识，也是持久化主键） |
 | `listen` | `{host, port}` | `host` 是 IP 字面量（默认 `127.0.0.1`，可为 `0.0.0.0` 对外服务）；`port` 见下 |
 | `rules` | `string \| null` | 规则名（**不是路径**，见本文件「规则文件（rules）语义」） |
+| `options` | `{string: string}` | 透传给 core 的每实例选项（默认 `{}`）；受 denylist 约束，见下 |
 | `description` | `string` | 可空；最长 200 字符 |
 | `proxy_auth` | `string \| null` | 代理访问鉴权，`user:password` 形态；`null` = 不启用（默认）。见下 |
 
@@ -83,20 +84,34 @@ v1 有 8 个字段，v2 收成 4 个，v2.1 增加第 5 个 `proxy_auth`：
 7. **未知字段必须失败**，禁止静默忽略（`field` 指出该字段的点分路径）。
    这条在 v2 里多了一层意义：v1 的 `dns_servers`、`hosts`、`color`、`domain_suffix`
    **现在会响亮报错**，而不是被当成"没用的字段"默默收下（有 fixture 钉住这一点）。
+7. **`options`**：`core` 特有配置进入实例的**唯一通道**（`InstanceSpec.options`）在
+   环境上的持久化来源。形状是 `{key: value}`，**键与值都是字符串**（`--set key=value`
+   的语义），省略时取默认 `{}`。约束：
+   - 键必须非空，且不含空白与 `=`（否则无法拼成 `--set`）；
+   - 每个键都要过 `validate_options` 的 denylist（管理器自有键、会改变进程拓扑或加载
+     第三方代码的键、`envboard_` 前缀）—— 命中即 `invalid_config`；
+   - 失败时 `field = environment.options`（`options` 不是对象，或键为空字符串）或
+     `environment.options.<key>`（键含空白/`=` / 值不是字符串 / 命中 denylist）。
+   - **值不由本能力解释**：core 才认识 `ssl_insecure` 这类键，环境层只负责"存下来、
+     原样下发、并保证同一份配置在每次启动（含 reconcile）都一致"。
 
 ### 归一化与默认值：只有一个来源
 
-默认值（`listen.host = 127.0.0.1`、`rules = null`、`description = ""`、`proxy_auth = null`）在 core 里定义
-**一次**。宿主配置只做映射，适配器**禁止**再写一份默认值。
+默认值（`listen.host = 127.0.0.1`、`rules = null`、`options = {}`、`description = ""`、
+`proxy_auth = null`）在 core 里定义**一次**。宿主配置只做映射，适配器**禁止**再写一份默认值。
 `environment.validate` 的输出即"归一化后的完整记录"，可直接持久化。
 
 ### 编辑已有环境（PATCH 语义）
 
 环境是**可改的**，不必删了重建。请求体是"要改的字段"的集合，没出现的字段一律不动
-（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 5 个，未知字段照样失败。
+（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 6 个，未知字段照样失败。
 
 `rules: null` 与"没给 `rules`"是**两件事**：前者是"解绑，回到不覆盖"，后者是"别动绑定"。
 工作台与 CLI 都必须显式表达解绑（工作台的下拉里「不覆盖」会发出 `null`）。
+
+`options` 与 `listen` 同款：**整体替换**，不是深合并 —— 给出来的对象就是新值，
+`null` 即清空回 `{}`。键删除靠"给出不含该键的新对象"，不靠深合并里缺省即删除
+（后者会让"漏写一个键"静默变成"删掉一个选项"）。
 
 哪些改动**要求环境处于停止状态**，由"运行中的实例会不会因此与配置分叉"裁决：
 
@@ -104,6 +119,7 @@ v1 有 8 个字段，v2 收成 4 个，v2.1 增加第 5 个 `proxy_auth`：
 |---|---|---|
 | `description` | ✅ 允许 | 纯展示字段，实例不读它 |
 | `rules` **绑定** | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set envboard_rules=<path>` 固定规则**路径**；换绑定它看不见，于是"配置说绑了 A、实例仍按 B 干活" |
+| `options` | ❌ 拒绝（`conflict`） | 选项同样在启动时经 `--set` 固定；运行中改它，实例仍按旧值工作，而配置已经说新值了 |
 | `name` / `listen` | ❌ 拒绝（`conflict`） | 它们是环境的身份：客户端代理配置、状态文件、进程记录会同时失效 |
 | `proxy_auth` | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set proxyauth=…` 拿到凭据，运行中换不上 |
 | 规则文件的**内容** | ✅ 热重载 | 注入器按 mtime 重读**已绑定的那个路径**（间隔 `--reload-interval`），绑定没变就不必重启 |
@@ -114,8 +130,9 @@ v1 有 8 个字段，v2 收成 4 个，v2.1 增加第 5 个 `proxy_auth`：
 进程记录都跟着搬到新名字下，旧名字在账本里消失。改名**不搬日志文件** —— 日志按名字落盘，
 新名字从新文件开始（见 `instance.logs`）。
 
-改了 `listen`、`rules` 绑定或 `proxy_auth` 即作废**旧的失败标记**（`port_conflict` / `config_mismatch`）：
-那两个标记陈述的是"上一个配置失败了"，留着它会让界面拿**新**端口号报旧冲突。
+改了 `listen`、`rules` 绑定、`options` 或 `proxy_auth` 即作废**旧的失败标记**
+（`port_conflict` / `config_mismatch`）：那两个标记陈述的是"上一个配置失败了"，留着它
+会让界面拿**新**配置报旧冲突（`config_mismatch` 尤其可能正是由某个选项或凭据引起的）。
 
 ## 端口分配（`port.allocate`）
 
@@ -228,6 +245,11 @@ v1 有 8 个字段，v2 收成 4 个，v2.1 增加第 5 个 `proxy_auth`：
 core 特有配置进入实例的通道，但它必须有 denylist**（管理器自有键如 `listen_port` /
 `confdir`，以及会改变进程拓扑或加载第三方代码的键如 `mode` / `scripts`），
 命中即 `invalid_config`。
+
+**选项的来源只有一个：环境上的 `options` 字段**（已持久化）。启动与 reconcile 都从它
+取值，**没有"本次启动临时覆盖"的第二条通道** —— 那会让手动启动的实例与账本里的配置
+分叉，而 reconcile 之后又按账本把实例拉回另一套值。改选项走 `environment.merge`，
+且要求环境已停止（理由与换规则绑定相同：选项在启动时经 `--set` 固定）。
 
 **改写上连地址的已知代价**（写进契约以免被当成实现缺陷）：
 上游连接池按地址匹配，改写后地址与请求 host 不再相等 → **该 host 的上游连接不复用**，

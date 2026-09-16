@@ -297,9 +297,43 @@ function matchesFilter(env) {
 function matchesSearch(env) {
   const needle = state.search.trim().toLowerCase();
   if (!needle) return true;
-  return [env.name, String(env.listen.port), env.rules || "", env.description || ""].some((value) =>
-    value.toLowerCase().includes(needle),
-  );
+  return [
+    env.name,
+    String(env.listen.port),
+    env.rules || "",
+    env.description || "",
+    optionPairs(env).join(" "),
+  ].some((value) => value.toLowerCase().includes(needle));
+}
+
+/// 「实例选项」在界面上的统一写法：每项一行 `K=V`（与 CLI 的 `--option K=V` 同形）。
+function optionPairs(env) {
+  return Object.entries(env.options || {}).map(([key, value]) => `${key}=${value}`);
+}
+
+/// 有显式开关的选项键 —— 开关是它**唯一**的编辑入口（文本框里不允许再写一遍，
+/// 否则同一份配置有两个真相）。加开关：这里加一条 + index.html 加一块控件。
+const OPTION_SWITCHES = [{ key: "ssl_insecure", on: "true" }];
+
+/// 只有明确的"开"值才算打开；未知/缺失一律按关处理（`ssl_insecure` 是布尔选项）。
+const OPTION_ON_VALUES = new Set(["true", "1", "yes", "on"]);
+
+const switchKeys = () => OPTION_SWITCHES.map((item) => item.key);
+
+/// 运行中必须锁住的控件：名字 / 端口 / 规则绑定，以及**全部**选项入口
+/// （文本框 + 每一个开关）—— 选项在启动时经 `--set` 固定，运行中改服务端会拒。
+const editableOptionFields = () => ["name", "port", "rules", "options", ...switchKeys()];
+
+function optionSwitchedOn(env, key) {
+  return OPTION_ON_VALUES.has(String((env.options || {})[key] ?? "").trim().toLowerCase());
+}
+
+/// 文本框里该显示的选项：把有开关的键摘掉（它们归开关管）。
+function manualOptionPairs(env) {
+  const owned = new Set(switchKeys());
+  return Object.entries(env.options || {})
+    .filter(([key]) => !owned.has(key))
+    .map(([key, value]) => `${key}=${value}`);
 }
 
 const visibleEnvironments = () =>
@@ -664,6 +698,8 @@ function renderOverview(env) {
   document.getElementById("ov-desired").textContent = healthLabel(env.desired);
   document.getElementById("ov-rules").textContent = env.rules || "（不覆盖）";
   document.getElementById("ov-rules-count").textContent = env.rules ? String(env.rules_count) : "—";
+  const options = optionPairs(env);
+  document.getElementById("ov-options").textContent = options.length ? options.join(" ") : "—";
   document.getElementById("ov-desc").textContent = env.description || "—";
   document.getElementById("ov-auth").textContent = env.proxy_auth_enabled ? "已启用" : "未启用";
   const command = document.getElementById("ov-cmd");
@@ -1062,6 +1098,8 @@ function startEdit(env) {
   field(form, "description").value = env.description || "";
   ensureRuleOption(env.rules);
   field(form, "rules").value = env.rules || "";
+  for (const item of OPTION_SWITCHES) field(form, item.key).checked = optionSwitchedOn(env, item.key);
+  field(form, "options").value = manualOptionPairs(env).join("\n");
   // 对外服务 = listen.host 是否非回环；凭据本身不回显（只进不出的字段），
   // 编辑时显式发 null/值 由"输入框是否为空"决定。
   field(form, "public").checked = !isLoopbackHost(env.listen.host);
@@ -1079,21 +1117,21 @@ function startEdit(env) {
   field(form, "name").focus();
 }
 
-/// 运行中只允许改描述：名字 / 端口 / 规则绑定都会让运行中的实例与配置对不上
-/// （实例启动时就固定了规则路径与监听端口），服务端也会拒。界面先把这条路封住，
-/// 免得用户改了再吃一个红字。状态变了要重新同步 —— 表单还开着的时候环境可能被停掉。
+/// 运行中只允许改描述：名字 / 端口 / 规则绑定 / 实例选项都会让运行中的实例与配置对不上
+/// （实例启动时就固定了规则路径、监听端口与 `--set` 选项），服务端也会拒。界面先把这条路
+/// 封住，免得用户改了再吃一个红字。状态变了要重新同步 —— 表单还开着的时候环境可能被停掉。
 function syncEditLock(env) {
   const form = document.getElementById("env-form");
   const locked = env.health === "running";
-  for (const name of ["name", "port", "rules", "public", "proxy_auth"]) {
+  for (const name of ["name", "port", "rules", "public", "proxy_auth", ...editableOptionFields()]) {
     const input = field(form, name);
     input.disabled = locked;
     input.title = locked ? "运行中不能改：先点「停止」" : "";
   }
   document.getElementById("env-form-hint").textContent = locked
-    ? `编辑 ${env.name}：实例在运行，只能改描述。改名 / 换端口 / 换绑定 / 改鉴权要先停止。` +
+    ? `编辑 ${env.name}：实例在运行，只能改描述。改名 / 换端口 / 换绑定 / 换选项 / 改鉴权要先停止。` +
       `（规则文件的内容是热重载的 —— 去「规则库」改那份文件，实例会自己跟上。）`
-    : `编辑 ${env.name}：改完点「保存」。规则绑定在下次启动时生效。`;
+    : `编辑 ${env.name}：改完点「保存」。规则绑定与实例选项在下次启动时生效。`;
 }
 
 function ensureRuleOption(name) {
@@ -1109,7 +1147,7 @@ function cancelEdit() {
   const form = document.getElementById("env-form");
   state.editing = null;
   form.dataset.editing = "";
-  for (const name of ["name", "port", "rules", "public", "proxy_auth"]) {
+  for (const name of ["name", "port", "rules", "public", "proxy_auth", ...editableOptionFields()]) {
     const input = field(form, name);
     input.disabled = false;
     input.title = "";
@@ -1124,26 +1162,71 @@ function cancelEdit() {
   document.getElementById("env-form-hint").textContent = "";
 }
 
-/// 表单 → 请求体。创建与编辑共用，差别只有两处（都写在下面，避免两份字段映射漂移）：
+/// 把「实例选项」文本框折成契约里的 `options` 对象。每行一个 `K=V`，空行忽略。
+///
+/// 这一层只做拆分：键合不合法（denylist、空键、非 `K=V` 行）由服务端裁决 ——
+/// 判定权在 core，前端不复制一份键表，只在服务端返回字段错误时把它标到这一栏。
+function parseOptionLines(text) {
+  const options = {};
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const index = line.indexOf("=");
+    if (index <= 0) {
+      return {
+        error: {
+          field: "environment.options",
+          message: `实例选项要写成 K=V，这一行看不出键：${line}`,
+        },
+      };
+    }
+    options[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+  }
+  return { options };
+}
+
+/// 表单 → 请求体。创建与编辑共用，差别只有三处（都写在下面，避免两份字段映射漂移）：
 ///
 /// * 编辑时 `rules` / `proxy_auth` **总是显式给值**（空选 = `null` = 不启用/清除）：
 ///   PATCH 里"没给这个字段"才是"不动它"，所以想解绑或清掉凭据就必须真的把 null 发出去；
+/// * 编辑时 `options` **总是显式给值**（空 = `{}` = 清空全部选项）：`options` 是整体替换，
+///   同款理由 —— 不显式给就永远删不掉一个选项；
 /// * 编辑时端口栏留空 = 保持当前端口（不写 `listen`），创建时留空 = 自动分配。
 ///
 /// `listen` 是**整体替换**（契约如此），所以 host 与 port 要么都发、要么都不发：
 /// 对外服务开关只切 host（`0.0.0.0` ↔ `127.0.0.1`），端口沿用输入框或当前值。
 /// 创建时勾了对外服务却留空端口：自动分配是管理器的职责，契约里 `listen.port`
 /// 必填，这里直接拦下并提示 —— 与其让服务端报错，不如当场说清。
+///
+/// 选项有两个来源：**开关**（`OPTION_SWITCHES`，勾上 = 写入它规定的"开"值，不勾 = 不写这个键）
+/// 与**文本框**（其余 K=V）。同一个键不允许两处都写 —— 那是同一份配置的两个真相，
+/// 所以在文本框里出现开关键时直接报字段错误。
 function formPayload(form, editing) {
   const port = field(form, "port").value.trim();
   const rules = field(form, "rules").value;
   const publicBind = field(form, "public").checked;
   const proxyAuth = field(form, "proxy_auth").value.trim();
   const host = publicBind ? "0.0.0.0" : "127.0.0.1";
+  const parsed = parseOptionLines(field(form, "options").value);
+  if (parsed.error) throw parsed.error;
+  const duplicated = switchKeys().filter((key) =>
+    Object.prototype.hasOwnProperty.call(parsed.options, key),
+  );
+  if (duplicated.length) {
+    throw {
+      field: "environment.options",
+      message: `${duplicated.join(" / ")} 由上面的开关控制，别在文本框里重复配置。`,
+    };
+  }
+  const options = parsed.options;
+  for (const item of OPTION_SWITCHES) {
+    if (field(form, item.key).checked) options[item.key] = item.on;
+  }
   const payload = { name: field(form, "name").value.trim(), description: field(form, "description").value };
   if (editing) {
     payload.rules = rules || null;
     payload.proxy_auth = proxyAuth || null;
+    payload.options = options;
     // host 没变且端口留空 → 不发 listen（免得"看起来改了其实只是原样重发"）
     const current = state.environments.find((env) => env.name === state.editing);
     const hostChanged = !current || current.listen.host !== host;
@@ -1154,6 +1237,7 @@ function formPayload(form, editing) {
     }
   } else {
     if (rules) payload.rules = rules;
+    if (Object.keys(options).length) payload.options = options;
     if (proxyAuth) payload.proxy_auth = proxyAuth;
     if (publicBind && !port) {
       const portInput = field(form, "port");

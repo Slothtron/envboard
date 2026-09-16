@@ -11,10 +11,28 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Added（环境级实例选项）
+
+- `Environment.options`：每实例选项**持久化在环境上**（`{K: V}` 字符串对，默认 `{}`），
+  启动与 reconcile 都从它取值。修掉的是"逃生门写在契约里、却没有落地路径"的缺口 ——
+  例如上游用私有 CA 签证书时，`ssl_insecure=true` / `ssl_verify_upstream_trusted_ca`
+  以前只能在直连模式临时下发，常驻工作台下根本带不上。
+  - `envboard env add/edit --option K=V`（`edit` 另有 `--no-options` 清空）；改选项要求
+    环境已停止，与换绑定同款 —— 选项在启动时经 `--set` 固定，运行中改它实例看不见。
+  - 工作台「配置」表单两个入口：**显式开关**（目前 `ssl_insecure` 一项，勾选即
+    `ssl_insecure=true`；开关是该键唯一的编辑入口，文本框里重复写会报字段错误）+
+    「其他实例选项」文本框（每行 `K=V`，放其余的 core 选项）。「概览」新增一个展示格；
+    运行中开关与文本框都跟随名字 / 端口 / 规则一起锁住。
+  - **去掉 `env start --option`**：没有"本次启动临时覆盖"这第二条通道 —— 否则手动启动的
+    实例与账本里的配置会分叉，而 reconcile 之后又按账本把它拉回另一套值。
+  - denylist 判定权仍在 core（`validate_options`，环境层不复制一份键表）；命中时错误
+    路径是 `environment.options.<key>`，在**写入**（create / PATCH）时就失败，不留坏配置。
+  - 契约新增 8 个 `environment/` + 3 个 `merge/` golden case（总数 40 → 51）。
+
 ### Changed (breaking)
 
-- `core/spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段收为 4 字段
-  （`name` / `listen` / `rules` / `description`；后来在安全增强中补第 5 个
+- `core/spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段收为 5 字段
+  （`name` / `listen` / `rules` / `options` / `description`；后来在安全增强中补第 6 个
   `proxy_auth`）。删除 `dns_servers`、`hosts`、
   `domain_suffix`、`color`、`labels` 与 mapping / annotate / activate / resolve
   全部语义 —— v2 的切换模型是"一个环境 = 一个独立实例 + 一个独立端口"，
@@ -25,9 +43,9 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   `config_mismatch` / `unhealthy` / `failed`）。
 - 契约 fixture **重新基线化**：v1 的 11 个 `environment/` + 2 个 `merge/` 全部重写
   （它们测的是被删除的字段），新增 `ports/` 与 `lifecycle/` 两组。
-  现状：`environment/` 22（原 15，安全增强补 7 个 `proxy_auth` / `0.0.0.0` 用例）
-  + `merge/` 5 + `rules/` 8（**原样保留**）+ `ports/` 6
-  + `lifecycle/` 6 = **47** 个。
+  现状：`environment/` 30（原 15，每实例选项补 8 个、安全增强补 7 个
+  `proxy_auth` / `0.0.0.0` 用例）+ `merge/` 8（原 5，选项 PATCH 语义补 3）
+  + `rules/` 8（**原样保留**）+ `ports/` 6 + `lifecycle/` 6 = **58** 个。
 
 ### Added
 
@@ -41,7 +59,7 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   不得依赖运行时）。已实现的部分：
   - `envboard-core-api`：`ProxyCore` trait、`InstanceSpec`、`StatusReport`、统一错误码、
     `ClockPort`/`LoggerPort`、`InstanceSpec.options` 的 denylist。
-  - `envboard-domain`：4 字段环境模型（校验/归一化/PATCH 合并）、端口选择
+  - `envboard-domain`：6 字段环境模型（校验/归一化/PATCH 合并）、端口选择
     （`port.allocate` 的全部规则）、reconcile 决策（孤儿清理与 PID 复用保护）。
   - `envboard-rules`：hosts 解析与**确定性渲染**，与 Python 侧在 63 个用例上逐字节一致。
   - `envboard-core-fake`：只监听端口的测试替身 core —— **管理器测试因此完全不依赖
@@ -49,7 +67,7 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   - `envboard-manager`：环境 CRUD、随机端口分配与持久化、状态存储（原子写 + 0600）、
     单实例锁（flock）、健康判定（状态文件为主 + 契约回显比对）、reconcile、规则导入。
   - `envboard-cli`：`envboard` 二进制（`env`, `rules`, `run`, `status`）。
-  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 47 个 golden case**。
+  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 58 个 golden case**。
 - `scripts/verify_dual_impl.py`：跨语言对拍门禁 —— 63 个用例里 Rust 与 Python 输出必须
   逐字节一致，**已知分歧必须显式声明**（声明了却不再分歧也会失败，防止白名单掩盖新分歧）。
 - `scripts/rust_dependency_lint.py`：Rust 侧的依赖方向与纯度门禁（含"纯逻辑 crate 不得
@@ -171,15 +189,15 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 ### Added（编辑已有环境）
 
 - **工作台的「编辑」**：每行一个入口，把「新建环境」表单切到编辑模式（名字 / 端口 / 规则
-  绑定 / 描述四个字段全可改），提交走 `PATCH /api/environments/:name`。之所以复用同一个
-  表单而不是行内编辑：字段集本来一样，两套 DOM 迟早不一致（v1 的教训）。
-  实例**运行中**会把名字 / 端口 / 绑定三个输入框锁住并说明原因，只放开描述 ——
+  绑定 / 实例选项 / 描述五个字段全可改），提交走 `PATCH /api/environments/:name`。之所以
+  复用同一个表单而不是行内编辑：字段集本来一样，两套 DOM 迟早不一致（v1 的教训）。
+  实例**运行中**会把名字 / 端口 / 绑定 / 选项四个输入框锁住并说明原因，只放开描述 ——
   服务端仍会拒绝，但界面先把这条路封住，免得用户改完再吃一个红字。
 - **规则库的「载入」**：把已导入的规则文件原文取回表单再改。原来只有「导入」，
   改一份规则等于盲覆盖（实测 10.8 KB 的规则文件就是这么被当成"没法编辑"的）。
-- **CLI `env edit`**：`--rename` / `--port` / `--rules` / `--no-rules` / `--description`，
-  空 patch 响亮失败（而不是"成功但什么都没改"）。与工作台**共用同一份** PATCH 构造，
-  避免两处字段映射漂移。`ApiClient` 因此补了 `patch()`。
+- **CLI `env edit`**：`--rename` / `--port` / `--rules` / `--no-rules` / `--option` /
+  `--no-options` / `--description`，空 patch 响亮失败（而不是"成功但什么都没改"）。
+  与工作台**共用同一份** PATCH 构造，避免两处字段映射漂移。`ApiClient` 因此补了 `patch()`。
 - **CLI `rules show`**：取回规则文件原文（改之前先看，同样是防盲覆盖）。
 - 实机断言：`verify_live_v2.py` 新增 check 10 —— 运行中换绑定返回 409、描述热改 200、
   停止后补绑规则并改名换端口后，**真 mitmdump 按新配置把域名送到上游**（未绑定时是 502）。

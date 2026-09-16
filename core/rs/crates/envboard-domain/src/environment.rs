@@ -1,17 +1,25 @@
 //! 环境（`Environment`）领域模型 —— 纯逻辑，不碰 fs / 网络 / 宿主。
 //!
-//! 契约见 `core/spec/capabilities.md`（§领域不变量）。v2 把 v1 的 8 字段收成 4 个：
-//! `name` / `listen` / `rules` / `description`；v2.1 增加第 5 个字段 `proxy_auth`
-//! （代理访问鉴权，`user:password`）。被删除的字段（`dns_servers`、`hosts`、
-//! `domain_suffix`、`color`…）现在会**响亮失败**，不会被当成无用字段收下。
+//! 契约见 `core/spec/capabilities.md`（§领域不变量）。v2 把 v1 的 8 字段收成 5 个：
+//! `name` / `listen` / `rules` / `options` / `description`；v2.1 增加第 6 个字段
+//! `proxy_auth`（代理访问鉴权，`user:password`）。被删除的字段（`dns_servers`、
+//! `hosts`、`domain_suffix`、`color`…）现在会**响亮失败**，不会被当成无用字段收下。
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, Listen};
+use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, Listen, validate_options};
 use serde_json::{Map, Value};
 
 /// 对外 JSON 形状里的字段名（未知字段判定用同一张表）。
-pub const KNOWN_FIELDS: &[&str] = &["name", "listen", "rules", "description", "proxy_auth"];
+pub const KNOWN_FIELDS: &[&str] = &[
+    "name",
+    "listen",
+    "rules",
+    "options",
+    "description",
+    "proxy_auth",
+];
 
 /// 契约里的路径前缀 —— 所有 `field` 都从它开始。
 pub const PATH: &str = "environment";
@@ -25,12 +33,13 @@ pub const DESCRIPTION_MAX_CHARS: usize = 200;
 /// `proxy_auth`（`user:password`）总长上限。
 pub const PROXY_AUTH_MAX_LEN: usize = 128;
 
-/// 一个环境 = 一个监听端口 + 一份可选的规则绑定。
+/// 一个环境 = 一个监听端口 + 一份可选的规则绑定 + 一组透传给 core 的选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
     name: String,
     listen: Listen,
     rules: Option<String>,
+    options: BTreeMap<String, String>,
     description: String,
     proxy_auth: Option<String>,
 }
@@ -40,12 +49,14 @@ impl Environment {
         name: impl Into<String>,
         listen: Listen,
         rules: Option<String>,
+        options: BTreeMap<String, String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
             listen,
             rules,
+            options,
             description: description.into(),
             proxy_auth: None,
         }
@@ -61,6 +72,11 @@ impl Environment {
 
     pub fn rules(&self) -> Option<&str> {
         self.rules.as_deref()
+    }
+
+    /// 透传给 core 的每实例选项（**已过 denylist**）。环境层不解释它们的含义。
+    pub fn options(&self) -> &BTreeMap<String, String> {
+        &self.options
     }
 
     pub fn description(&self) -> &str {
@@ -86,6 +102,16 @@ impl Environment {
                 Some(name) => Value::String(name.clone()),
                 None => Value::Null,
             },
+        );
+        // `options` 始终存在（空也是 `{}`）：归一化输出是确定性的，diff 才稳定。
+        out.insert(
+            "options".into(),
+            Value::Object(
+                self.options
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                    .collect(),
+            ),
         );
         out.insert(
             "description".into(),
@@ -128,6 +154,7 @@ impl Environment {
 
         let (host, port) = parse_listen(object.get("listen"))?;
         let rules = normalize_rules(object.get("rules"))?;
+        let options = parse_options(object.get("options"))?;
         let description = parse_description(object.get("description"))?;
         let proxy_auth = parse_proxy_auth(object.get("proxy_auth"))?;
 
@@ -135,6 +162,7 @@ impl Environment {
             name,
             listen: Listen::new(host, port),
             rules,
+            options,
             description,
             proxy_auth,
         })
@@ -388,6 +416,62 @@ fn parse_proxy_auth(value: Option<&Value>) -> Result<Option<String>, Error> {
     Ok(Some(text.to_string()))
 }
 
+/// `options` 解析：省略/`null` = 空对象；否则必须是 `{string: string}`，
+/// 且每个键都要过 [`validate_options`] 的 denylist（管理器自有键、拓扑键、`envboard_`
+/// 前缀）。
+///
+/// **值不由本层解释**：`ssl_insecure` 这类键只有 core 认识，环境层只负责存下、
+/// 原样下发，并保证同一份配置在每次启动（含 reconcile）都一致。
+fn parse_options(value: Option<&Value>) -> Result<BTreeMap<String, String>, Error> {
+    let field = format!("{PATH}.options");
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    if value.is_null() {
+        return Ok(BTreeMap::new());
+    }
+    let object = value.as_object().ok_or_else(|| {
+        Error::invalid_config(&field, format!("options must be an object, got {value}"))
+    })?;
+
+    let mut options = BTreeMap::new();
+    for (key, raw) in object {
+        if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c == '=') {
+            return Err(Error::invalid_config(
+                &field,
+                format!(
+                    "invalid option key {key:?}: must be non-empty and contain no whitespace or \
+                     '=' (the key has to survive the `--set key=value` round trip)"
+                ),
+            ));
+        }
+        let text = raw.as_str().ok_or_else(|| {
+            Error::invalid_config(
+                format!("{field}.{key}"),
+                format!("option {key:?} must have a string value, got {raw}"),
+            )
+        })?;
+        options.insert(key.clone(), text.to_string());
+    }
+
+    // denylist 只有 core 侧那一份（这里不复制，避免两处漂移）；命中的错误路径是
+    // `instance.options.<key>`，改写成环境层的字段路径再往外报。
+    if let Err(error) = validate_options(&options) {
+        let key = error
+            .field
+            .as_deref()
+            .and_then(|field| field.strip_prefix("instance.options."))
+            .unwrap_or_default();
+        let path = if key.is_empty() {
+            field.clone()
+        } else {
+            format!("{field}.{key}")
+        };
+        return Err(Error::invalid_config(path, error.message));
+    }
+    Ok(options)
+}
+
 /// 裸 IP 字面量解析：见 [`envboard_core_api::parse_ip_literal`]。
 ///
 /// 刻意**不接受**主机名与 `ip:port`：监听地址是环境的对外身份，
@@ -508,10 +592,69 @@ mod tests {
     }
 
     #[test]
+    fn options_default_to_empty_and_round_trip() {
+        let env =
+            Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
+        assert!(env.options().is_empty());
+        assert_eq!(env.to_json()["options"], json!({}));
+
+        let env = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "options": {"ssl_insecure": "true"}
+        }))
+        .unwrap();
+        assert_eq!(
+            env.options().get("ssl_insecure").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(env.to_json()["options"], json!({"ssl_insecure": "true"}));
+    }
+
+    #[test]
+    fn options_denylist_is_reported_with_the_environment_field_path() {
+        for (key, expected_field) in [
+            ("listen_port", "environment.options.listen_port"),
+            ("scripts", "environment.options.scripts"),
+            ("web_port", "environment.options.web_port"),
+            ("envboard_rules", "environment.options.envboard_rules"),
+        ] {
+            let error = Environment::from_json(&json!({
+                "name": "gray",
+                "listen": {"port": 16600},
+                "options": {key: "x"}
+            }))
+            .unwrap_err();
+            assert_eq!(error.code, envboard_core_api::ErrorCode::InvalidConfig);
+            assert_eq!(error.field.as_deref(), Some(expected_field));
+        }
+    }
+
+    #[test]
     fn patch_rejects_unknown_fields_still() {
         let base =
             Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
         let error = base.merged(&json!({"prox_auth": "a:b"})).unwrap_err();
         assert_eq!(error.field.as_deref(), Some("environment.prox_auth"));
+    }
+
+    #[test]
+    fn options_merge_replaces_the_whole_object() {
+        let base = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "options": {"ssl_insecure": "true", "block_global": "true"}
+        }))
+        .unwrap();
+        let patched = base
+            .merged(&json!({"options": {"block_global": "false"}}))
+            .unwrap();
+        assert_eq!(patched.options().len(), 1);
+        assert_eq!(
+            patched.options().get("block_global").map(String::as_str),
+            Some("false")
+        );
+        let cleared = base.merged(&json!({"options": null})).unwrap();
+        assert!(cleared.options().is_empty());
     }
 }

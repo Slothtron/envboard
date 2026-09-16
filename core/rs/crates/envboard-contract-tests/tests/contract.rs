@@ -383,7 +383,7 @@ fn fixture_directories_match_the_capability_registry() {
         .map(|(_, dir)| load_cases(dir).len())
         .sum();
     assert_eq!(
-        total, 47,
+        total, 58,
         "契约 fixture 总数变了：请同时更新 core/spec/ 与 README 里的数字"
     );
 }
