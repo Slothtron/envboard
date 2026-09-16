@@ -133,7 +133,7 @@ envboard rules show beta                        # 改规则文件前先取回原
   header `x-envboard-token` 优先）。前端拿到 URL 上的 token 后会立刻从地址栏抹掉，
   之后所有请求走 header。生成的 token 同时写入
   `<state_dir>/runtime/api.json`（0600），CLI 瘦客户端自动带上，无需手抄。
-  注意 `?token=` 会出现在访问日志与浏览器历史里，API 调用请优先用 header。
+  注意 `?token=` 会出现在访问日志与浏览器历史里，API 调用请优先用 header。`/app.css` 与 `/app.js` 是内嵌静态资产（不含数据），豁免 token 检查 —— 浏览器拉取子资源时带不了凭据，不豁免开 token 必白屏。
 - **代理访问鉴权**：环境新增 `proxy_auth` 字段（`user:password`，恰好一个冒号、
   两段非空、无空白/控制字符、总长 ≤128；`null` = 不启用）。启用后实例以
   `--set proxyauth=<user:password>` 启动，客户端凭据才能连代理（否则 407）；

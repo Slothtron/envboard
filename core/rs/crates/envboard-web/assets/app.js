@@ -1901,7 +1901,10 @@ function wire() {
 }
 
 function connectEvents() {
-  const source = new EventSource("/api/events");
+  // EventSource 带不了自定义头，token 只能走 URL（服务端对 ?token= 与 header 等价）。
+  const source = new EventSource(
+    state.token ? `/api/events?token=${encodeURIComponent(state.token)}` : "/api/events",
+  );
   source.addEventListener("snapshot", (event) => {
     const payload = JSON.parse(event.data);
     if (!payload.ok) return;

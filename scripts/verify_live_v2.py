@@ -525,13 +525,20 @@ def main() -> int:
             page_status, page_body = api(token_port, "/?token=s3cret-token", raw=True)
             sse_status_code = sse_status(token_port, "/api/events?token=s3cret-token")
             bad_page, _ = api(token_port, "/?token=nope", raw=True)
+            # 子资源：浏览器解析 <link>/<script> 时带不了 header 也不会复制 ?token=，
+            # 内嵌资产必须豁免（否则开 token 必白屏）；API 仍要 401。
+            css_status, _ = api(token_port, "/app.css", raw=True)
+            js_status, _ = api(token_port, "/app.js", raw=True)
+            api_status_none, _ = api(token_port, "/api/status", raw=True)
             check(
-                "11c 显式 --token：header 与 ?token= 等效，横幅打印可点链接",
+                "11c 显式 --token：header 与 ?token= 等效，横幅打印可点链接；静态资产豁免",
                 status_none == 401 and status_wrong == 401 and status_header == 200
                 and page_status == 200 and sse_status_code == 200 and bad_page == 401
+                and css_status == 200 and js_status == 200 and api_status_none == 401
                 and "dashboard:" in banner and "token=s3cret-token" in banner,
                 f"none={status_none} wrong={status_wrong} header={status_header} "
                 f"page={page_status} sse={sse_status_code} bad_page={bad_page} "
+                f"css={css_status} js={js_status} api_none={api_status_none} "
                 f"banner={'…' + banner.strip().splitlines()[-1] if banner.strip() else '(empty)'}",
             )
         finally:

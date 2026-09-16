@@ -371,7 +371,7 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   带上，不再依赖用户手抄。`guard()` 在 header（`x-envboard-token`）优先之外接受
   URL `?token=`（浏览器直接打开工作台、SSE 的 EventSource 都带不了自定义头），
   比较改为常量时间；前端捕获后立即 `history.replaceState` 抹掉地址栏中的 token，
-  之后全部请求走 header。
+  之后全部请求走 header。`/app.css` / `/app.js` 内嵌静态资产豁免 token（浏览器子资源请求带不了凭据），API 与页面本体不豁免。
 - **环境字段 `proxy_auth`**（契约 4 字段 → 5）：`user:password` 形态（恰好一个冒号、
   两段非空、无空白/控制字符、总长 ≤128），`null` = 不启用。启用后实例以
   `--set proxyauth=<user:password>` 启动并纳入 `envboard_expect` 回显自检；

@@ -158,7 +158,19 @@ async fn guard(
 
     // ② 配了 token 就必须带对：header 优先，未带时接受 `?token=`（SSE 的
     // EventSource 带不了自定义头，浏览器直接打开工作台也只能靠 URL 携带）。
-    if let Some(expected) = state.config.token.as_deref() {
+    //
+    // **静态资产豁免**：`/app.css` / `/app.js` 是编译期内嵌的代码，不含任何数据
+    // （数据只从 API 出）。浏览器解析 `<link>`/`<script>` 时带不了 header、
+    // 也不会把页面 URL 上的 `?token=` 复制到子资源请求上 —— 豁免它们，
+    // 否则开了 token 工作台必然白屏。API 与页面本体（`/`）不豁免。
+    let path = request.uri().path();
+    let public_asset = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && matches!(path, "/app.css" | "/app.js");
+    if let Some(expected) = state.config.token.as_deref()
+        && !public_asset
+    {
         let provided = headers
             .get(TOKEN_HEADER)
             .and_then(|value| value.to_str().ok())
