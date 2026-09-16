@@ -32,7 +32,9 @@ CRATES_DIR = ROOT / "core" / "rs" / "crates"
 #: 这张表管的是**会进产物的依赖**（`dependencies` / `build-dependencies`）。
 ALLOWED_INTERNAL: dict[str, set[str]] = {
     "envboard-core-api": set(),  # 根：契约词汇，不依赖任何内部 crate
-    "envboard-domain": {"envboard-core-api"},
+    # 环境层要校验 insecure_hosts 的每个条目 —— host 的归一化/校验只有在 rules crate
+    # 里那份实现，不在这里复制第二份 label 规则。两者都是纯逻辑，方向也不成环。
+    "envboard-domain": {"envboard-core-api", "envboard-rules"},
     "envboard-rules": {"envboard-core-api"},
     "envboard-core-fake": {"envboard-core-api", "envboard-rules"},
     "envboard-manager": {"envboard-core-api", "envboard-domain", "envboard-rules"},

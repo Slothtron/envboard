@@ -1,0 +1,16 @@
+{
+  "capability": "environment.validate",
+  "description": "insecure_hosts 必须是数组（不接受单个字符串这种『方便写法』）",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "insecure_hosts": "365.kdocs.cn"
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.insecure_hosts"
+  }
+}

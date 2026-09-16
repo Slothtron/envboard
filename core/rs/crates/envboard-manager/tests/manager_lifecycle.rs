@@ -6,7 +6,6 @@
 //!
 //! 每个测试拿到一段互不重叠的端口区间（见 `harness`），互不打扰。
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -14,7 +13,7 @@ use envboard_core_api::{
     ClockPort, CoreCapabilities, CoreInfo, ErrorCode, InstanceHandle, InstanceHealth, InstanceSpec,
     LogLevel, LoggerPort, NullLogger, ProcessIdentity, ProxyCore,
 };
-use envboard_core_fake::FakeCore;
+use envboard_core_fake::{FakeCore, StatusMode};
 use envboard_manager::infra::{RealFiles, SocketPortProbe};
 use envboard_manager::{
     EnvView, JsonFileStateRepo, Manager, ManagerConfig, MemoryProcessTable, PersistedState,
@@ -39,6 +38,11 @@ impl SettableClock {
         Self {
             now: std::sync::atomic::AtomicU64::new(now),
         }
+    }
+
+    /// 往前走时间 —— 用来跨过"收敛窗口"而仍然落在状态文件的 TTL 之内。
+    fn advance(&self, seconds: u64) {
+        self.now.fetch_add(seconds, Ordering::SeqCst);
     }
 }
 
@@ -102,14 +106,22 @@ struct Harness {
     clock: Arc<SettableClock>,
     logger: Arc<RecordingLogger>,
     repo: Arc<JsonFileStateRepo>,
+    /// 只在 [`Harness::new`] 的形态下可用：测试要拨 FakeCore 的旋钮
+    /// （状态回写模式之前是经"每实例选项"传的，那条通道已删除）。
+    fake: Option<Arc<FakeCore>>,
 }
 
 impl Harness {
     fn new() -> Self {
-        Self::with_core_factory(|clock| Arc::new(FakeCore::new(clock)))
+        Self::build(|clock| {
+            let core = Arc::new(FakeCore::new(clock));
+            (Arc::clone(&core) as Arc<dyn ProxyCore>, Some(core))
+        })
     }
 
-    fn with_core_factory(factory: impl FnOnce(Arc<dyn ClockPort>) -> Arc<dyn ProxyCore>) -> Self {
+    fn build(
+        factory: impl FnOnce(Arc<dyn ClockPort>) -> (Arc<dyn ProxyCore>, Option<Arc<FakeCore>>),
+    ) -> Self {
         let window = NEXT_WINDOW.fetch_add(40, Ordering::SeqCst);
         let directory =
             std::env::temp_dir().join(format!("envboard-test-{}-{window}", std::process::id()));
@@ -123,9 +135,10 @@ impl Harness {
         let processes = Arc::new(MemoryProcessTable::new());
         let logger = Arc::new(RecordingLogger::default());
         let repo = Arc::new(JsonFileStateRepo::new(config.state_file()));
+        let (core, fake) = factory(Arc::clone(&clock) as Arc<dyn ClockPort>);
         let manager = Manager::new(
             config,
-            factory(Arc::clone(&clock) as Arc<dyn ClockPort>),
+            core,
             Arc::new(SocketPortProbe),
             Arc::clone(&processes) as Arc<dyn ProcessTable>,
             Arc::new(RealFiles),
@@ -142,7 +155,20 @@ impl Harness {
             clock,
             logger,
             repo,
+            fake,
         }
+    }
+
+    /// FakeCore 的测试旋钮（外部进程形态的 core 没有它）。
+    fn fake(&self) -> &Arc<FakeCore> {
+        self.fake
+            .as_ref()
+            .expect("this harness was built with a custom core; use Harness::new()")
+    }
+
+    /// 把时钟往前拨（跨过收敛窗口，但仍在状态文件 TTL 内）。
+    fn advance(&self, seconds: u64) {
+        self.clock.advance(seconds);
     }
 
     /// 在同一个 state_dir 上再起一个管理器（模拟重启 / 另一个进程）。
@@ -202,16 +228,13 @@ fn create_beta(harness: &Harness) -> EnvView {
         .unwrap()
 }
 
-/// 选项**只能**在写环境时给出（create/update）——它是持久化配置，不是"本次启动的开关"。
-fn create_beta_with_options(harness: &Harness, pairs: &[(&str, &str)]) -> EnvView {
-    harness
-        .manager
-        .create(&serde_json::json!({
-            "name": "beta",
-            "description": "灰度",
-            "options": options(pairs),
-        }))
-        .unwrap()
+/// 带额外字段建一个 beta（字段只能是契约里的一等字段）。
+fn create_beta_with(harness: &Harness, extra: serde_json::Value) -> EnvView {
+    let mut input = serde_json::json!({"name": "beta", "description": "灰度"});
+    for (key, value) in extra.as_object().expect("extra must be an object") {
+        input[key] = value.clone();
+    }
+    harness.manager.create(&input).unwrap()
 }
 
 fn assert_in_range(view: &EnvView, harness: &Harness) {
@@ -331,7 +354,8 @@ async fn start_and_stop_round_trip_updates_desired_state_and_health() {
 async fn stale_status_file_is_reported_as_unhealthy() {
     let harness = Harness::new();
     // FakeCore 只写一次、时间戳是"一小时前"
-    create_beta_with_options(&harness, &[("fake_status", "stale")]);
+    harness.fake().set_status_mode(StatusMode::Stale);
+    create_beta(&harness);
     harness.manager.start("beta").await.unwrap();
 
     match harness.manager.health("beta").await.unwrap() {
@@ -343,7 +367,8 @@ async fn stale_status_file_is_reported_as_unhealthy() {
 #[tokio::test]
 async fn missing_status_file_is_unhealthy_even_though_the_port_accepts() {
     let harness = Harness::new();
-    create_beta_with_options(&harness, &[("fake_status", "absent")]);
+    harness.fake().set_status_mode(StatusMode::Absent);
+    create_beta(&harness);
     harness.manager.start("beta").await.unwrap();
 
     // 这一条是"探活为辅"的关键证据：端口连得上，但没有状态文件 → 不能算 running。
@@ -375,15 +400,17 @@ async fn config_echo_mismatch_is_detected() {
         )
         .unwrap();
     harness
+        .fake()
+        .set_status_mode(StatusMode::RulesCountMismatch);
+    harness
         .manager
-        .create(&serde_json::json!({
-            "name": "beta",
-            "rules": "beta",
-            "options": options(&[("fake_status", "rules_count_mismatch")]),
-        }))
+        .create(&serde_json::json!({"name": "beta", "rules": "beta"}))
         .unwrap();
     harness.manager.start("beta").await.unwrap();
 
+    // 回执比对的失败**只在收敛窗口之外**才算失败：刚换完绑定/刚写完配置的那几秒，
+    // 注入器可能还没轮到轮询。
+    harness.advance(10);
     match harness.manager.health("beta").await.unwrap() {
         InstanceHealth::ConfigMismatch { reason } => {
             assert!(reason.contains("rules_count"), "got: {reason}")
@@ -393,28 +420,188 @@ async fn config_echo_mismatch_is_detected() {
 }
 
 #[tokio::test]
-async fn binding_a_missing_rules_file_fails_loudly_on_start() {
+async fn a_stale_config_hash_is_tolerated_inside_the_window_then_reported() {
     let harness = Harness::new();
-    // 绑定一个还没导入的规则名：**创建**不失败（否则一个环境坏了会连累整张列表），
-    // 但视图里如实显示条数 0，`start` 才响亮失败。
-    let view = harness
+    harness
+        .fake()
+        .set_status_mode(StatusMode::ConfigHashMismatch);
+    create_beta(&harness);
+    harness.manager.start("beta").await.unwrap();
+
+    // 刚写完配置：实例可能还没轮询到 → 收敛中，仍算 running
+    assert_eq!(
+        harness.manager.health("beta").await.unwrap(),
+        InstanceHealth::Running
+    );
+
+    // 超出收敛窗口（reload_interval + 3s）仍然对不上 → 这份配置根本没生效
+    harness.advance(10);
+    match harness.manager.health("beta").await.unwrap() {
+        InstanceHealth::ConfigMismatch { reason } => {
+            assert!(reason.contains("config_hash"), "got: {reason}")
+        }
+        other => panic!("expected config_mismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_hot_reload_is_unhealthy_even_though_the_proxy_keeps_running() {
+    let harness = Harness::new();
+    harness.fake().set_status_mode(StatusMode::ConfigError);
+    create_beta(&harness);
+    harness.manager.start("beta").await.unwrap();
+
+    match harness.manager.health("beta").await.unwrap() {
+        InstanceHealth::Unhealthy { reason } => {
+            assert!(reason.contains("previous configuration"), "got: {reason}")
+        }
+        other => panic!("expected unhealthy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn binding_an_unknown_rules_name_is_refused_when_it_is_written() {
+    let harness = Harness::new();
+    // 新语义下"链接缺失 = 不覆盖"，所以绑定一个不存在的名字会变成**静默失效** ——
+    // 宁可在写入时拒绝。规则名必须在账本里（或物化文件已经在）。
+    let error = harness
         .manager
         .create(&serde_json::json!({"name": "beta", "rules": "nope"}))
-        .unwrap();
-    assert_eq!(view.rules_count, 0);
-
-    let error = harness.manager.start("beta").await.unwrap_err();
+        .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotFound);
     assert_eq!(error.field.as_deref(), Some("environment.rules"));
+    assert!(
+        harness.manager.get("beta").is_err(),
+        "a rejected environment must not be persisted"
+    );
 
-    // 导入后就能起来了
+    // 导入后立刻绑得上，且软链就位
     harness
         .manager
         .import_rules("nope", "10.0.0.11 api.example.com\n")
         .unwrap();
+    let created = harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "rules": "nope"}))
+        .unwrap();
+    assert_eq!(created.rules_count, 1);
+    assert!(!created.rules_missing);
+    let started = harness.manager.start("beta").await.unwrap();
+    assert_eq!(started.health.as_str(), "running");
+    assert!(
+        harness
+            .manager
+            .config()
+            .env_agent_dir("beta")
+            .join("envboard.rules")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn a_missing_rules_link_means_no_override_without_a_start_failure() {
+    let harness = Harness::new();
+    harness
+        .manager
+        .import_rules("beta", "10.0.0.11 api.example.com\n")
+        .unwrap();
+    harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "rules": "beta"}))
+        .unwrap();
+
     let started = harness.manager.start("beta").await.unwrap();
     assert_eq!(started.rules_count, 1);
-    assert_eq!(started.health.as_str(), "running");
+    assert!(!started.rules_missing);
+
+    // 有人把链删了（或目标文件被移走）。这不是"状态坏了"，而是"这个环境不再覆盖
+    // 任何域名"：实例不会因此崩，健康判定也不该把它说成配置不对 —— 但视图必须说清楚。
+    let link = harness
+        .manager
+        .config()
+        .env_agent_dir("beta")
+        .join("envboard.rules");
+    std::fs::remove_file(&link).unwrap();
+
+    let missing = harness.manager.get("beta").unwrap();
+    assert_eq!(missing.health.as_str(), "running");
+    assert_eq!(missing.rules_count, 0);
+    assert!(
+        missing.rules_missing,
+        "the view must say the binding is not in effect"
+    );
+
+    // `start` 也不该因此失败（新的语义：缺失即忽略，不是响亮失败）
+    assert_eq!(harness.manager.start("beta").await.unwrap().rules_count, 1);
+
+    // 再删一次，让对账去修：账本里有这条规则 → 重链
+    std::fs::remove_file(&link).unwrap();
+    let messages = harness.manager.reconcile_rules().unwrap();
+    assert!(!messages.is_empty(), "the repair must be logged");
+    let fixed = harness.manager.get("beta").unwrap();
+    assert!(!fixed.rules_missing);
+    assert_eq!(fixed.rules_count, 1);
+}
+
+#[test]
+fn the_rules_ledger_backfills_from_the_directory_and_heals_the_files() {
+    let harness = Harness::new();
+    harness
+        .manager
+        .import_rules(
+            "beta",
+            "10.0.0.11 api.example.com\n10.0.0.12 b.example.com\n",
+        )
+        .unwrap();
+    let path = harness.manager.config().rules_path("beta");
+    let rendered = std::fs::read_to_string(&path).unwrap();
+
+    // 升级迁移：旧版本的状态文件里没有 `rules` 这一段 → 启动对账从物化目录回填。
+    prepare_state(&harness, |state| state.rules.clear());
+    let reopened = harness.standalone();
+    assert_eq!(
+        reopened.rules_list().unwrap(),
+        vec!["beta".to_string()],
+        "materialised files must be backfilled into the ledger"
+    );
+    assert_eq!(reopened.rules_read("beta").unwrap(), rendered);
+
+    // 自愈：物化文件被改坏 → 用账本里的正文逐字节重建。
+    std::fs::write(&path, "garbage\n").unwrap();
+    let messages = reopened.reconcile_rules().unwrap();
+    assert!(
+        messages.iter().any(|line| line.contains("rebuilt")),
+        "got {messages:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), rendered);
+
+    // 规则正文以账本为准：物化文件没了也照样答得出来。
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(reopened.rules_read("beta").unwrap(), rendered);
+}
+
+#[test]
+fn rules_delete_refuses_a_bound_rule() {
+    let harness = Harness::new();
+    harness
+        .manager
+        .import_rules("beta", "10.0.0.11 api.example.com\n")
+        .unwrap();
+    harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "rules": "beta"}))
+        .unwrap();
+
+    let error = harness.manager.rules_delete("beta").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+
+    harness
+        .manager
+        .update("beta", &serde_json::json!({"rules": null}))
+        .unwrap();
+    harness.manager.rules_delete("beta").unwrap();
+    assert!(harness.manager.rules_list().unwrap().is_empty());
+    assert!(!harness.manager.config().rules_path("beta").exists());
 }
 
 // --------------------------------------------------------------------------- //
@@ -473,74 +660,123 @@ async fn auto_allocated_port_conflict_retries_once_with_a_new_port() {
     drop(squatter);
 }
 
-#[tokio::test]
-async fn options_denylist_is_enforced_when_the_environment_is_written() {
+#[test]
+fn the_options_passthrough_is_gone_and_its_tombstone_is_accepted() {
     let harness = Harness::new();
-    // 选项是**持久化配置**，所以 denylist 在写入时就裁决：不允许先存下来、再在启动时爆炸。
+    // 非空 options = 这份配置**确实依赖**过那个透传通道 → 写入时就响亮拒绝，
+    // 并指出唯一可行的替代（把受影响的域名列进 insecure_hosts）。
     let error = harness
         .manager
         .create(&serde_json::json!({
             "name": "beta",
-            "options": {"listen_port": "9999"},
+            "options": {"ssl_insecure": "true"},
         }))
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidConfig);
-    assert_eq!(
-        error.field.as_deref(),
-        Some("environment.options.listen_port")
+    assert_eq!(error.field.as_deref(), Some("environment.options"));
+    assert!(
+        error.message.contains("insecure_hosts"),
+        "the error must point at the replacement, got: {}",
+        error.message
     );
     assert!(
         harness.manager.get("beta").is_err(),
         "a rejected environment must not be persisted"
     );
+
+    // 空对象是墓碑：旧版本每个环境都写 `options: {}`，一律拒绝会让升级卡死。
+    // 收下、忽略、**不再写出去**。
+    let created = harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "options": {}}))
+        .unwrap();
+    assert_eq!(created.name, "beta");
+    assert!(
+        harness
+            .saved()
+            .find("beta")
+            .unwrap()
+            .get("options")
+            .is_none(),
+        "the tombstone must not be written back"
+    );
 }
 
 #[tokio::test]
-async fn options_are_persisted_and_reach_the_next_start() {
+async fn insecure_hosts_are_persisted_hot_editable_and_written_to_the_config_file() {
     let harness = Harness::new();
-    let created = create_beta_with_options(&harness, &[("ssl_insecure", "true")]);
-    assert_eq!(
-        created.options.get("ssl_insecure").map(String::as_str),
-        Some("true")
+    let created = create_beta_with(
+        &harness,
+        serde_json::json!({"insecure_hosts": ["365.kdocs.cn"]}),
     );
+    assert_eq!(created.insecure_hosts, ["365.kdocs.cn"]);
 
     let started = harness.manager.start("beta").await.unwrap();
-    assert_eq!(
-        started.options.get("ssl_insecure").map(String::as_str),
-        Some("true"),
-        "the launched instance must get the persisted options"
-    );
     assert_eq!(started.health.as_str(), "running");
 
-    // 运行中换选项：与换绑定同款 —— 启动时才固定，必须停机。
+    // 放行清单是**热**的：运行中改它不需要停机 —— 注入器轮询到 config.json 变化就重读。
+    let updated = harness
+        .manager
+        .update(
+            "beta",
+            &serde_json::json!({"insecure_hosts": ["web.wps.cn", "365.kdocs.cn"]}),
+        )
+        .unwrap();
+    assert_eq!(updated.insecure_hosts, ["365.kdocs.cn", "web.wps.cn"]);
+    assert_eq!(updated.health.as_str(), "running", "the list is hot");
+
+    // 落库 + 写进注入器读的那份配置
+    let state = harness.saved();
+    assert_eq!(
+        state.find("beta").unwrap()["insecure_hosts"],
+        serde_json::json!(["365.kdocs.cn", "web.wps.cn"])
+    );
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            harness
+                .manager
+                .config()
+                .env_agent_dir("beta")
+                .join("config.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        config["insecure_hosts"],
+        serde_json::json!(["365.kdocs.cn", "web.wps.cn"])
+    );
+
+    // 凭据是**停机**字段：实例只在启动时经 `--set proxyauth=…` 拿到它。
     let error = harness
         .manager
         .update(
             "beta",
-            &serde_json::json!({"options": {"block_global": "false"}}),
+            &serde_json::json!({"proxy_user": "alice", "proxy_password": "s3cret"}),
         )
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Conflict);
 
     harness.manager.stop("beta").await.unwrap();
-    let updated = harness
+    let with_credentials = harness
         .manager
         .update(
             "beta",
-            &serde_json::json!({"options": {"block_global": "false"}}),
+            &serde_json::json!({"proxy_user": "alice", "proxy_password": "s3cret"}),
         )
         .unwrap();
-    // 整体替换：旧键不会因为"没提它"而留下。
-    assert!(!updated.options.contains_key("ssl_insecure"));
-    assert_eq!(
-        updated.options.get("block_global").map(String::as_str),
-        Some("false")
+    assert!(with_credentials.proxy_auth_enabled);
+    assert_eq!(with_credentials.health.as_str(), "stopped");
+    // 视图 / SSE 广播都看得到它 → 绝不能回显凭据。
+    assert!(
+        !serde_json::to_string(&with_credentials.to_json())
+            .unwrap()
+            .contains("s3cret")
     );
-
-    let restarted = harness.manager.start("beta").await.unwrap();
+    // 明文只落在 0600 的状态文件与实例启动参数里。
     assert_eq!(
-        restarted.options.get("block_global").map(String::as_str),
-        Some("false")
+        harness.saved().find("beta").unwrap()["proxy_password"],
+        serde_json::json!("s3cret")
     );
 }
 
@@ -549,11 +785,18 @@ async fn options_are_persisted_and_reach_the_next_start() {
 // --------------------------------------------------------------------------- //
 
 #[tokio::test]
-async fn update_changes_the_description_live_but_a_new_binding_needs_a_restart() {
+async fn description_and_the_rules_binding_are_hot() {
     let harness = Harness::new();
     harness
         .manager
         .import_rules("beta", "10.0.0.11 api.example.com\n")
+        .unwrap();
+    harness
+        .manager
+        .import_rules(
+            "gamma",
+            "10.0.0.12 b.example.com\n10.0.0.13 c.example.com\n",
+        )
         .unwrap();
     harness
         .manager
@@ -572,37 +815,50 @@ async fn update_changes_the_description_live_but_a_new_binding_needs_a_restart()
         "running",
         "a hot edit must not restart"
     );
-    assert_eq!(
-        harness.manager.health("beta").await.unwrap(),
-        InstanceHealth::Running
-    );
 
-    // 运行中换绑定：**拒绝**。实例在启动时就固定了规则路径，运行中换绑定它看不见 ——
-    // 允许的话就会变成"配置说绑了 beta、实例还在按空规则干活"。
-    let error = harness
+    // 运行中换绑定：**允许** —— 管理器原子换链 + 重写 config.json，注入器下一次轮询
+    // 就跟上了。这正是"规则名是账本里的记录、链是绑定状态的表达"换来的能力。
+    let link = harness
         .manager
-        .update("beta", &serde_json::json!({"rules": "beta"}))
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::Conflict);
-    assert!(error.message.contains("binding"), "got: {}", error.message);
-    assert!(harness.manager.get("beta").unwrap().rules.is_none());
-
-    // 停止后才绑得上，并且条数立刻算得出来
-    harness.manager.stop("beta").await.unwrap();
+        .config()
+        .env_agent_dir("beta")
+        .join("envboard.rules");
     let bound = harness
         .manager
         .update("beta", &serde_json::json!({"rules": "beta"}))
         .unwrap();
     assert_eq!(bound.rules.as_deref(), Some("beta"));
-    assert_eq!(bound.rules_count, 1, "the binding must resolve immediately");
-    assert_eq!(bound.description, "灰度 v2", "unmentioned fields stay put");
+    assert_eq!(bound.rules_count, 1, "the binding resolves immediately");
+    assert!(!bound.rules_missing);
+    assert_eq!(bound.health.as_str(), "running", "the binding is hot");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap().file_name().unwrap(),
+        "beta.rules"
+    );
 
-    // 解绑：`rules: null` 在契约里就是"不覆盖"，与"没给这个字段"是两回事
+    // 再换一次：链被原子替换，条数跟着变
+    let switched = harness
+        .manager
+        .update("beta", &serde_json::json!({"rules": "gamma"}))
+        .unwrap();
+    assert_eq!(switched.rules_count, 2);
+    assert_eq!(
+        switched.description, "灰度 v2",
+        "unmentioned fields stay put"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).unwrap().file_name().unwrap(),
+        "gamma.rules"
+    );
+
+    // 解绑：`rules: null` 就是"不覆盖"，链消失（与"没给这个字段"是两回事）
     let unbound = harness
         .manager
         .update("beta", &serde_json::json!({"rules": null}))
         .unwrap();
     assert!(unbound.rules.is_none());
+    assert!(!unbound.rules_missing);
+    assert!(!link.exists());
 }
 
 #[tokio::test]
@@ -616,6 +872,7 @@ async fn update_refuses_identity_changes_while_running_and_applies_them_when_sto
     for patch in [
         serde_json::json!({"listen": {"port": beta.listen.port + 1}}),
         serde_json::json!({"name": "gamma"}),
+        serde_json::json!({"proxy_user": "alice", "proxy_password": "s3cret"}),
     ] {
         let error = harness.manager.update("beta", &patch).unwrap_err();
         assert_eq!(error.code, ErrorCode::Conflict, "patch: {patch}");
@@ -733,6 +990,35 @@ async fn remove_requires_a_stopped_environment() {
     harness.manager.remove("beta").unwrap();
     assert_eq!(harness.saved().environments.len(), 0);
     assert!(harness.manager.get("beta").is_err());
+}
+
+#[test]
+fn removing_an_environment_cleans_up_its_agent_directory() {
+    let harness = Harness::new();
+    harness
+        .manager
+        .import_rules("beta", "10.0.0.11 api.example.com\n")
+        .unwrap();
+    harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "rules": "beta"}))
+        .unwrap();
+
+    let agent_dir = harness.manager.config().env_agent_dir("beta");
+    assert!(agent_dir.join("config.json").exists());
+    assert!(agent_dir.join("envboard.rules").exists());
+
+    harness.manager.remove("beta").unwrap();
+    assert!(
+        !agent_dir.exists(),
+        "the agent directory must go with the env"
+    );
+    // 规则库**不动**：删规则是 rules.delete 的事（它还被别的环境绑着也说不定）。
+    assert_eq!(
+        harness.manager.rules_list().unwrap(),
+        vec!["beta".to_string()]
+    );
+    assert!(harness.manager.config().rules_path("beta").exists());
 }
 
 #[test]
@@ -875,6 +1161,64 @@ async fn reconcile_stops_orphans_but_never_touches_a_reused_pid() {
 }
 
 #[tokio::test]
+async fn a_previous_generation_instance_is_restarted_by_reconcile() {
+    let harness = Harness::new();
+    let beta = create_beta(&harness);
+
+    // 构造"上一代二进制拉起的实例"：进程还在、身份匹配，但状态文件里
+    // **没有配置哈希回执** —— 说明它跑的根本不是"配置文件 + 固定名软链"这套通道。
+    let status_file = harness.manager.config().status_file("beta");
+    std::fs::create_dir_all(status_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &status_file,
+        serde_json::json!({
+            "env_name": "beta",
+            "pid": 4_242,
+            "listen": {"host": "127.0.0.1", "port": beta.listen.port},
+            "rules_count": 0,
+            "reload_interval_secs": 5,
+            "core_version": "12.2.3",
+            "agent_version": "0.2.0",
+            "updated_at": 1_000_000,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let recorded = ProcessIdentity {
+        pid: 4_242,
+        starttime: 900,
+        cmdline: vec!["mitmdump".into()],
+    };
+    prepare_state(&harness, |state| {
+        state
+            .desired
+            .insert("beta".into(), envboard_domain::Desired::Running);
+        state.records.insert("beta".into(), recorded.clone());
+    });
+
+    let processes = Arc::new(MemoryProcessTable::new().with_alive([recorded]));
+    let report = harness
+        .manager_over(Arc::clone(&processes), true)
+        .reconcile()
+        .await
+        .unwrap();
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|(env, action)| env == "beta" && action == "restart"),
+        "a previous-generation instance must be restarted, got {:?}",
+        report.actions
+    );
+    assert_eq!(
+        processes.terminated(),
+        vec![4_242],
+        "the old process must actually be stopped"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_marks_port_conflict_instead_of_reallocating() {
     let harness = Harness::new();
     let beta = create_beta(&harness);
@@ -965,11 +1309,4 @@ impl envboard_manager::PortProbe for CountingProbe {
         self.calls.fetch_add(1, Ordering::SeqCst);
         envboard_manager::PortProbe::is_free(&SocketPortProbe, host, port)
     }
-}
-
-fn options(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect()
 }

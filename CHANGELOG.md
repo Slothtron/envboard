@@ -11,29 +11,59 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
-### Added（环境级实例选项）
+### Added（按域名放宽上游证书校验）
 
-- `Environment.options`：每实例选项**持久化在环境上**（`{K: V}` 字符串对，默认 `{}`），
-  启动与 reconcile 都从它取值。修掉的是"逃生门写在契约里、却没有落地路径"的缺口 ——
-  例如上游用私有 CA 签证书时，`ssl_insecure=true` / `ssl_verify_upstream_trusted_ca`
-  以前只能在直连模式临时下发，常驻工作台下根本带不上。
-  - `envboard env add/edit --option K=V`（`edit` 另有 `--no-options` 清空）；改选项要求
-    环境已停止，与换绑定同款 —— 选项在启动时经 `--set` 固定，运行中改它实例看不见。
-  - 工作台「配置」表单两个入口：**显式开关**（目前 `ssl_insecure` 一项，勾选即
-    `ssl_insecure=true`；开关是该键唯一的编辑入口，文本框里重复写会报字段错误）+
-    「其他实例选项」文本框（每行 `K=V`，放其余的 core 选项）。「概览」新增一个展示格；
-    运行中开关与文本框都跟随名字 / 端口 / 规则一起锁住。
-  - **去掉 `env start --option`**：没有"本次启动临时覆盖"这第二条通道 —— 否则手动启动的
-    实例与账本里的配置会分叉，而 reconcile 之后又按账本把它拉回另一套值。
-  - denylist 判定权仍在 core（`validate_options`，环境层不复制一份键表）；命中时错误
-    路径是 `environment.options.<key>`，在**写入**（create / PATCH）时就失败，不留坏配置。
-  - 契约新增 8 个 `environment/` + 3 个 `merge/` golden case（总数 40 → 51）。
+- `Environment.insecure_hosts`：**完整域名清单**（默认空），命中 ⟺ 归一化后的 SNI 与该
+  域名**完全相等** —— 无通配符、无子域继承、无后缀匹配；写入时**拒绝 `*` / `?`**：
+  放宽上游证书校验是安全控制，必须逐条点名。**没有"整个环境全关"的开关。**
+  - 生效方式是注入器接管 `tls_start_server`：名单内域名用 `VERIFY_NONE` 自建上游 context
+    （ALPN / cipher / TLS 版本 / ECDH 曲线与不改写时逐项一致），名单外一律走 mitmproxy
+    自己的严格校验。无 SNI 时退回上连地址判定；SNI 存在但没命中**不**退回。
+  - **热生效**：清单写进每个环境自己的 `config.json`，注入器按轮询间隔（默认 5s）重读，
+    运行中改不需要重启。
+
+### Changed (breaking)（配置通道与规则寻址重做）
+
+- **删除 `Environment.options`（任意 core 选项透传）**：它是一条绕过契约的任意通道，
+  让"放宽上游证书校验"这类安全控制可以不经一等字段被打开。空对象 / `null` 作为**墓碑**
+  接受并忽略（旧版每个环境都写 `options: {}`），**非空即 `invalid_config`** 并指出替代路径。
+  `envboard env add/edit --option` / `--no-options`、`InstanceSpec.options`、
+  `validate_options` denylist 全家桶、工作台的选项开关与文本框一并删除。
+  （这条能力在被删除前**从未发布**，所以这里是直接移除，而不是"废弃再删"。）
+- **`Environment.proxy_auth` 拆成 `proxy_user` + `proxy_password`**：同生共死（只有一边
+  指向缺失的那一边报错）、字段级错误路径、不含 `:`（mitmproxy 的 `split(":")` 要求恰好
+  一个冒号）。凭据明文只落在 0600 状态文件与实例启动参数；视图 / 日志 / SSE 只给
+  `proxy_auth_enabled` 布尔，并且**记录进程身份时 cmdline 里的凭据值先脱敏成 `***`**
+  （比对存活进程时两侧都脱敏）。旧形状读时**无损迁移**（整体 `trim` 后按第一个 `:` 切开），
+  写出不再输出。
+- **脚本 `--set` 通道收口**：注入器不再注册任何 `envboard_*` 选项，改读
+  `<自身目录>/config.json`；规则也不再经 `--set envboard_rules=<path>` 下发，而是
+  `<自身目录>/envboard.rules` 这条**固定名软链**。启动命令行只剩 `-s` / `confdir` /
+  `listen_host` / `listen_port` / `proxyauth` —— **没有用户可控的 `--set`。**
+- **规则库进账本**：`state.json` 增加 `rules[]`（含渲染后的完整正文），
+  `<rules_dir>/<name>.rules` 变为**可再生物化产物**：缺失或被改坏按账本逐字节重建；
+  物化目录里有而账本里没有的文件在启动对账时**回填**（升级不丢规则库）。
+- **"规则缺失"不再让启动失败**：链不存在/悬空 ⇒ 该环境**不覆盖任何域名**（视图给出
+  `rules_missing` 提示并尽量自愈）。绑定一个**不存在**的规则名则在写入时就拒绝 ——
+  否则那会变成一次静默失效。
+- **热 / 停机矩阵重排**：热 = `description` / `insecure_hosts` / `rules` 绑定 / 规则内容
+  （绑定热生效由"原子换链 + 重写 config.json"实现）；停机 = `name` / `listen` /
+  `proxy_user` / `proxy_password`。
+- **健康判定增加配置哈希回执**：管理器记录期望配置的 sha256 与写入时刻，实例回执
+  `config_hash`；不等但在 `reload_interval + 3s` 的**收敛窗口**内算收敛中，超窗才报
+  `config_mismatch`；实例热重载失败写 `config_error` → `unhealthy`。状态文件里没有
+  `config_hash` 的实例判定为**上一代**，reconcile 走 `restart`。
+- 契约 fixture 重新基线化：删除 11 个 options 用例、重写 6 个凭据用例，再加上新增用例，
+  总数 **58 → 68**（`environment/` 30 + `merge/` 9 + `rules/` 8 + `ports/` 6 +
+  `lifecycle/` 7 + `insecure/` 8）。
 
 ### Changed (breaking)
 
-- `core/spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段收为 5 字段
-  （`name` / `listen` / `rules` / `options` / `description`；后来在安全增强中补第 6 个
-  `proxy_auth`）。删除 `dns_servers`、`hosts`、
+- `core/spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段一路收到**当前的 7 个**
+  （`name` / `listen` / `rules` / `insecure_hosts` / `description` / `proxy_user` /
+  `proxy_password`；中间形态是 5 字段 + `options`，再补第 6 个 `proxy_auth`，
+  见上面那条 breaking）。
+  删除 `dns_servers`、`hosts`、
   `domain_suffix`、`color`、`labels` 与 mapping / annotate / activate / resolve
   全部语义 —— v2 的切换模型是"一个环境 = 一个独立实例 + 一个独立端口"，
   不再有"当前环境"这个全局状态。
@@ -43,9 +73,7 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   `config_mismatch` / `unhealthy` / `failed`）。
 - 契约 fixture **重新基线化**：v1 的 11 个 `environment/` + 2 个 `merge/` 全部重写
   （它们测的是被删除的字段），新增 `ports/` 与 `lifecycle/` 两组。
-  现状：`environment/` 30（原 15，每实例选项补 8 个、安全增强补 7 个
-  `proxy_auth` / `0.0.0.0` 用例）+ `merge/` 8（原 5，选项 PATCH 语义补 3）
-  + `rules/` 8（**原样保留**）+ `ports/` 6 + `lifecycle/` 6 = **58** 个。
+  当前总数与分目录见上面最后一条 breaking（**68** 个）。
 
 ### Added
 
@@ -58,16 +86,17 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   依赖方向由 `scripts/rust_dependency_lint.py` 强制（core-api 是根，纯逻辑 crate
   不得依赖运行时）。已实现的部分：
   - `envboard-core-api`：`ProxyCore` trait、`InstanceSpec`、`StatusReport`、统一错误码、
-    `ClockPort`/`LoggerPort`、`InstanceSpec.options` 的 denylist。
-  - `envboard-domain`：6 字段环境模型（校验/归一化/PATCH 合并）、端口选择
-    （`port.allocate` 的全部规则）、reconcile 决策（孤儿清理与 PID 复用保护）。
+    `ClockPort`/`LoggerPort`（`InstanceSpec.options` 与其 denylist 已删除）。
+  - `envboard-domain`：环境模型（校验/归一化/PATCH 合并；字段数随后续 breaking 变动，
+    当前 7 个）、端口选择（`port.allocate` 的全部规则）、reconcile 决策
+    （孤儿清理与 PID 复用保护）。
   - `envboard-rules`：hosts 解析与**确定性渲染**，与 Python 侧在 63 个用例上逐字节一致。
   - `envboard-core-fake`：只监听端口的测试替身 core —— **管理器测试因此完全不依赖
     mitmproxy**（"没装 mitmproxy 的机器也能跑默认流水线"这条验收条件）。
   - `envboard-manager`：环境 CRUD、随机端口分配与持久化、状态存储（原子写 + 0600）、
     单实例锁（flock）、健康判定（状态文件为主 + 契约回显比对）、reconcile、规则导入。
   - `envboard-cli`：`envboard` 二进制（`env`, `rules`, `run`, `status`）。
-  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 58 个 golden case**。
+  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 golden case**。
 - `scripts/verify_dual_impl.py`：跨语言对拍门禁 —— 63 个用例里 Rust 与 Python 输出必须
   逐字节一致，**已知分歧必须显式声明**（声明了却不再分歧也会失败，防止白名单掩盖新分歧）。
 - `scripts/rust_dependency_lint.py`：Rust 侧的依赖方向与纯度门禁（含"纯逻辑 crate 不得
@@ -77,10 +106,11 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 
 ### Added（M2 — mitmproxy core + 注入器）
 
-- `adapters/mitmproxy/envboard_mitmproxy.py`：**单文件、纯标准库**的注入器。
-  只做三件事：读+解析规则（契约 BNF）、在 `server_connect` 里改写上连目标、
-  回写状态文件。它不知道自己是哪个环境，也不碰任何状态目录 —— 所以随时可以丢掉。
-  既是 addon（`-s`），也有 `--render` 模式供跨语言对拍（该模式**不需要 mitmproxy**）。
+- `adapters/mitmproxy/envboard_mitmproxy.py`：**单文件、纯标准库**的注入器 ——
+  读 `<自身目录>/config.json` 与固定名规则软链、在 `server_connect` 里改写上连目标、
+  按域名放宽上游证书校验、回写状态文件。它只认自己目录旁边的固定路径，
+  不碰别的状态目录 —— 所以随时可以丢掉。既是 addon（`-s`），也有 `--render` 模式
+  供跨语言对拍（该模式**不需要 mitmproxy**）。
 - `envboard-core-mitmproxy`：`ProxyCore` 的真实实现 —— 按启动契约拼 `--set` 参数、
   spawn `mitmdump`（带 `PR_SET_PDEATHSIG`）、**预物化并校验共享 CA**、
   物化注入器、等状态文件而非等进程、SIGTERM→SIGKILL 停止、按身份探活。
@@ -88,11 +118,12 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   `import mitmproxy` 自检**，并要求与 `core.bin --version` 的版本一致。
   裸命令名（默认 `mitmdump`）先经 PATH 解析 —— 否则读不到 shebang，
   实测会报"找不到带 mitmproxy 的解释器"而它其实就在 PATH 上。
-- **契约回显自检机制**：注入器核对"管理器下发的每个选项"是否被宿主接受
+- **契约回显自检机制**：注入器核对"管理器下发的每个 `--set`"是否被宿主接受
   （`options_echo`），管理器据此判定 `config_mismatch`。宿主对拼错的 `--set`
-  是静默忽略的，只有让注入器去 `ctx.options` 里查才知道。
+  是静默忽略的，只有让注入器去 `ctx.options` 里查才知道。当前下发的键只剩
+  `proxyauth`（安全控制，被静默忽略等于裸奔），外加 `config_hash` 这条更硬的回执。
 - 实机测试 `live_manager.rs`：真管理器 + 真 mitmdump + 真改写（200 vs 502 判别性对照）
-  + 假选项触发 `config_mismatch`；没有 mitmdump 时**跳过**而不是失败。
+  + 代理凭据下发后 `options_echo` 必须回 "ok"；没有 mitmdump 时**跳过**而不是失败。
 
 ### Changed（日志通道与存活判定：从"读管道"改成"文件直写"）
 

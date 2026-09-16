@@ -30,6 +30,7 @@ const CAPABILITIES: &[(&str, &str)] = &[
     ("environment.validate", "environment"),
     ("environment.merge", "merge"),
     ("rules.parse", "rules"),
+    ("insecure.hosts", "insecure"),
     ("port.allocate", "ports"),
     ("instance.reconcile", "lifecycle"),
 ];
@@ -250,6 +251,23 @@ fn port_allocate_matches_the_contract() {
 }
 
 #[test]
+fn insecure_hosts_matches_the_contract() {
+    for case in load_cases("insecure") {
+        let input = case.input.as_object().expect("input must be an object");
+        let hosts: Vec<String> = input["hosts"]
+            .as_array()
+            .expect("hosts must be an array")
+            .iter()
+            .map(|item| item.as_str().unwrap_or_default().to_string())
+            .collect();
+        let sni = input.get("sni").and_then(Value::as_str);
+        let address = input.get("address").and_then(Value::as_str);
+        let actual = json!({ "match": envboard_rules::insecure_matches(&hosts, sni, address) });
+        assert_fields(&case, &actual);
+    }
+}
+
+#[test]
 fn instance_reconcile_matches_the_contract() {
     for case in load_cases("lifecycle") {
         let input = case.input.as_object().expect("input must be an object");
@@ -269,6 +287,8 @@ fn instance_reconcile_matches_the_contract() {
                     .get("listen_port")
                     .and_then(Value::as_u64)
                     .map(|port| port as u16),
+                // 缺省 = 不是上一代实例（fixture 只为那条规则显式给 true）。
+                legacy: raw.get("legacy").and_then(Value::as_bool).unwrap_or(false),
             })
             .collect();
         let occupied: BTreeSet<u16> = input
@@ -383,7 +403,7 @@ fn fixture_directories_match_the_capability_registry() {
         .map(|(_, dir)| load_cases(dir).len())
         .sum();
     assert_eq!(
-        total, 58,
+        total, 68,
         "契约 fixture 总数变了：请同时更新 core/spec/ 与 README 里的数字"
     );
 }

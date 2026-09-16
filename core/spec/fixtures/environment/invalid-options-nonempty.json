@@ -1,0 +1,18 @@
+{
+  "capability": "environment.validate",
+  "description": "非空 options = 确实依赖过那个透传通道：故意不静默忽略，错误里给出唯一可行的替代（insecure_hosts）",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "options": {
+      "ssl_insecure": "true"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.options"
+  }
+}

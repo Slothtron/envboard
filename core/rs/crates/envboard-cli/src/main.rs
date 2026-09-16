@@ -12,7 +12,6 @@
 //!    退出而结束，所以要让环境常驻必须用 `envboard run`；这也是为什么 `env` 子命令
 //!    只改期望状态、真正的拉起交给 resident 循环。
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -164,17 +163,16 @@ enum EnvCommand {
         /// 绑定规则名（需先 `envboard rules import`）。
         #[arg(long)]
         rules: Option<String>,
-        /// 透传给 core 的每实例选项，可重复，形如 `--option ssl_insecure=true`
-        /// （**持久化在环境上**，受 denylist 约束；改它要 `env edit`）。
-        #[arg(long = "option", value_name = "K=V")]
-        options: Vec<String>,
         #[arg(long, default_value = "")]
         description: String,
     },
     /// 修改已有环境（PATCH 语义：只改给出来的字段）。
     ///
-    /// **改名、换端口、换绑定与换选项都必须先停止**：它们都是环境的启动契约，
-    /// 运行中改会让客户端代理配置、状态文件与进程记录同时对不上。描述是热改。
+    /// **改名、换端口与换代理凭据都必须先停止**：它们都是环境的启动契约，运行中改会让
+    /// 客户端代理配置、状态文件与进程记录同时对不上。描述、放行域名清单与规则绑定是**热**的。
+    ///
+    /// 注意：按域名放宽上游证书校验（`insecure_hosts`）与代理凭据**没有 CLI 开关** ——
+    /// 它们的入口只有工作台，这是有意的（选项透传那条任意通道已经删除）。
     Edit {
         name: String,
         /// 改名（新名字不能已存在）。
@@ -189,17 +187,11 @@ enum EnvCommand {
         /// 解除规则绑定（回到"不覆盖"）。与 `--rules` 互斥。
         #[arg(long, conflicts_with = "rules")]
         no_rules: bool,
-        /// 整体替换每实例选项（PATCH 到 `options`，**不是**逐键合并）。可重复。
-        #[arg(long = "option", value_name = "K=V")]
-        options: Vec<String>,
-        /// 清空全部每实例选项（回到"不透传"）。与 `--option` 互斥。
-        #[arg(long, conflicts_with = "options")]
-        no_options: bool,
         /// 改描述；给空串即清空。
         #[arg(long)]
         description: Option<String>,
     },
-    /// 标记为"期望运行"并尝试启动（选项取环境上持久化的 `options`）。
+    /// 标记为"期望运行"并尝试启动（配置取环境上持久化的字段）。
     Start { name: String },
     /// 停止并标记为"期望停止"。
     Stop { name: String },
@@ -387,8 +379,6 @@ fn build_core(
                     .unwrap_or_else(|| PathBuf::from("mitmdump")),
                 python: cli.core_python.clone(),
                 agent_dir: config.agent_dir.clone(),
-                reload_interval_secs: config.reload_interval_secs,
-                annotate_flow: true,
                 startup_timeout_secs: 30,
             },
             clock,
@@ -480,7 +470,6 @@ fn thin_dispatch(client: ApiClient, cli: &Cli) -> Result<(), Error> {
                 name,
                 port,
                 rules,
-                options,
                 description,
             } => {
                 let mut body = serde_json::json!({"name": name, "description": description});
@@ -490,9 +479,6 @@ fn thin_dispatch(client: ApiClient, cli: &Cli) -> Result<(), Error> {
                 if let Some(port) = port {
                     body["listen"] = serde_json::json!({"port": port});
                 }
-                if !options.is_empty() {
-                    body["options"] = options_value(options)?;
-                }
                 print_json(&client.post("/api/environments", Some(&body))?, json)
             }
             EnvCommand::Edit {
@@ -501,19 +487,9 @@ fn thin_dispatch(client: ApiClient, cli: &Cli) -> Result<(), Error> {
                 port,
                 rules,
                 no_rules,
-                options,
-                no_options,
                 description,
             } => {
-                let patch = edit_patch(
-                    rename,
-                    *port,
-                    rules,
-                    *no_rules,
-                    options,
-                    *no_options,
-                    description,
-                )?;
+                let patch = edit_patch(rename, *port, rules, *no_rules, description)?;
                 print_json(
                     &client.patch(&format!("/api/environments/{name}"), &patch)?,
                     json,
@@ -557,15 +533,24 @@ fn print_json_or_view(value: &serde_json::Value, json: bool) -> Result<(), Error
         return Ok(());
     }
     println!(
-        "{:<12} {:<6} {:<16} rules={:<8} {}{}",
+        "{:<12} {:<6} {:<16} rules={:<8} insecure={:<3} {}{}",
         value["name"].as_str().unwrap_or("-"),
         value["desired"].as_str().unwrap_or("-"),
         value["health"].as_str().unwrap_or("-"),
         format!(
-            "{}({})",
+            "{}({}){}",
             value["rules"].as_str().unwrap_or("-"),
-            value["rules_count"].as_u64().unwrap_or(0)
+            value["rules_count"].as_u64().unwrap_or(0),
+            if value["rules_missing"].as_bool().unwrap_or(false) {
+                "*"
+            } else {
+                ""
+            }
         ),
+        value["insecure_hosts"]
+            .as_array()
+            .map(|hosts| hosts.len())
+            .unwrap_or(0),
         value["description"]
             .as_str()
             .filter(|text| !text.is_empty())
@@ -580,6 +565,9 @@ fn print_json_or_view(value: &serde_json::Value, json: bool) -> Result<(), Error
         && let Some(command) = value["proxy_command"].as_str()
     {
         println!("  {command}");
+    }
+    if value["rules_missing"].as_bool().unwrap_or(false) {
+        println!("  note: the rules binding is not in effect — this environment overrides nothing");
     }
     Ok(())
 }
@@ -680,6 +668,7 @@ fn status(manager: &Manager, json: bool) -> Result<(), Error> {
                     "rewrite_upstream": capabilities.rewrite_upstream,
                     "external_processes": capabilities.external_processes,
                     "reports_rules_count": capabilities.reports_rules_count,
+                    "per_domain_insecure": capabilities.per_domain_insecure,
                 },
                 "config": manager.config().to_string(),
                 "environments": views.len(),
@@ -737,7 +726,10 @@ async fn resident(
     println!("resident: holding the state lock; Ctrl-C to exit");
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
-        manager.maintain_logs();
+        // 周期维护：日志轮转 + 规则库/软链对账（自愈就地发生）。
+        for message in manager.maintain() {
+            println!("maintain: {message}");
+        }
         let views = manager.list()?;
         for view in views {
             print_view(&view, json)?;
@@ -752,15 +744,12 @@ async fn resident(
 ///
 /// 只放**给出来的**字段：PATCH 语义是"改这几项"，没给的一律不动。
 /// `--no-rules` 显式写成 `null` —— 契约里 `rules: null` 就是"不覆盖"，
-/// 与"没给这个字段"是两件事。`--option` / `--no-options` 同款：
-/// `options` 是**整体替换**（不是逐键合并），`null` 即清空回 `{}`。
+/// 与"没给这个字段"是两件事。
 fn edit_patch(
     rename: &Option<String>,
     port: Option<u16>,
     rules: &Option<String>,
     no_rules: bool,
-    options: &[String],
-    no_options: bool,
     description: &Option<String>,
 ) -> Result<serde_json::Value, Error> {
     let mut patch = serde_json::Map::new();
@@ -775,11 +764,6 @@ fn edit_patch(
     } else if let Some(rules) = rules {
         patch.insert("rules".into(), serde_json::Value::from(rules.clone()));
     }
-    if no_options {
-        patch.insert("options".into(), serde_json::Value::Null);
-    } else if !options.is_empty() {
-        patch.insert("options".into(), options_value(options)?);
-    }
     if let Some(description) = description {
         patch.insert(
             "description".into(),
@@ -790,33 +774,10 @@ fn edit_patch(
         return Err(Error::invalid_config(
             "environment",
             "nothing to change: pass at least one of --rename/--port/--rules/--no-rules/\
-             --option/--no-options/--description (an empty patch would report success without \
-             doing anything)",
+             --description (an empty patch would report success without doing anything)",
         ));
     }
     Ok(serde_json::Value::Object(patch))
-}
-
-/// `--option K=V`（可重复）折成契约里的 `options` 对象。
-///
-/// denylist 的判定权在 core（`envboard_core_api::validate_options`），这里**不复制**
-/// 一份键表；CLI 只负责把 `K=V` 拆开。
-fn parse_options(raw: &[String]) -> Result<BTreeMap<String, String>, Error> {
-    let mut options = BTreeMap::new();
-    for item in raw {
-        let Some((key, value)) = item.split_once('=') else {
-            return Err(Error::invalid_config(
-                "instance.options",
-                format!("expected K=V, got {item:?}"),
-            ));
-        };
-        options.insert(key.trim().to_string(), value.trim().to_string());
-    }
-    Ok(options)
-}
-
-fn options_value(raw: &[String]) -> Result<serde_json::Value, Error> {
-    Ok(serde_json::to_value(parse_options(raw)?)?)
 }
 
 async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Result<(), Error> {
@@ -832,7 +793,6 @@ async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Resu
             name,
             port,
             rules,
-            options,
             description,
         } => {
             let mut input = serde_json::Map::new();
@@ -844,9 +804,6 @@ async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Resu
             if let Some(port) = port {
                 input.insert("listen".into(), serde_json::json!({"port": port}));
             }
-            if !options.is_empty() {
-                input.insert("options".into(), options_value(&options)?);
-            }
             let view = manager.create(&serde_json::Value::Object(input))?;
             print_view(&view, json)
         }
@@ -856,19 +813,9 @@ async fn env_command(manager: &Manager, command: EnvCommand, json: bool) -> Resu
             port,
             rules,
             no_rules,
-            options,
-            no_options,
             description,
         } => {
-            let patch = edit_patch(
-                &rename,
-                port,
-                &rules,
-                no_rules,
-                &options,
-                no_options,
-                &description,
-            )?;
+            let patch = edit_patch(&rename, port, &rules, no_rules, &description)?;
             print_view(&manager.update(&name, &patch)?, json)
         }
         EnvCommand::Start { name } => {
@@ -955,13 +902,18 @@ fn print_view(view: &EnvView, json: bool) -> Result<(), Error> {
     }
     let health = view.health.as_str();
     let reason = view.health.reason().unwrap_or_default();
-    let rules = view.rules.as_deref().unwrap_or("-");
+    let rules = match (view.rules.as_deref(), view.rules_missing) {
+        (Some(name), false) => format!("{name}({})", view.rules_count),
+        (Some(name), true) => format!("{name}({})*", view.rules_count),
+        (None, _) => "-".to_string(),
+    };
     println!(
-        "{:<12} {:<6} {:<16} rules={:<8} {}{}",
+        "{:<12} {:<6} {:<16} rules={:<8} insecure={:<3} {}{}",
         view.name,
         format!("{:?}", view.desired).to_lowercase(),
         health,
-        format!("{rules}({})", view.rules_count),
+        rules,
+        view.insecure_hosts.len(),
         quote_if_set(&view.description),
         if reason.is_empty() {
             String::new()
@@ -971,6 +923,9 @@ fn print_view(view: &EnvView, json: bool) -> Result<(), Error> {
     );
     if matches!(view.health, InstanceHealth::Running) {
         println!("  {}", view.proxy_command);
+    }
+    if view.rules_missing {
+        println!("  note: the rules binding is not in effect — this environment overrides nothing");
     }
     Ok(())
 }

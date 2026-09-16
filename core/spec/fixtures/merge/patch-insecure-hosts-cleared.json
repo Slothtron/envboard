@@ -1,0 +1,23 @@
+{
+  "capability": "environment.merge",
+  "description": "显式 insecure_hosts: null = 清空回空清单（回到全部严格校验）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 16600
+      },
+      "insecure_hosts": [
+        "a.example.com"
+      ]
+    },
+    "patch": {
+      "insecure_hosts": null
+    }
+  },
+  "expect": {
+    "ok": true,
+    "insecure_hosts": []
+  }
+}

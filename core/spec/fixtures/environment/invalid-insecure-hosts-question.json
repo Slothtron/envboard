@@ -1,0 +1,18 @@
+{
+  "capability": "environment.validate",
+  "description": "拒绝 `?`：与 `*` 同理，通配一律不接受（也不做『剥掉前缀』的处理）",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "insecure_hosts": [
+      "a?.kdocs.cn"
+    ]
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.insecure_hosts.0"
+  }
+}

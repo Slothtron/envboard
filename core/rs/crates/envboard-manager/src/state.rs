@@ -36,6 +36,43 @@ pub struct StoredError {
     pub message: String,
 }
 
+/// 规则库账本里的一条记录。
+///
+/// **账本是唯一真相**：`<rules_dir>/<name>.rules` 只是它的一份**可再生物化产物**
+/// （文件被删/被改坏都能按 `rendered` 逐字节重建）。把规则正文一起存进来，是为了
+/// 备份/恢复与"自愈"能够成立；代价是状态文件会变大，用体积换确定性是这里的取舍。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredRules {
+    /// 规则名（白名单 `^[a-z][a-z0-9_-]{0,31}$`，与环境 `rules` 字段同源校验）。
+    pub name: String,
+    /// 导入时给的来源标签（仅展示，可为空）。
+    #[serde(default)]
+    pub source: Option<String>,
+    /// **规范化渲染后的完整文本**（与物化文件的字节一致）。
+    pub rendered: String,
+    /// 被接受的条目数。
+    #[serde(default)]
+    pub entries: usize,
+    /// 被跳过的行数。
+    #[serde(default)]
+    pub skipped: usize,
+    /// 冲突（同名多次映射）次数。
+    #[serde(default)]
+    pub conflicts: usize,
+    pub imported_at: u64,
+}
+
+/// 某环境当前**期望生效**的那份 `config.json` 的指纹与写入时刻。
+///
+/// 存在状态里而不是内存里：管理器重启后实例还在跑，判定"它是不是还在追这份配置"
+/// 必须仍然成立。`written_at` 只在这份期望内容**变化时**更新 —— 每轮 reconcile 都刷新
+/// 的话，一个永远读不进新配置的实例会被无限期当成"收敛中"。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSeal {
+    pub hash: String,
+    pub written_at: u64,
+}
+
 /// 持久化状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedState {
@@ -43,6 +80,12 @@ pub struct PersistedState {
     /// 环境定义（归一化后的记录）。用 `Vec` 而不是 map，是为了让文件里的顺序稳定、
     /// 便于 diff；查找走下面的辅助方法。
     pub environments: Vec<EnvironmentJson>,
+    /// 规则库账本。
+    ///
+    /// `#[serde(default)]` 是有意的：升级前写的状态文件没有这一段，加载时必须成立
+    /// （否则管理器起不来），随后由物化目录**回填**（见 `Manager::reconcile_rules`）。
+    #[serde(default)]
+    pub rules: Vec<StoredRules>,
     #[serde(default)]
     pub desired: BTreeMap<String, Desired>,
     /// 上次启动记录下来的进程身份（孤儿清理的判据：PID + 启动时刻 + cmdline）。
@@ -58,6 +101,9 @@ pub struct PersistedState {
     /// 需要跨重启保留的异常标记（`port_conflict` / `config_mismatch`）。
     #[serde(default)]
     pub marks: BTreeMap<String, StoredError>,
+    /// 每个环境"期望生效的配置"指纹（收敛判定的基准）。
+    #[serde(default)]
+    pub config_seals: BTreeMap<String, ConfigSeal>,
 }
 
 impl Default for PersistedState {
@@ -65,10 +111,12 @@ impl Default for PersistedState {
         Self {
             version: STATE_VERSION,
             environments: Vec::new(),
+            rules: Vec::new(),
             desired: BTreeMap::new(),
             records: BTreeMap::new(),
             auto_port: BTreeMap::new(),
             marks: BTreeMap::new(),
+            config_seals: BTreeMap::new(),
         }
     }
 }
@@ -82,6 +130,11 @@ impl PersistedState {
         self.environments
             .iter()
             .find(|env| env.get("name").and_then(|name| name.as_str()) == Some(name))
+    }
+
+    /// 账本里找一条规则。
+    pub fn rules_entry(&self, name: &str) -> Option<&StoredRules> {
+        self.rules.iter().find(|entry| entry.name == name)
     }
 }
 
@@ -106,8 +159,10 @@ pub struct ManagerConfig {
     pub max_attempts: usize,
     /// 状态文件的"新鲜度"窗口：`now - updated_at > ttl` 即视为不健康。
     pub status_ttl_secs: u64,
-    /// 注入器规则热重载轮询间隔（经 `--set` 下发）。
+    /// 注入器热重载的轮询间隔（写进 `config.json`，也是收敛窗口的基数）。
     pub reload_interval_secs: u64,
+    /// 是否给流加注解（写进 `config.json`）。
+    pub annotate: bool,
 }
 
 impl ManagerConfig {
@@ -127,7 +182,15 @@ impl ManagerConfig {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             status_ttl_secs: 15,
             reload_interval_secs: 5,
+            annotate: true,
         }
+    }
+
+    /// 某个环境的 agent 目录（注入器 + `config.json` + 规则软链）。
+    ///
+    /// 环境名已在 domain 层过白名单校验，所以这里的拼接不会逃出 `agent_dir`。
+    pub fn env_agent_dir(&self, env: &str) -> PathBuf {
+        self.agent_dir.join(env)
     }
 
     pub fn state_file(&self) -> PathBuf {

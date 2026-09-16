@@ -11,6 +11,8 @@
     "listen": { "host": "0.0.0.0", "port": 16301 },
     "rules": null,
     "description": "",
-    "proxy_auth": null
+    "insecure_hosts": [],
+    "proxy_user": null,
+    "proxy_password": null
   }
 }

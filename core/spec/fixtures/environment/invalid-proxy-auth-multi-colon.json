@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "proxy_auth 多个冒号：密码里含 : 会与 mitmproxy proxyauth 的切分歧义，从源头拒绝",
-  "input": { "name": "auth", "listen": { "port": 16301 }, "proxy_auth": "a:b:c" },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.proxy_auth" }
-}

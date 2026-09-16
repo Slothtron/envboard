@@ -1,0 +1,14 @@
+{
+  "capability": "insecure.hosts",
+  "description": "客户端不发 SNI 时退回上连地址：规则把域名改写到内网 IP 的常见形态",
+  "input": {
+    "hosts": [
+      "10.13.34.11"
+    ],
+    "address": "10.13.34.11"
+  },
+  "expect": {
+    "ok": true,
+    "match": true
+  }
+}

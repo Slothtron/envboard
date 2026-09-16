@@ -1,14 +1,22 @@
 //! 环境（`Environment`）领域模型 —— 纯逻辑，不碰 fs / 网络 / 宿主。
 //!
-//! 契约见 `core/spec/capabilities.md`（§领域不变量）。v2 把 v1 的 8 字段收成 5 个：
-//! `name` / `listen` / `rules` / `options` / `description`；v2.1 增加第 6 个字段
-//! `proxy_auth`（代理访问鉴权，`user:password`）。被删除的字段（`dns_servers`、
-//! `hosts`、`domain_suffix`、`color`…）现在会**响亮失败**，不会被当成无用字段收下。
+//! 契约见 `core/spec/capabilities.md`（§领域不变量）。当前模型是 **7 个字段**：
+//! `name` / `listen` / `rules` / `insecure_hosts` / `description` /
+//! `proxy_user` / `proxy_password`。
+//!
+//! 两条形状变更都**只做一次**（迁移 shim，读到旧形状就转换，写出永不含旧字段）：
+//!
+//! * `options`（任意选项透传）**已删除** —— 空对象/`null` 被接受并忽略，
+//!   非空即 `invalid_config`（它代表"确实依赖了那个通道"）；
+//! * `proxy_auth`（`user:password` 一整串）**已拆成两个字段** —— 读时无损拆分，
+//!   写时不再输出。
+//!
+//! 被删除的更早字段（`dns_servers`、`hosts`、`domain_suffix`、`color`…）仍然
+//! **响亮失败**，不会被当成无用字段收下。
 
-use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, Listen, validate_options};
+use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, Listen};
 use serde_json::{Map, Value};
 
 /// 对外 JSON 形状里的字段名（未知字段判定用同一张表）。
@@ -16,10 +24,17 @@ pub const KNOWN_FIELDS: &[&str] = &[
     "name",
     "listen",
     "rules",
-    "options",
+    "insecure_hosts",
     "description",
-    "proxy_auth",
+    "proxy_user",
+    "proxy_password",
 ];
+
+/// 只读（迁移）不写的旧字段。
+///
+/// 它们**不是**未知字段：升级路径上一定会读到，一律拒绝会让管理器起不来。
+/// 但它们也**永远不会**出现在 `to_json` 的输出里。
+pub const TOMBSTONE_FIELDS: &[&str] = &["options", "proxy_auth"];
 
 /// 契约里的路径前缀 —— 所有 `field` 都从它开始。
 pub const PATH: &str = "environment";
@@ -30,18 +45,23 @@ pub const NAME_MAX_LEN: usize = 32;
 /// `description` 上限（字符数），见 `core/spec/capabilities.md`。
 pub const DESCRIPTION_MAX_CHARS: usize = 200;
 
-/// `proxy_auth`（`user:password`）总长上限。
-pub const PROXY_AUTH_MAX_LEN: usize = 128;
+/// `proxy_user` 长度上限（字符数）。
+pub const PROXY_USER_MAX_LEN: usize = 64;
 
-/// 一个环境 = 一个监听端口 + 一份可选的规则绑定 + 一组透传给 core 的选项。
+/// `proxy_password` 长度上限（字符数）。
+pub const PROXY_PASSWORD_MAX_LEN: usize = 128;
+
+/// 一个环境 = 一个监听端口 + 一份可选的规则绑定 + 一份按域名放宽上游校验的清单
+/// + 可选的代理访问鉴权。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
     name: String,
     listen: Listen,
     rules: Option<String>,
-    options: BTreeMap<String, String>,
+    insecure_hosts: Vec<String>,
     description: String,
-    proxy_auth: Option<String>,
+    proxy_user: Option<String>,
+    proxy_password: Option<String>,
 }
 
 impl Environment {
@@ -49,17 +69,25 @@ impl Environment {
         name: impl Into<String>,
         listen: Listen,
         rules: Option<String>,
-        options: BTreeMap<String, String>,
+        insecure_hosts: Vec<String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
             listen,
             rules,
-            options,
+            insecure_hosts,
             description: description.into(),
-            proxy_auth: None,
+            proxy_user: None,
+            proxy_password: None,
         }
+    }
+
+    /// 设置代理访问鉴权。**要么都给、要么都不给**（[`Environment::from_json`] 会重新校验）。
+    pub fn with_credentials(mut self, user: Option<String>, password: Option<String>) -> Self {
+        self.proxy_user = user;
+        self.proxy_password = password;
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -74,20 +102,32 @@ impl Environment {
         self.rules.as_deref()
     }
 
-    /// 透传给 core 的每实例选项（**已过 denylist**）。环境层不解释它们的含义。
-    pub fn options(&self) -> &BTreeMap<String, String> {
-        &self.options
+    /// 按域名放宽上游证书校验的完整域名清单（**已归一化 + 去重 + 排序**）。
+    pub fn insecure_hosts(&self) -> &[String] {
+        &self.insecure_hosts
     }
 
     pub fn description(&self) -> &str {
         &self.description
     }
 
-    pub fn proxy_auth(&self) -> Option<&str> {
-        self.proxy_auth.as_deref()
+    pub fn proxy_user(&self) -> Option<&str> {
+        self.proxy_user.as_deref()
+    }
+
+    pub fn proxy_password(&self) -> Option<&str> {
+        self.proxy_password.as_deref()
+    }
+
+    /// 代理访问鉴权是否启用。视图/日志**只**能用这个布尔，禁止回显凭据。
+    pub fn proxy_auth_enabled(&self) -> bool {
+        self.proxy_user.is_some() && self.proxy_password.is_some()
     }
 
     /// 归一化后的完整记录 —— 可直接持久化，也是契约 fixture 比对的形状。
+    ///
+    /// **七个键永远都在**（空值是 `[]` / `null`）：归一化输出确定，diff 才稳定。
+    /// 凭据是明文落在这里的，所以状态文件必须 0600（由持久化层保证）。
     pub fn to_json(&self) -> Value {
         let mut listen = Map::new();
         listen.insert("host".into(), Value::String(self.listen.host.to_string()));
@@ -103,13 +143,12 @@ impl Environment {
                 None => Value::Null,
             },
         );
-        // `options` 始终存在（空也是 `{}`）：归一化输出是确定性的，diff 才稳定。
         out.insert(
-            "options".into(),
-            Value::Object(
-                self.options
+            "insecure_hosts".into(),
+            Value::Array(
+                self.insecure_hosts
                     .iter()
-                    .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                    .map(|host| Value::String(host.clone()))
                     .collect(),
             ),
         );
@@ -117,13 +156,8 @@ impl Environment {
             "description".into(),
             Value::String(self.description.clone()),
         );
-        out.insert(
-            "proxy_auth".into(),
-            match &self.proxy_auth {
-                Some(value) => Value::String(value.clone()),
-                None => Value::Null,
-            },
-        );
+        out.insert("proxy_user".into(), nullable(&self.proxy_user));
+        out.insert("proxy_password".into(), nullable(&self.proxy_password));
         Value::Object(out)
     }
 
@@ -138,48 +172,64 @@ impl Environment {
         })?;
 
         for key in object.keys() {
-            if !KNOWN_FIELDS.contains(&key.as_str()) {
+            if !KNOWN_FIELDS.contains(&key.as_str()) && !TOMBSTONE_FIELDS.contains(&key.as_str()) {
                 return Err(Error::invalid_config(
                     format!("{PATH}.{key}"),
                     format!(
-                        "unknown field {key:?}: the v2 model has only {KNOWN_FIELDS:?} \
-                         (fields removed in v2 are rejected loudly, not ignored)"
+                        "unknown field {key:?}: the model has only {KNOWN_FIELDS:?} \
+                         (fields removed earlier are rejected loudly, not ignored)"
                     ),
                 ));
             }
         }
+        check_options_tombstone(object.get("options"))?;
 
         let name = normalize_name(&require_string(object, "name", &format!("{PATH}.name"))?);
         validate_name(&name)?;
 
         let (host, port) = parse_listen(object.get("listen"))?;
         let rules = normalize_rules(object.get("rules"))?;
-        let options = parse_options(object.get("options"))?;
+        let insecure_hosts = parse_insecure_hosts(object.get("insecure_hosts"))?;
         let description = parse_description(object.get("description"))?;
-        let proxy_auth = parse_proxy_auth(object.get("proxy_auth"))?;
+        let (proxy_user, proxy_password) = parse_credentials(object)?;
 
         Ok(Self {
             name,
             listen: Listen::new(host, port),
             rules,
-            options,
+            insecure_hosts,
             description,
-            proxy_auth,
+            proxy_user,
+            proxy_password,
         })
     }
 
     /// PATCH 语义：未提及的字段保持不变，**显式 `null` = 清空**，合并后**重新校验**。
     ///
     /// `listen` 是整体替换而不是深合并 —— host 与 port 是同一个身份的两个部分，
-    /// 深合并会让"只改 host"意外保留旧端口。
+    /// 深合并会让"只改 host"意外保留旧端口。`insecure_hosts` 与 `proxy_*` 同理：
+    /// 整体替换，不做元素级合并（列表的"部分修改"没有无歧义的语义）。
+    ///
+    /// 旧字段也能出现在 patch 里（老客户端）：`options: {}` 被忽略，
+    /// `proxy_auth` 走迁移 —— 但如果这份配置**已经有**凭据，两者同时给出会被拒绝
+    /// （那是真的歧义，不该猜）。
     pub fn merged(&self, patch: &Value) -> Result<Self, Error> {
         let patch = patch.as_object().ok_or_else(|| {
             Error::invalid_config(PATH, format!("patch must be an object, got {patch}"))
         })?;
 
+        // 旧 `proxy_auth` 是"整体替换凭据"：先把它要替换掉的目标清空，
+        // 否则 base 上的旧凭据会让迁移误判成"两套形状同时给了"。
+        let replaces_credentials = patch
+            .get("proxy_auth")
+            .is_some_and(|value| !value.is_null());
         let mut merged = self.to_json().as_object().cloned().unwrap_or_default();
+        if replaces_credentials {
+            merged.remove("proxy_user");
+            merged.remove("proxy_password");
+        }
         for (key, value) in patch {
-            if !KNOWN_FIELDS.contains(&key.as_str()) {
+            if !KNOWN_FIELDS.contains(&key.as_str()) && !TOMBSTONE_FIELDS.contains(&key.as_str()) {
                 return Err(Error::invalid_config(
                     format!("{PATH}.{key}"),
                     format!("unknown field {key:?} in patch"),
@@ -188,6 +238,13 @@ impl Environment {
             merged.insert(key.clone(), value.clone());
         }
         Self::from_json(&Value::Object(merged))
+    }
+}
+
+fn nullable(value: &Option<String>) -> Value {
+    match value {
+        Some(text) => Value::String(text.clone()),
+        None => Value::Null,
     }
 }
 
@@ -245,7 +302,7 @@ pub fn normalize_rules(value: Option<&Value>) -> Result<Option<String>, Error> {
     Ok(Some(name))
 }
 
-/// 规则名白名单（沿用 v1 的 `RULES_NAME_RE`，与 `NAME_RE` 同形）。
+/// 规则名白名单（与 `NAME_RE` 同形）。
 pub fn validate_rules_name(name: &str) -> Result<(), Error> {
     let field = format!("{PATH}.rules");
     let mut chars = name.chars();
@@ -366,110 +423,219 @@ fn parse_description(value: Option<&Value>) -> Result<String, Error> {
     Ok(text)
 }
 
-/// `proxy_auth` 解析：`null`/缺省 = 不启用；否则必须是 `user:password`。
+/// `insecure_hosts` 解析：缺省/`null` = 空列表；否则必须是字符串数组。
 ///
-/// 规则（契约见 `core/spec/capabilities.md`）：
-/// * 恰好一个 `:`，两段都非空 —— 用户名或密码本身含 `:` 的场景不支持
-///   （mitmproxy 的 `proxyauth` 也按第一个 `:` 切分，这里从源头禁掉歧义）；
-/// * 两段与整体都**不含空白字符与控制字符**（Basic 认证的编码形态不允许）；
-/// * trim 后总长 ≤ [`PROXY_AUTH_MAX_LEN`]。
-///
-/// 这是**凭据**：出错信息里只说规则，绝不回显用户输入的值。
-fn parse_proxy_auth(value: Option<&Value>) -> Result<Option<String>, Error> {
-    let field = format!("{PATH}.proxy_auth");
-    let Some(value) = value else { return Ok(None) };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let raw = value.as_str().ok_or_else(|| {
-        Error::invalid_config(
-            &field,
-            format!("proxy_auth must be a string or null, got {value}"),
-        )
-    })?;
-    let text = raw.trim();
-    let (user, password) = text.split_once(':').ok_or_else(|| {
-        Error::invalid_config(
-            &field,
-            "proxy_auth must be `user:password` (exactly one colon, both sides non-empty)",
-        )
-    })?;
-    let ok_part = |part: &str| {
-        !part.is_empty()
-            && part
-                .chars()
-                .all(|c| !c.is_whitespace() && !c.is_control() && c != ':')
+/// 每条都归一化（trim → 小写 → 去尾部根点）后**去重 + 排序**再持久化，
+/// 所以"同一份输入"永远得到"同一份列表"。拒绝通配符的理由见
+/// `core/spec/capabilities.md` 的「insecure_hosts（按域名放宽上游校验）」一节：
+/// 放宽校验必须逐条点名，偷偷扩大范围比不生效更危险。
+fn parse_insecure_hosts(value: Option<&Value>) -> Result<Vec<String>, Error> {
+    let field = format!("{PATH}.insecure_hosts");
+    let Some(value) = value else {
+        return Ok(Vec::new());
     };
-    if !ok_part(user) || !ok_part(password) {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let array = value.as_array().ok_or_else(|| {
+        Error::invalid_config(
+            &field,
+            format!("insecure_hosts must be an array of complete domain names, got {value}"),
+        )
+    })?;
+    if array.len() > envboard_rules::INSECURE_HOSTS_MAX {
         return Err(Error::invalid_config(
             &field,
-            "proxy_auth must be `user:password` without whitespace or control characters, \
-             and no colon inside either part",
+            format!(
+                "insecure_hosts has {} entries; the limit is {}",
+                array.len(),
+                envboard_rules::INSECURE_HOSTS_MAX
+            ),
         ));
     }
-    if text.chars().count() > PROXY_AUTH_MAX_LEN {
-        return Err(Error::invalid_config(
-            &field,
-            format!("proxy_auth is longer than {PROXY_AUTH_MAX_LEN} characters"),
-        ));
+
+    let mut raw_hosts: Vec<String> = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let entry_field = format!("{field}.{index}");
+        let raw = item.as_str().ok_or_else(|| {
+            Error::invalid_config(&entry_field, "each entry must be a string".to_string())
+        })?;
+        if envboard_rules::has_wildcard(raw) {
+            return Err(Error::invalid_config(
+                &entry_field,
+                format!(
+                    "{raw:?} contains a wildcard: insecure_hosts matches complete domain names \
+                     only, so list every domain explicitly (wildcards are not expanded)"
+                ),
+            ));
+        }
+        let host = envboard_rules::validate_insecure_host(raw).ok_or_else(|| {
+            Error::invalid_config(
+                &entry_field,
+                format!("{raw:?} is not a valid domain name or IP literal"),
+            )
+        })?;
+        raw_hosts.push(host);
     }
-    Ok(Some(text.to_string()))
+    Ok(envboard_rules::normalize_insecure_hosts(&raw_hosts))
 }
 
-/// `options` 解析：省略/`null` = 空对象；否则必须是 `{string: string}`，
-/// 且每个键都要过 [`validate_options`] 的 denylist（管理器自有键、拓扑键、`envboard_`
-/// 前缀）。
+/// `options` 墓碑：空对象/`null`/缺省一律忽略，非空即失败。
 ///
-/// **值不由本层解释**：`ssl_insecure` 这类键只有 core 认识，环境层只负责存下、
-/// 原样下发，并保证同一份配置在每次启动（含 reconcile）都一致。
-fn parse_options(value: Option<&Value>) -> Result<BTreeMap<String, String>, Error> {
+/// 为什么必须"响亮"：非空意味着这份配置**确实依赖**那个透传通道，而它已经没有替代
+/// 通道了（多数 core 选项没有一等字段）。静默忽略会让用户以为设置还在生效。
+fn check_options_tombstone(value: Option<&Value>) -> Result<(), Error> {
     let field = format!("{PATH}.options");
     let Some(value) = value else {
-        return Ok(BTreeMap::new());
+        return Ok(());
     };
     if value.is_null() {
-        return Ok(BTreeMap::new());
+        return Ok(());
     }
     let object = value.as_object().ok_or_else(|| {
         Error::invalid_config(&field, format!("options must be an object, got {value}"))
     })?;
+    if object.is_empty() {
+        return Ok(());
+    }
+    Err(Error::invalid_config(
+        field,
+        "the per-instance `options` passthrough was removed: an instance is configured only \
+         through first-class fields. If the affected domains need a relaxed upstream TLS check, \
+         list them in `insecure_hosts` — there is no replacement for any other core option",
+    ))
+}
 
-    let mut options = BTreeMap::new();
-    for (key, raw) in object {
-        if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c == '=') {
-            return Err(Error::invalid_config(
-                &field,
-                format!(
-                    "invalid option key {key:?}: must be non-empty and contain no whitespace or \
-                     '=' (the key has to survive the `--set key=value` round trip)"
-                ),
-            ));
+/// 代理凭据解析（`proxy_user` + `proxy_password`，或旧形状 `proxy_auth`）。
+///
+/// 规则：
+/// * **同生共死** —— 都为空 = 不启用；只有一边 → `invalid_config`，字段指向**缺失**的那一边；
+/// * 每段非空，且不含 `:`、空白与控制字符（`:` 会与 mitmproxy `proxyauth` 的
+///   `split(":")` 切分歧义；空白/控制字符不是合法的 Basic 凭据）；
+/// * 长度上限分别是 [`PROXY_USER_MAX_LEN`] 与 [`PROXY_PASSWORD_MAX_LEN`]；
+/// * 旧形状 `proxy_auth` 读时**无损拆分**，写时不再输出；与两个新字段
+///   **同时给出**（都非空）即报冲突，因为那是真的歧义；
+/// * **任何错误信息都不回显取值** —— 凭据只出现在持久化记录与实例启动参数里。
+fn parse_credentials(
+    object: &Map<String, Value>,
+) -> Result<(Option<String>, Option<String>), Error> {
+    let user_field = format!("{PATH}.proxy_user");
+    let password_field = format!("{PATH}.proxy_password");
+    let legacy_field = format!("{PATH}.proxy_auth");
+
+    let user = parse_credential_part(
+        object.get("proxy_user"),
+        &user_field,
+        PROXY_USER_MAX_LEN,
+        "proxy_user",
+    )?;
+    let password = parse_credential_part(
+        object.get("proxy_password"),
+        &password_field,
+        PROXY_PASSWORD_MAX_LEN,
+        "proxy_password",
+    )?;
+
+    match object.get("proxy_auth") {
+        None | Some(Value::Null) => {}
+        Some(legacy) => {
+            if user.is_some() || password.is_some() {
+                return Err(Error::invalid_config(
+                    legacy_field,
+                    "proxy_auth was split into proxy_user + proxy_password; both shapes were \
+                     given at once, so there is no unambiguous winner — keep only the new \
+                     fields (no value is echoed back)",
+                ));
+            }
+            let text = legacy.as_str().ok_or_else(|| {
+                Error::invalid_config(
+                    &legacy_field,
+                    "proxy_auth must be a `user:password` string or null \
+                     (no value is echoed back)",
+                )
+            })?;
+            // 旧实现整体 trim 后入库；迁移必须**无损**，所以保持同一条规则。
+            let text = text.trim();
+            let (raw_user, raw_password) = text.split_once(':').ok_or_else(|| {
+                Error::invalid_config(
+                    &legacy_field,
+                    "the legacy proxy_auth must be `user:password` with exactly one colon \
+                     (no value is echoed back)",
+                )
+            })?;
+            let user =
+                validate_credential_part(raw_user, &user_field, PROXY_USER_MAX_LEN, "proxy_user")?;
+            let password = validate_credential_part(
+                raw_password,
+                &password_field,
+                PROXY_PASSWORD_MAX_LEN,
+                "proxy_password",
+            )?;
+            return Ok((Some(user), Some(password)));
         }
-        let text = raw.as_str().ok_or_else(|| {
-            Error::invalid_config(
-                format!("{field}.{key}"),
-                format!("option {key:?} must have a string value, got {raw}"),
-            )
-        })?;
-        options.insert(key.clone(), text.to_string());
     }
 
-    // denylist 只有 core 侧那一份（这里不复制，避免两处漂移）；命中的错误路径是
-    // `instance.options.<key>`，改写成环境层的字段路径再往外报。
-    if let Err(error) = validate_options(&options) {
-        let key = error
-            .field
-            .as_deref()
-            .and_then(|field| field.strip_prefix("instance.options."))
-            .unwrap_or_default();
-        let path = if key.is_empty() {
-            field.clone()
-        } else {
-            format!("{field}.{key}")
-        };
-        return Err(Error::invalid_config(path, error.message));
+    match (user, password) {
+        (None, None) => Ok((None, None)),
+        (Some(user), Some(password)) => Ok((Some(user), Some(password))),
+        (Some(_), None) => Err(Error::invalid_config(
+            &password_field,
+            "proxy_password is required: proxy credentials are all-or-nothing \
+             (no value is echoed back)",
+        )),
+        (None, Some(_)) => Err(Error::invalid_config(
+            &user_field,
+            "proxy_user is required: proxy credentials are all-or-nothing \
+             (no value is echoed back)",
+        )),
     }
-    Ok(options)
+}
+
+fn parse_credential_part(
+    value: Option<&Value>,
+    field: &str,
+    max_chars: usize,
+    label: &str,
+) -> Result<Option<String>, Error> {
+    let Some(value) = value else { return Ok(None) };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let text = value.as_str().ok_or_else(|| {
+        Error::invalid_config(
+            field,
+            format!("{label} must be a string or null (no value is echoed back)"),
+        )
+    })?;
+    validate_credential_part(text, field, max_chars, label).map(Some)
+}
+
+fn validate_credential_part(
+    text: &str,
+    field: &str,
+    max_chars: usize,
+    label: &str,
+) -> Result<String, Error> {
+    let printable = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| !c.is_whitespace() && !c.is_control() && c != ':');
+    if !printable {
+        return Err(Error::invalid_config(
+            field,
+            format!(
+                "{label} must be non-empty and contain no ':', whitespace or control \
+                 characters (no value is echoed back)"
+            ),
+        ));
+    }
+    if text.chars().count() > max_chars {
+        return Err(Error::invalid_config(
+            field,
+            format!("{label} is longer than {max_chars} characters"),
+        ));
+    }
+    Ok(text.to_string())
 }
 
 /// 裸 IP 字面量解析：见 [`envboard_core_api::parse_ip_literal`]。
@@ -493,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_v1_fields_are_rejected_with_paths() {
+    fn removed_earlier_fields_are_rejected_with_paths() {
         for (field, value) in [
             ("dns_servers", json!(["10.0.0.53"])),
             ("hosts", json!({"api.example.com": "10.0.0.11"})),
@@ -547,86 +713,218 @@ mod tests {
     }
 
     #[test]
-    fn proxy_auth_is_parsed_and_normalized() {
+    fn empty_options_tombstone_is_accepted_and_never_written_back() {
+        let env = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "options": {}
+        }))
+        .unwrap();
+        assert!(env.to_json().get("options").is_none());
+        assert!(env.to_json().get("proxy_auth").is_none());
+
+        // 非空 = 确实依赖过那个通道 → 响亮失败，并给出可操作的指引
+        let error = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "options": {"ssl_insecure": "true"}
+        }))
+        .unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.options"));
+        assert!(error.message.contains("insecure_hosts"));
+
+        // 不是对象也不是 null → 同样是非法配置
+        let error = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "options": ["ssl_insecure=true"]
+        }))
+        .unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.options"));
+    }
+
+    #[test]
+    fn legacy_proxy_auth_is_migrated_losslessly() {
         let env = Environment::from_json(&json!({
             "name": "auth",
             "listen": {"port": 16600},
             "proxy_auth": "  alice:s3cret  "
         }))
         .unwrap();
-        assert_eq!(env.proxy_auth(), Some("alice:s3cret"));
-        // 缺省与显式 null 都是不启用
-        let none =
-            Environment::from_json(&json!({"name": "auth", "listen": {"port": 16600}})).unwrap();
-        assert_eq!(none.proxy_auth(), None);
-        let cleared = none.merged(&json!({"proxy_auth": null})).unwrap();
-        assert_eq!(cleared.proxy_auth(), None);
+        assert_eq!(env.proxy_user(), Some("alice"));
+        assert_eq!(env.proxy_password(), Some("s3cret"));
+        assert!(env.proxy_auth_enabled());
+        // 写出只有新字段
+        assert_eq!(env.to_json()["proxy_user"], json!("alice"));
+        assert_eq!(env.to_json()["proxy_password"], json!("s3cret"));
+        assert!(env.to_json().get("proxy_auth").is_none());
     }
 
     #[test]
-    fn invalid_proxy_auth_fails_loudly() {
+    fn credentials_are_all_or_nothing() {
+        let error = Environment::from_json(&json!({
+            "name": "auth",
+            "listen": {"port": 16600},
+            "proxy_user": "alice"
+        }))
+        .unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.proxy_password"));
+
+        let error = Environment::from_json(&json!({
+            "name": "auth",
+            "listen": {"port": 16600},
+            "proxy_password": "s3cret"
+        }))
+        .unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.proxy_user"));
+
+        // 两个显式 null = 不启用
+        let env = Environment::from_json(&json!({
+            "name": "auth",
+            "listen": {"port": 16600},
+            "proxy_user": null,
+            "proxy_password": null
+        }))
+        .unwrap();
+        assert!(!env.proxy_auth_enabled());
+    }
+
+    #[test]
+    fn invalid_credentials_fail_loudly_without_echoing_values() {
         let base = json!({"name": "auth", "listen": {"port": 16600}});
-        for (value, why) in [
-            (json!(""), "empty"),
-            (json!("   "), "whitespace only"),
-            (json!("no-colon"), "no colon"),
-            (json!("a:b:c"), "multiple colons"),
-            (json!(":pass"), "empty user"),
-            (json!("user:"), "empty password"),
-            (json!("us er:pass"), "whitespace inside"),
-            (json!("user:pa\u{7}ss"), "control character"),
-            (json!(42), "not a string"),
-            (json!(format!("u:p{}", "x".repeat(126))), "longer than 128"),
+        for (patch, expected_field) in [
+            (
+                json!({"proxy_user": "", "proxy_password": "p"}),
+                "environment.proxy_user",
+            ),
+            (
+                json!({"proxy_user": "  ", "proxy_password": "p"}),
+                "environment.proxy_user",
+            ),
+            (
+                json!({"proxy_user": "al:ice", "proxy_password": "p"}),
+                "environment.proxy_user",
+            ),
+            (
+                json!({"proxy_user": "u", "proxy_password": "p:x"}),
+                "environment.proxy_password",
+            ),
+            (
+                json!({"proxy_user": "u", "proxy_password": "p\u{7}ss"}),
+                "environment.proxy_password",
+            ),
+            (
+                json!({"proxy_user": "us er", "proxy_password": "p"}),
+                "environment.proxy_user",
+            ),
+            (
+                json!({"proxy_user": 42, "proxy_password": "p"}),
+                "environment.proxy_user",
+            ),
+            (
+                json!({"proxy_user": "u", "proxy_password": "x".repeat(129)}),
+                "environment.proxy_password",
+            ),
         ] {
             let mut input = base.clone();
-            input["proxy_auth"] = value;
+            for (key, value) in patch.as_object().unwrap() {
+                input[key] = value.clone();
+            }
             let error = Environment::from_json(&input)
                 .err()
-                .unwrap_or_else(|| panic!("proxy_auth case {why:?} unexpectedly passed"));
-            assert_eq!(
-                error.field.as_deref(),
-                Some("environment.proxy_auth"),
-                "case {why:?}"
-            );
+                .unwrap_or_else(|| panic!("credential case {patch} unexpectedly passed"));
+            assert_eq!(error.field.as_deref(), Some(expected_field), "{patch}");
+            // 凭据值绝不回显
+            assert!(!error.message.contains("s3cret"), "{patch}");
         }
     }
 
     #[test]
-    fn options_default_to_empty_and_round_trip() {
-        let env =
-            Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
-        assert!(env.options().is_empty());
-        assert_eq!(env.to_json()["options"], json!({}));
-
-        let env = Environment::from_json(&json!({
-            "name": "gray",
+    fn credentials_given_in_both_shapes_are_a_conflict() {
+        let error = Environment::from_json(&json!({
+            "name": "auth",
             "listen": {"port": 16600},
-            "options": {"ssl_insecure": "true"}
+            "proxy_user": "alice",
+            "proxy_password": "s3cret",
+            "proxy_auth": "bob:hunter2"
         }))
-        .unwrap();
-        assert_eq!(
-            env.options().get("ssl_insecure").map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(env.to_json()["options"], json!({"ssl_insecure": "true"}));
+        .unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.proxy_auth"));
     }
 
     #[test]
-    fn options_denylist_is_reported_with_the_environment_field_path() {
-        for (key, expected_field) in [
-            ("listen_port", "environment.options.listen_port"),
-            ("scripts", "environment.options.scripts"),
-            ("web_port", "environment.options.web_port"),
-            ("envboard_rules", "environment.options.envboard_rules"),
+    fn merging_a_legacy_patch_replaces_the_credentials() {
+        let base = Environment::from_json(&json!({
+            "name": "auth",
+            "listen": {"port": 16600},
+            "proxy_user": "alice",
+            "proxy_password": "s3cret"
+        }))
+        .unwrap();
+        // 老客户端整体替换凭据：base 上的旧值先被清掉，不构成"两套形状同时给出"
+        let merged = base.merged(&json!({"proxy_auth": "bob:hunter2"})).unwrap();
+        assert_eq!(merged.proxy_user(), Some("bob"));
+        assert_eq!(merged.proxy_password(), Some("hunter2"));
+
+        // 只给一边的 patch 会让合并结果不完整 → 必须响亮失败，字段指向**缺失**的那一边
+        let error = base.merged(&json!({"proxy_user": null})).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.proxy_user"));
+
+        let error = base.merged(&json!({"proxy_password": null})).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.proxy_password"));
+
+        // 两边一起清 = 关掉鉴权
+        let cleared = base
+            .merged(&json!({"proxy_user": null, "proxy_password": null}))
+            .unwrap();
+        assert!(!cleared.proxy_auth_enabled());
+    }
+
+    #[test]
+    fn insecure_hosts_are_normalized_deduped_and_sorted() {
+        let env = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "insecure_hosts": [" Web.WPS.cn. ", "365.kdocs.cn", "365.KDocs.CN"]
+        }))
+        .unwrap();
+        assert_eq!(
+            env.insecure_hosts(),
+            ["365.kdocs.cn".to_string(), "web.wps.cn".to_string()]
+        );
+        // 缺省 = 空列表（不是"全都放行"）
+        let env =
+            Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
+        assert!(env.insecure_hosts().is_empty());
+        // 清空
+        let cleared = env.merged(&json!({"insecure_hosts": null})).unwrap();
+        assert!(cleared.insecure_hosts().is_empty());
+    }
+
+    #[test]
+    fn insecure_hosts_reject_wildcards_and_bad_shapes() {
+        for (value, expected_field) in [
+            (json!(["*.kdocs.cn"]), "environment.insecure_hosts.0"),
+            (json!(["a?.kdocs.cn"]), "environment.insecure_hosts.0"),
+            (json!(["-lead.example.com"]), "environment.insecure_hosts.0"),
+            (json!([42]), "environment.insecure_hosts.0"),
+            (json!("365.kdocs.cn"), "environment.insecure_hosts"),
+            (
+                json!(
+                    (0..=envboard_rules::INSECURE_HOSTS_MAX)
+                        .map(|index| format!("h{index}.example.com"))
+                        .collect::<Vec<_>>()
+                ),
+                "environment.insecure_hosts",
+            ),
         ] {
             let error = Environment::from_json(&json!({
                 "name": "gray",
                 "listen": {"port": 16600},
-                "options": {key: "x"}
+                "insecure_hosts": value
             }))
             .unwrap_err();
-            assert_eq!(error.code, envboard_core_api::ErrorCode::InvalidConfig);
-            assert_eq!(error.field.as_deref(), Some(expected_field));
+            assert_eq!(error.field.as_deref(), Some(expected_field), "{value}");
         }
     }
 
@@ -636,25 +934,5 @@ mod tests {
             Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
         let error = base.merged(&json!({"prox_auth": "a:b"})).unwrap_err();
         assert_eq!(error.field.as_deref(), Some("environment.prox_auth"));
-    }
-
-    #[test]
-    fn options_merge_replaces_the_whole_object() {
-        let base = Environment::from_json(&json!({
-            "name": "gray",
-            "listen": {"port": 16600},
-            "options": {"ssl_insecure": "true", "block_global": "true"}
-        }))
-        .unwrap();
-        let patched = base
-            .merged(&json!({"options": {"block_global": "false"}}))
-            .unwrap();
-        assert_eq!(patched.options().len(), 1);
-        assert_eq!(
-            patched.options().get("block_global").map(String::as_str),
-            Some("false")
-        );
-        let cleared = base.merged(&json!({"options": null})).unwrap();
-        assert!(cleared.options().is_empty());
     }
 }

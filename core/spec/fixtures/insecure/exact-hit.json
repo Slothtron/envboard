@@ -1,0 +1,14 @@
+{
+  "capability": "insecure.hosts",
+  "description": "精确命中：归一化后的 SNI 与清单元素完全相等",
+  "input": {
+    "hosts": [
+      "365.kdocs.cn"
+    ],
+    "sni": "365.kdocs.cn"
+  },
+  "expect": {
+    "ok": true,
+    "match": true
+  }
+}

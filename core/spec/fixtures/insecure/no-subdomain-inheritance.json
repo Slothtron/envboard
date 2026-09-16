@@ -1,0 +1,14 @@
+{
+  "capability": "insecure.hosts",
+  "description": "不做子域继承：清单里写 kdocs.cn 不会放行 365.kdocs.cn",
+  "input": {
+    "hosts": [
+      "kdocs.cn"
+    ],
+    "sni": "365.kdocs.cn"
+  },
+  "expect": {
+    "ok": true,
+    "match": false
+  }
+}
