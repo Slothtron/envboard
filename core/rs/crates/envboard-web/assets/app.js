@@ -14,16 +14,25 @@ const REQUEST_HEADER = "x-envboard-request";
 const TOKEN_HEADER = "x-envboard-token";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-/// 健康状态 → 徽章样式。徽章**文本始终是 `env.health` 原值**（验收靠它断言），
-/// 这里只决定配色：一份状态只能有一种视觉表达。
-const HEALTH_STYLE = {
-  running: "running",
-  stopped: "stopped",
-  unhealthy: "unhealthy",
-  config_mismatch: "error",
-  port_conflict: "error",
-  failed: "error",
+/// 健康状态的**唯一**语义表：标签（给人读）/ 视觉（CSS class）/ 建议动作（见下面的 ADVICE）。
+/// 只映射 class 而不给标签，用户看到的就是 `config_mismatch` 这种原始值，
+/// 而且三类「坏」共用同一个 error 配色 —— 它们恰恰最需要被分辨：
+/// 配置未生效是契约下发静默失败，端口冲突是端口被占，启动失败是进程没起来。
+/// 徽章文本改成了标签，所以原文另存到 `data-health`：断言与排障读那个属性，
+/// 不要读文案（文案会随语言和措辞变）。
+const HEALTH_META = {
+  running: { label: "运行中", style: "running" },
+  stopped: { label: "已停止", style: "stopped" },
+  starting: { label: "启动中", style: "running" },
+  unhealthy: { label: "不健康", style: "unhealthy" },
+  config_mismatch: { label: "配置未生效", style: "error" },
+  port_conflict: { label: "端口冲突", style: "error" },
+  failed: { label: "启动失败", style: "error" },
 };
+
+/// 未知状态不吞掉：原样显示，好过显示一个编造的标签。
+const healthLabel = (health) => (HEALTH_META[health] || {}).label || health;
+const healthStyle = (health) => (HEALTH_META[health] || {}).style || "";
 
 /// 需要用户介入的状态 —— 「需处理」统计卡与筛选都按它算。
 const ISSUE_HEALTH = new Set(["unhealthy", "config_mismatch", "port_conflict", "failed"]);
@@ -44,8 +53,12 @@ const state = {
   search: "",
   /// 次级操作行是否展开（就地展开，不是浮层）。
   moreOpen: false,
-  /// 就地二次确认的目标："env:beta" / "rule:beta"；null = 没有待确认的破坏性操作。
+  /// 就地二次确认的目标："env:beta" / "rule:beta" / "reallocate:beta"；
+  /// null = 没有待确认的破坏性操作。
   confirm: null,
+  /// 最近一次成功拿到快照的本地时间（HH:MM:SS）。SSE 断线时界面照旧显示旧数据，
+  /// 有了它用户至少能看出"这份数据有多旧"。
+  lastOk: null,
   /// SSE 是否还活着 —— 连接徽章与侧栏底部圆点都看它。
   streamOk: false,
   // ---- 日志栏 ----
@@ -157,11 +170,12 @@ function button({ label, icon: iconName, className = "btn", title, onClick, key 
 
 /// 状态徽章：圆点 + 文本。文本是健康值原值，颜色由 --ok / --warn / --bad 决定。
 function healthBadge(health) {
-  const node = el("span", `badge ${HEALTH_STYLE[health] || ""}`.trim());
+  const node = el("span", `badge ${healthStyle(health)}`.trim());
   const dot = el("span", "dot");
   dot.setAttribute("aria-hidden", "true");
+  node.setAttribute("data-health", health);
   node.appendChild(dot);
-  node.appendChild(el("span", null, health));
+  node.appendChild(el("span", null, healthLabel(health)));
   return node;
 }
 
@@ -201,19 +215,47 @@ function connectionState() {
     : { kind: "warn", text: "仅监听（不改写）" };
 }
 
+/// 只在值真的变了才写 DOM。不这么写的话，每秒一次的 SSE 快照会重写同一段文案，
+/// 产生一批无意义的 mutation（实测 8 秒 8 次，全部落在这些静态文案上）。
+function setText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
+}
+
+/// 暴露面：工作台只监听回环时写"仅本机可访问"，否则如实标出非本机监听。
+/// 这个判断放在前端做是因为 /api/status 不暴露监听地址（也就不必改接口契约）——
+/// 浏览器自己知道它访问的是哪个地址。
+function exposureText() {
+  const host = location.hostname;
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+  return loopback ? "仅本机可访问" : "非本机监听";
+}
+
+/// 记下"这份数据是什么时候拿到的"，页脚用它说明新鲜度。
+function stampOk() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  state.lastOk = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
 function renderChrome() {
   const status = state.status;
   if (status) {
-    document.getElementById("core-badge-text").textContent = `core: ${status.core.name} ${status.core.version}`;
-    document.getElementById("sidebar-foot-text").textContent =
-      `${status.core.name} ${status.core.version} · ${status.config.state_dir}`;
-    document.getElementById("env-form-port-hint").textContent =
-      `留空则从端口区间 ${status.config.port_range} 里自动分配`;
+    setText(document.getElementById("core-badge-text"), `core: ${status.core.name} ${status.core.version}`);
+    // 页脚给「我在访问谁 + 暴露面 + 数据有多新」，state_dir 是开发向信息，挪出页脚
+    // （它在 /api/status 与 README 里都能查到）。
+    setText(
+      document.getElementById("sidebar-foot-text"),
+      `${location.host} · ${exposureText()} · 更新于 ${state.lastOk || "—"}`,
+    );
+    setText(
+      document.getElementById("env-form-port-hint"),
+      `留空则从端口区间 ${status.config.port_range} 里自动分配`,
+    );
   }
   const connection = connectionState();
   const badge = document.getElementById("conn-badge");
   badge.className = `badge ${connection.kind}`;
-  document.getElementById("conn-badge-text").textContent = connection.text;
+  setText(document.getElementById("conn-badge-text"), connection.text);
   const dot = document.getElementById("conn-dot");
   dot.className = `conn-dot is-${connection.kind}`;
   renderStats();
@@ -223,12 +265,14 @@ function renderStats() {
   const list = state.environments;
   const running = list.filter((env) => env.health === "running").length;
   const issues = list.filter((env) => ISSUE_HEALTH.has(env.health)).length;
-  document.getElementById("stat-total").textContent = String(list.length);
-  document.getElementById("stat-running").textContent = String(running);
-  document.getElementById("stat-issues").textContent = String(issues);
-  document.getElementById("stat-rules").textContent = String(state.rules.length);
-  document.getElementById("env-count").textContent = String(list.length);
-  document.getElementById("rules-count").textContent = String(state.rules.length);
+  setText(document.getElementById("stat-total"), String(list.length));
+  setText(document.getElementById("stat-running"), String(running));
+  setText(document.getElementById("stat-issues"), String(issues));
+  setText(document.getElementById("stat-rules"), String(state.rules.length));
+  // 侧栏计数跟着**当前可见**的条数走：否则筛到空列表时右边还挂着"2"，
+  // 与紧挨着的空态文案自相矛盾。
+  setText(document.getElementById("env-count"), String(visibleEnvironments().length));
+  setText(document.getElementById("rules-count"), String(state.rules.length));
 }
 
 // --------------------------------------------------------------------------- //
@@ -329,7 +373,9 @@ function envItem(env) {
 
 function syncFilterUi() {
   for (const card of document.querySelectorAll(".stat-card")) {
-    const active = card.dataset.filter === state.filter;
+    // 「环境总数」代表"不筛选"，它不是一个被选中的筛选项：给它常亮高亮会让首屏
+    // 看起来已经选中了某个条件，而用户并没有点过。所以只有真正筛了某个状态才有激活态。
+    const active = state.filter !== "all" && card.dataset.filter === state.filter;
     card.classList.toggle("is-active", active);
     card.setAttribute("aria-pressed", String(active));
   }
@@ -388,8 +434,9 @@ function renderDetail(force) {
 
   document.getElementById("detail-name").textContent = env.name;
   const badge = document.getElementById("detail-badge");
-  badge.className = `badge ${HEALTH_STYLE[env.health] || ""}`.trim();
-  document.getElementById("detail-badge-text").textContent = env.health;
+  badge.className = `badge ${healthStyle(env.health)}`.trim();
+  badge.setAttribute("data-health", env.health);
+  document.getElementById("detail-badge-text").textContent = healthLabel(env.health);
   badge.hidden = false;
 
   renderDetailActions(env);
@@ -505,7 +552,7 @@ function renderMore(env) {
       label: "复制代理命令",
       icon: "copy",
       className: "btn sm",
-      onClick: () => copyText(env.proxy_command, "代理命令已复制到剪贴板"),
+      onClick: (event) => copyText(env.proxy_command, "代理命令已复制到剪贴板", event.currentTarget),
     }),
   );
   host.appendChild(
@@ -520,17 +567,58 @@ function renderMore(env) {
       },
     }),
   );
+  // 重分配端口是**二级操作**：它不会丢数据，但会让客户端此前的 export https_proxy=…
+  // 立即失效。所以它和删除环境一样走就地二次确认，并把后果写清楚 ——
+  // 只在 port_conflict 下出现，而那正是用户最想"赶紧点一下"的时刻。
   if (env.health === "port_conflict") {
     const key = `reallocate:${env.name}`;
-    host.appendChild(
-      button({
-        label: "重分配端口",
-        icon: "shuffle",
-        className: "btn sm",
-        key,
-        onClick: () => runAction(key, () => mutate(`${environmentPath(env.name)}/reallocate`, "POST")),
-      }),
-    );
+    if (state.confirm === key) {
+      const box = el("div", "confirm");
+      box.appendChild(
+        el(
+          "span",
+          "confirm-text",
+          `重新分配 ${env.name} 的监听端口？端口会变，客户端现有的 export https_proxy=… 将立即失效，需要同步更新。`,
+        ),
+      );
+      box.appendChild(
+        button({
+          label: "确认重分配",
+          icon: "shuffle",
+          className: "btn danger sm",
+          key,
+          onClick: () =>
+            runAction(key, async () => {
+              state.confirm = null;
+              return mutate(`${environmentPath(env.name)}/reallocate`, "POST");
+            }),
+        }),
+      );
+      box.appendChild(
+        button({
+          label: "取消",
+          className: "btn ghost sm",
+          onClick: () => {
+            state.confirm = null;
+            renderDetail(true);
+          },
+        }),
+      );
+      host.appendChild(box);
+    } else {
+      host.appendChild(
+        button({
+          label: "重分配端口",
+          icon: "shuffle",
+          className: "btn sm",
+          key,
+          onClick: () => {
+            state.confirm = key;
+            renderDetail(true);
+          },
+        }),
+      );
+    }
   }
   host.appendChild(
     button({
@@ -563,9 +651,14 @@ function renderReason(env) {
 }
 
 function renderOverview(env) {
-  document.getElementById("ov-health").textContent = env.health;
+  // 期望 vs 实际：两者不一致是最该被一眼看见的运维信号。原来两格都是原始英文值、
+  // 要人肉比对；现在给标签，并在不一致时把「实际状态」标红。
+  const healthCell = document.getElementById("ov-health");
+  healthCell.textContent = healthLabel(env.health);
+  healthCell.dataset.health = env.health;
+  healthCell.classList.toggle("is-mismatch", env.desired !== env.health);
   document.getElementById("ov-port").textContent = `${env.listen.host}:${env.listen.port}`;
-  document.getElementById("ov-desired").textContent = env.desired;
+  document.getElementById("ov-desired").textContent = healthLabel(env.desired);
   document.getElementById("ov-rules").textContent = env.rules || "（不覆盖）";
   document.getElementById("ov-rules-count").textContent = env.rules ? String(env.rules_count) : "—";
   document.getElementById("ov-desc").textContent = env.description || "—";
@@ -686,6 +779,14 @@ function renderRules(force) {
     const item = el("li", `rule-item${absent ? " is-missing" : ""}`);
     item.dataset.rule = name;
     item.appendChild(el("span", "rule-name mono", name));
+    // 规模：不可见即不可信 —— 实测单份规则 536 条，列表上不写就只能逐个「载入」去数。
+    // 取不到时留空而不是显示 0：0 条和「还没取到」是两件事。
+    const stats = absent ? null : ruleStatsCache.get(name);
+    if (stats) {
+      item.appendChild(el("span", "rule-size mono", `${stats.entries} 条 · ${stats.ips} 个 IP`));
+    } else if (!absent) {
+      ensureRuleStats(name);
+    }
     item.appendChild(
       el(
         "span",
@@ -700,7 +801,17 @@ function renderRules(force) {
 
     if (state.confirm === `rule:${name}`) {
       const box = el("div", "confirm");
-      box.appendChild(el("span", "confirm-text", `删除规则文件 ${name}？`));
+      // 写明后果：删掉一份被绑定的规则，环境不会报错，而是**静默地不再覆盖** ——
+      // 这正是最该在动手前说清的一类后果。
+      box.appendChild(
+        el(
+          "span",
+          "confirm-text",
+          users.length
+            ? `删除规则文件 ${name}？绑定它的 ${users.join(" / ")} 会失去覆盖，重启后按不覆盖运行。`
+            : `删除规则文件 ${name}？它当前没有被任何环境绑定，文件本身会从磁盘删掉。`,
+        ),
+      );
       const key2 = `ruledelete:${name}`;
       box.appendChild(
         button({
@@ -805,6 +916,50 @@ async function loadRuleText(name) {
   return entry;
 }
 
+/// 规则文件的规模：条数（host 条目）与 IP 数。
+/// 生成器在文件头写了 `# entries: N  ip: M`，优先读它（那是权威值）；万一没有
+/// （手写或外部生成的文件），退回按数据行现算 —— 一行是 `ip host...`，
+/// 所以条目数 = 每行除首个 token 外的 token 总数，IP 数 = 首个 token 去重。
+function ruleStats(text) {
+  if (typeof text !== "string" || !text) return null;
+  const header = /^#\s*entries:\s*(\d+)\s+ip:\s*(\d+)/m.exec(text);
+  if (header) return { entries: Number(header[1]), ips: Number(header[2]) };
+  const ips = new Set();
+  let entries = 0;
+  for (const raw of text.split("\n")) {
+    const row = raw.trim();
+    if (!row || row.startsWith("#")) continue;
+    const parts = row.split(/\s+/);
+    ips.add(parts[0]);
+    entries += Math.max(0, parts.length - 1);
+  }
+  return { entries, ips: ips.size };
+}
+
+/// name → { entries, ips } | null（null = 取不到）。列表要显示规模，
+/// 而 `/api/rules` 只回名字，所以按需取一次正文并缓存；空库时不发请求。
+const ruleStatsCache = new Map();
+const ruleStatsPending = new Set();
+
+function ensureRuleStats(name) {
+  if (ruleStatsCache.has(name) || ruleStatsPending.has(name)) return;
+  ruleStatsPending.add(name);
+  loadRuleText(name)
+    .then((entry) => ruleStatsCache.set(name, entry.error ? null : ruleStats(entry.text)))
+    .catch(() => ruleStatsCache.set(name, null))
+    .finally(() => {
+      ruleStatsPending.delete(name);
+      renderRules(true);
+    });
+}
+
+/// 正文缓存与规模缓存是同一条数据的两种视图，清一个就必须清另一个，
+/// 否则导入新内容后列表还挂着旧的条数。
+function clearRuleCaches() {
+  ruleTextCache.clear();
+  ruleStatsCache.clear();
+}
+
 // --------------------------------------------------------------------------- //
 // 动作
 // --------------------------------------------------------------------------- //
@@ -821,7 +976,7 @@ async function runAction(key, mutateFn) {
     reportError(error);
   } finally {
     pending.delete(key);
-    ruleTextCache.clear();
+    clearRuleCaches();
     try {
       await refreshAll();
     } catch (error) {
@@ -830,7 +985,27 @@ async function runAction(key, mutateFn) {
   }
 }
 
-async function copyText(text, message) {
+/// 复制成功后在按钮上给一个瞬时反馈（「已复制」+ 对勾）。
+/// 只碰这一个按钮的局部 DOM：详情区每次快照都可能重画，整块重渲染会把反馈冲掉。
+function flashCopied(node) {
+  if (!node || node.dataset.copied === "1") return;
+  node.dataset.copied = "1";
+  const label = node.querySelector("span");
+  const use = node.querySelector("svg.ic use");
+  const originalLabel = label ? label.textContent : "";
+  const originalIcon = use ? use.getAttribute("href") : "";
+  if (label) label.textContent = "已复制";
+  if (use) use.setAttribute("href", "#i-check");
+  node.classList.add("is-copied");
+  setTimeout(() => {
+    delete node.dataset.copied;
+    if (label && label.isConnected) label.textContent = originalLabel;
+    if (use && use.isConnected) use.setAttribute("href", originalIcon);
+    node.classList.remove("is-copied");
+  }, 1400);
+}
+
+async function copyText(text, message, node) {
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
@@ -848,6 +1023,7 @@ async function copyText(text, message) {
       if (!ok) throw new Error("浏览器拒绝了剪贴板写入");
     }
     toast(message, "ok");
+    flashCopied(node);
   } catch (error) {
     toast(`复制失败：${error.message}`, "bad");
   }
@@ -861,7 +1037,7 @@ function selectEnvironment(name) {
   state.selected = name;
   state.confirm = null;
   state.moreOpen = false;
-  ruleTextCache.clear();
+  clearRuleCaches();
   setView("environments");
   renderSidebar(true);
   renderDetail(true);
@@ -960,11 +1136,24 @@ function formPayload(form, editing) {
 
 /// 字段级错误：把出错的输入框标出来并聚焦。只丢一条 toast 的话，用户还得自己
 /// 在一屏字段里找哪一个是它说的那个。
-function markInvalid(form, path) {
+/// 字段级错误：描边变色 + 输入框下方一行原因。
+/// 原来只有描边，原因只走 toast —— 而 toast 几秒后自己消失，用户回头看表单时
+/// 已经不知道错在哪一项了（规范第 7 节「输入框」要求下方有 --bad 错误文本）。
+function clearInvalid(form) {
+  for (const node of form.querySelectorAll(".field-error")) node.remove();
+  for (const node of form.querySelectorAll("[aria-invalid]")) node.removeAttribute("aria-invalid");
+}
+
+function markInvalid(form, path, message) {
   const name = String(path).split(".").pop();
   const input = field(form, name);
   if (!input) return;
   input.setAttribute("aria-invalid", "true");
+  const previous = input.parentElement.querySelector(".field-error");
+  if (previous) previous.remove();
+  // 消息原文来自服务端错误码（判定权在 core，前端只翻译与呈现），
+  // 放在字段下方比放 toast 更可行动：知道是哪一项、也知道原因。
+  input.insertAdjacentElement("afterend", el("span", "field-error", message || "这一项不符合要求。"));
   input.focus();
 }
 
@@ -1107,8 +1296,22 @@ function highlight(text, needle) {
   return span;
 }
 
-function renderLogs(force) {
+/// 解析 + 过滤后的可见行。renderLogs 与「导出」共用，避免过滤条件在两处各写一遍
+/// （写两遍就会出现「导出到的行和看到的不一样」这类偏差）。
+function visibleLogRows() {
   const rows = state.logLines.map(parseLogLine);
+  const needle = state.logSearch.trim().toLowerCase();
+  const visible = rows.filter((row) => {
+    if (row.kind === "mark") return true; // 分段标记是现场的时间锚点，任何过滤下都保留
+    if (state.logKind !== "all" && row.kind !== state.logKind) return false;
+    if (needle && !row.text.toLowerCase().includes(needle)) return false;
+    return true;
+  });
+  return { rows, visible, needle };
+}
+
+function renderLogs(force) {
+  const { rows, visible, needle } = visibleLogRows();
   const counts = { req: 0, res: 0, conn: 0, run: 0, err: 0 };
   let total = 0;
   for (const row of rows) {
@@ -1118,13 +1321,6 @@ function renderLogs(force) {
   }
   renderLogFilters(counts, total);
 
-  const needle = state.logSearch.trim().toLowerCase();
-  const visible = rows.filter((row) => {
-    if (row.kind === "mark") return true; // 分段标记是现场的时间锚点，任何过滤下都保留
-    if (state.logKind !== "all" && row.kind !== state.logKind) return false;
-    if (needle && !row.text.toLowerCase().includes(needle)) return false;
-    return true;
-  });
   document.getElementById("log-count").textContent =
     `${visible.filter((row) => row.kind !== "mark").length}/${total}`;
 
@@ -1135,9 +1331,62 @@ function renderLogs(force) {
   const view = document.getElementById("logs");
   const previousTop = view.scrollTop;
   const fragment = document.createDocumentFragment();
+  if (!visible.length) {
+    // 空态：区分"这个环境本来就没有日志"和"过滤后为空" —— 否则看起来像功能坏了
+    fragment.appendChild(
+      el(
+        "div",
+        "empty-inline",
+        state.logLines.length
+          ? "当前过滤条件下没有日志行。"
+          : `还没有 ${state.logsEnv || "该环境"} 的日志。启动实例后这里会滚动出现。`,
+      ),
+    );
+  }
   for (const row of visible) fragment.appendChild(logLineNode(row, needle));
   view.replaceChildren(fragment);
   applyAutoscroll(previousTop);
+}
+
+/// 导出当前视图（尊重事件类型过滤与关键词搜索）。文件名带环境名与时间戳。
+function downloadLogs() {
+  const { visible } = visibleLogRows();
+  const rows = visible.filter((row) => row.kind !== "mark");
+  if (!rows.length) {
+    toast("当前视图没有可导出的日志行。", "info");
+    return;
+  }
+  const body = rows
+    .map((row) => [row.ts, row.peer, LOG_KIND_BADGE[row.kind], row.text].filter(Boolean).join(" "))
+    .join("\n");
+  // 文件名用**本地时间**：toISOString() 是 UTC，+08:00 的用户会看到刚导出的文件
+  // 带着 8 小时前的"早晨"时间戳，一眼就以为导错了文件。
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  const stamp =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const name = `${state.logsEnv || "envboard"}-${stamp}.log`;
+  const url = URL.createObjectURL(new Blob([`${body}\n`], { type: "text/plain" }));
+  const link = el("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // blob URL 会一直持有这份内存直到被 revoke，别留到页面关闭
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`已导出 ${rows.length} 行到 ${name}`, "ok");
+}
+
+/// 清空日志视图。**只清界面缓冲，不动磁盘上的日志文件** —— 所以必须同时暂停跟随：
+/// 否则下一个快照（每秒一次）会把刚清掉的内容原样拉回来，按钮看起来像没生效。
+function clearLogs() {
+  state.logLines = [];
+  state.logFollow = false;
+  syncLogFollowButton();
+  renderLogs(true);
+  toast("已清空日志视图（磁盘日志文件不受影响）。跟随已暂停，点 ▶ 可恢复。", "info");
 }
 
 let lastProgrammaticTop = -1;
@@ -1206,6 +1455,8 @@ function setView(view) {
   document.getElementById("view-environments").classList.toggle("is-hidden", view !== "environments");
   document.getElementById("view-rules").classList.toggle("is-hidden", view !== "rules");
   document.getElementById("view-compare").classList.toggle("is-hidden", view !== "compare");
+  // 规则数计数 chip 跟着视图亮起来（计数 chip 的激活态定义见 app.css 的 .count.is-active）
+  document.getElementById("rules-count").classList.toggle("is-active", view === "rules");
 }
 
 // --------------------------------------------------------------------------- //
@@ -1235,7 +1486,7 @@ async function refreshAll({ force = false, spinner = false } = {}) {
   const button = document.getElementById("refresh");
   if (spinner) button.classList.add("is-busy");
   // 显式刷新 = 用户要的是"现在的事实"，规则原文缓存跟着失效（热重载改的就是它）。
-  if (force) ruleTextCache.clear();
+  if (force) clearRuleCaches();
   try {
     const [status, environments, rules] = await Promise.all([
       get("/api/status"),
@@ -1246,6 +1497,7 @@ async function refreshAll({ force = false, spinner = false } = {}) {
     state.environments = environments;
     state.rules = rules.rules;
     state.streamOk = true;
+    stampOk();
     reconcileSelection();
     renderChrome();
     renderSidebar(force);
@@ -1261,6 +1513,8 @@ async function refreshAll({ force = false, spinner = false } = {}) {
 /// 免得每秒多做两次请求。
 async function applySnapshot(environments) {
   state.environments = environments;
+  state.streamOk = true;
+  stampOk();
   reconcileSelection();
   renderChrome();
   renderSidebar(false);
@@ -1337,9 +1591,10 @@ function wire() {
     });
   }
 
-  document.getElementById("copy-cmd").addEventListener("click", () => {
+  const copyCmd = document.getElementById("copy-cmd");
+  copyCmd.addEventListener("click", () => {
     const env = currentEnvironment();
-    if (env) copyText(env.proxy_command, "代理命令已复制到剪贴板");
+    if (env) copyText(env.proxy_command, "代理命令已复制到剪贴板", copyCmd);
   });
 
   document.getElementById("env-form-cancel").addEventListener("click", () => {
@@ -1357,7 +1612,7 @@ function wire() {
     const submit = document.getElementById("env-form-submit");
     submit.classList.add("is-busy");
     submit.disabled = true;
-    for (const name of ["name", "port"]) field(form, name).removeAttribute("aria-invalid");
+    clearInvalid(form);
     const hint = document.getElementById("env-form-hint");
     try {
       const payload = formPayload(form, editing);
@@ -1375,7 +1630,7 @@ function wire() {
       }
       await refreshAll({ force: true });
     } catch (error) {
-      if (error.field) markInvalid(form, error.field);
+      if (error.field) markInvalid(form, error.field, error.message);
       hint.textContent = "";
       reportError(error);
     } finally {
@@ -1438,7 +1693,7 @@ function wire() {
       // 刻意**不**清空表单：规则大多是"载入 → 改几行 → 再导入"，清掉反而逼人重新载入。
       document.getElementById("rules-hint").textContent =
         `已导入 ${name}（覆盖同名文件）；绑定它的实例按 mtime 热重载。`;
-      ruleTextCache.clear();
+      clearRuleCaches();
       await refreshAll({ force: true });
     } catch (error) {
       reportError(error);
@@ -1470,6 +1725,9 @@ function wire() {
     syncAutoscrollButton();
     if (state.logAutoscroll) applyAutoscroll(null);
   });
+
+  document.getElementById("log-download").addEventListener("click", downloadLogs);
+  document.getElementById("log-clear").addEventListener("click", clearLogs);
 
   const logSearch = document.getElementById("log-search");
   const logSearchClear = document.getElementById("log-search-clear");
