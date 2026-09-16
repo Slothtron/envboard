@@ -14,7 +14,8 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 ### Changed (breaking)
 
 - `core/spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段收为 4 字段
-  （`name` / `listen` / `rules` / `description`）。删除 `dns_servers`、`hosts`、
+  （`name` / `listen` / `rules` / `description`；后来在安全增强中补第 5 个
+  `proxy_auth`）。删除 `dns_servers`、`hosts`、
   `domain_suffix`、`color`、`labels` 与 mapping / annotate / activate / resolve
   全部语义 —— v2 的切换模型是"一个环境 = 一个独立实例 + 一个独立端口"，
   不再有"当前环境"这个全局状态。
@@ -24,8 +25,9 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   `config_mismatch` / `unhealthy` / `failed`）。
 - 契约 fixture **重新基线化**：v1 的 11 个 `environment/` + 2 个 `merge/` 全部重写
   （它们测的是被删除的字段），新增 `ports/` 与 `lifecycle/` 两组。
-  现状：`environment/` 15 + `merge/` 5 + `rules/` 8（**原样保留**）+ `ports/` 6
-  + `lifecycle/` 6 = **40** 个。
+  现状：`environment/` 22（原 15，安全增强补 7 个 `proxy_auth` / `0.0.0.0` 用例）
+  + `merge/` 5 + `rules/` 8（**原样保留**）+ `ports/` 6
+  + `lifecycle/` 6 = **47** 个。
 
 ### Added
 
@@ -47,7 +49,7 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   - `envboard-manager`：环境 CRUD、随机端口分配与持久化、状态存储（原子写 + 0600）、
     单实例锁（flock）、健康判定（状态文件为主 + 契约回显比对）、reconcile、规则导入。
   - `envboard-cli`：`envboard` 二进制（`env`, `rules`, `run`, `status`）。
-  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 40 个 golden case**。
+  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 47 个 golden case**。
 - `scripts/verify_dual_impl.py`：跨语言对拍门禁 —— 63 个用例里 Rust 与 Python 输出必须
   逐字节一致，**已知分歧必须显式声明**（声明了却不再分歧也会失败，防止白名单掩盖新分歧）。
 - `scripts/rust_dependency_lint.py`：Rust 侧的依赖方向与纯度门禁（含"纯逻辑 crate 不得
@@ -339,6 +341,33 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 - `docs/design/tokens-light.css` 按 `app.css` 第 ① 区重新生成（新增 `--radius-xs`
   等 4 项缺失令牌）；深色块只在令牌文件保留一份，`app.css` 不再重复。
 - `app.css` 注释补上 1px 缝隙网格与 Tab `-1px` 负边距的意图说明（它们看着像间距违规）。
+
+### Added（安全增强 — URL token / 代理鉴权 / 对外服务开关）
+
+- **工作台 URL token 鉴权**：`guard()` 在 header（`x-envboard-token`）优先之外接受
+  URL `?token=`（浏览器直接打开工作台、SSE 的 EventSource 都带不了自定义头），
+  比较改为常量时间。启用 token 时启动日志打印
+  `dashboard: http://<host>:<port>/?token=<值>`（通配监听地址用 `127.0.0.1` 展示），
+  点击直达；前端捕获后立即 `history.replaceState` 抹掉地址栏中的 token，
+  之后全部请求走 header。
+- **环境字段 `proxy_auth`**（契约 4 字段 → 5）：`user:password` 形态（恰好一个冒号、
+  两段非空、无空白/控制字符、总长 ≤128），`null` = 不启用。启用后实例以
+  `--set proxyauth=<user:password>` 启动并纳入 `envboard_expect` 回显自检；
+  `proxyauth` 加入两级 options denylist（凭据唯一来源是环境字段）；运行中修改返回
+  `conflict`（实例启动时读取）。`InstanceSpec` 增加 `proxy_auth`；
+  `EnvView` 增加 `proxy_auth_enabled` 布尔，视图（含代理命令）**不回显凭据**。
+  状态存储本就原子写 + 0600，凭据入库沿用该通道。fixtures：`environment/` 新增
+  7 个（2 valid + 5 invalid），总数 40 → **47**（`valid-listen-all-interfaces`
+  钉住 `listen.host = 0.0.0.0` 的合法性）。
+- **工作台「对外服务」开关与访问鉴权表单字段**：环境表单新增
+  「对外服务（绑定 0.0.0.0）」复选框与「访问鉴权」（password 输入）字段；
+  `formPayload` 修复"编辑只发 `{port}` 导致 host 被整体替换语义重置回默认"的隐患
+  （host 或端口任一变化时两个字段都发全）；勾选 0.0.0.0 而未启用鉴权时表单给
+  红色警示；概览新增「访问鉴权」格、非回环监听地址加警示色；运行中锁定
+  新增的两个输入框。创建时勾选对外服务则端口必填（自动分配只支持默认监听地址）。
+- `scripts/verify_live_v2.py` 新增三组实机断言：`?token=` 与 header 等效（含 401
+  对照与启动日志横幅）、`proxy_auth` 下发后 407/200 对照（含运行中改被拒、
+  视图不回显凭据）、`listen.host = 0.0.0.0` 换址重启且回环方向照常服务。
 
 ## [0.1.0] - 2026-09-15
 

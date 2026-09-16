@@ -657,11 +657,15 @@ function renderOverview(env) {
   healthCell.textContent = healthLabel(env.health);
   healthCell.dataset.health = env.health;
   healthCell.classList.toggle("is-mismatch", env.desired !== env.health);
-  document.getElementById("ov-port").textContent = `${env.listen.host}:${env.listen.port}`;
+  const portCell = document.getElementById("ov-port");
+  portCell.textContent = `${env.listen.host}:${env.listen.port}`;
+  // 非回环监听 = 暴露面变大，必须被一眼看见：加个 warn 类（CSP 禁内联 style，走 CSS）
+  portCell.classList.toggle("is-warning", !isLoopbackHost(env.listen.host));
   document.getElementById("ov-desired").textContent = healthLabel(env.desired);
   document.getElementById("ov-rules").textContent = env.rules || "（不覆盖）";
   document.getElementById("ov-rules-count").textContent = env.rules ? String(env.rules_count) : "—";
   document.getElementById("ov-desc").textContent = env.description || "—";
+  document.getElementById("ov-auth").textContent = env.proxy_auth_enabled ? "已启用" : "未启用";
   const command = document.getElementById("ov-cmd");
   command.textContent = env.proxy_command;
 }
@@ -1058,6 +1062,10 @@ function startEdit(env) {
   field(form, "description").value = env.description || "";
   ensureRuleOption(env.rules);
   field(form, "rules").value = env.rules || "";
+  // 对外服务 = listen.host 是否非回环；凭据本身不回显（只进不出的字段），
+  // 编辑时显式发 null/值 由"输入框是否为空"决定。
+  field(form, "public").checked = !isLoopbackHost(env.listen.host);
+  field(form, "proxy_auth").value = "";
   document.getElementById("env-form-title").textContent = `编辑环境 · ${env.name}`;
   document.getElementById("env-form-submit-text").textContent = "保存";
   document.getElementById("env-form-cancel").hidden = false;
@@ -1077,13 +1085,13 @@ function startEdit(env) {
 function syncEditLock(env) {
   const form = document.getElementById("env-form");
   const locked = env.health === "running";
-  for (const name of ["name", "port", "rules"]) {
+  for (const name of ["name", "port", "rules", "public", "proxy_auth"]) {
     const input = field(form, name);
     input.disabled = locked;
     input.title = locked ? "运行中不能改：先点「停止」" : "";
   }
   document.getElementById("env-form-hint").textContent = locked
-    ? `编辑 ${env.name}：实例在运行，只能改描述。改名 / 换端口 / 换绑定要先停止。` +
+    ? `编辑 ${env.name}：实例在运行，只能改描述。改名 / 换端口 / 换绑定 / 改鉴权要先停止。` +
       `（规则文件的内容是热重载的 —— 去「规则库」改那份文件，实例会自己跟上。）`
     : `编辑 ${env.name}：改完点「保存」。规则绑定在下次启动时生效。`;
 }
@@ -1101,13 +1109,14 @@ function cancelEdit() {
   const form = document.getElementById("env-form");
   state.editing = null;
   form.dataset.editing = "";
-  for (const name of ["name", "port", "rules"]) {
+  for (const name of ["name", "port", "rules", "public", "proxy_auth"]) {
     const input = field(form, name);
     input.disabled = false;
     input.title = "";
     input.removeAttribute("aria-invalid");
   }
   form.reset();
+  syncAuthWarning();
   document.getElementById("env-form-title").textContent = "新建环境";
   document.getElementById("env-form-submit-text").textContent = "创建";
   document.getElementById("env-form-cancel").hidden = true;
@@ -1117,21 +1126,67 @@ function cancelEdit() {
 
 /// 表单 → 请求体。创建与编辑共用，差别只有两处（都写在下面，避免两份字段映射漂移）：
 ///
-/// * 编辑时 `rules` **总是显式给值**（空选 = `null` = 不覆盖）：PATCH 里"没给这个字段"
-///   才是"不动它"，所以想解绑就必须真的把 null 发出去；
+/// * 编辑时 `rules` / `proxy_auth` **总是显式给值**（空选 = `null` = 不启用/清除）：
+///   PATCH 里"没给这个字段"才是"不动它"，所以想解绑或清掉凭据就必须真的把 null 发出去；
 /// * 编辑时端口栏留空 = 保持当前端口（不写 `listen`），创建时留空 = 自动分配。
+///
+/// `listen` 是**整体替换**（契约如此），所以 host 与 port 要么都发、要么都不发：
+/// 对外服务开关只切 host（`0.0.0.0` ↔ `127.0.0.1`），端口沿用输入框或当前值。
+/// 创建时勾了对外服务却留空端口：自动分配是管理器的职责，契约里 `listen.port`
+/// 必填，这里直接拦下并提示 —— 与其让服务端报错，不如当场说清。
 function formPayload(form, editing) {
   const port = field(form, "port").value.trim();
   const rules = field(form, "rules").value;
+  const publicBind = field(form, "public").checked;
+  const proxyAuth = field(form, "proxy_auth").value.trim();
+  const host = publicBind ? "0.0.0.0" : "127.0.0.1";
   const payload = { name: field(form, "name").value.trim(), description: field(form, "description").value };
   if (editing) {
     payload.rules = rules || null;
-    if (port) payload.listen = { port: Number(port) };
+    payload.proxy_auth = proxyAuth || null;
+    // host 没变且端口留空 → 不发 listen（免得"看起来改了其实只是原样重发"）
+    const current = state.environments.find((env) => env.name === state.editing);
+    const hostChanged = !current || current.listen.host !== host;
+    if (hostChanged || port) {
+      const effectivePort = port ? Number(port) : current ? current.listen.port : null;
+      if (!effectivePort) throw handled(new Error("listen.port is required"));
+      payload.listen = { host, port: effectivePort };
+    }
   } else {
     if (rules) payload.rules = rules;
-    if (port) payload.listen = { port: Number(port) };
+    if (proxyAuth) payload.proxy_auth = proxyAuth;
+    if (publicBind && !port) {
+      const portInput = field(form, "port");
+      portInput.setAttribute("aria-invalid", "true");
+      portInput.insertAdjacentElement(
+        "afterend",
+        el("span", "field-error", "勾选「对外服务」时端口不能留空：自动分配只支持默认监听 127.0.0.1，请显式填写端口。"),
+      );
+      portInput.focus();
+      throw handled(new Error("listen.port is required"));
+    }
+    if (port) payload.listen = { host, port: Number(port) };
   }
   return payload;
+}
+
+/// 本地（客户端）校验失败的标记：错误已在表单字段下方就地呈现，提交处的 catch
+/// 不要再弹一条英文 toast。
+const handled = (error) => ((error.handled = true), error);
+
+/// 回环判定：与服务的 is_loopback 对齐（前端只需要认 v4 回环与 ::1）。
+function isLoopbackHost(host) {
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
+/// 对外服务与鉴权的联动警示：勾选 0.0.0.0 又没填凭据时给一行红字。
+/// 不阻止提交（用户可能真要裸奔），但必须让"暴露面变大"这件事被看见。
+function syncAuthWarning() {
+  const form = document.getElementById("env-form");
+  if (!form) return;
+  const exposed = field(form, "public").checked;
+  const authed = field(form, "proxy_auth").value.trim() !== "";
+  document.getElementById("env-form-auth-warning").classList.toggle("is-hidden", !exposed || authed);
 }
 
 /// 字段级错误：把出错的输入框标出来并聚焦。只丢一条 toast 的话，用户还得自己
@@ -1602,6 +1657,12 @@ function wire() {
     renderDetail(true);
   });
 
+  // 对外服务 × 访问鉴权的联动警示：任一变化都要重估暴露面提示。
+  for (const id of ["env-form-public", "env-form-proxy-auth"]) {
+    document.getElementById(id).addEventListener("change", syncAuthWarning);
+    document.getElementById(id).addEventListener("input", syncAuthWarning);
+  }
+
   document.getElementById("env-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.target;
@@ -1632,7 +1693,7 @@ function wire() {
     } catch (error) {
       if (error.field) markInvalid(form, error.field, error.message);
       hint.textContent = "";
-      reportError(error);
+      if (!error.handled) reportError(error);
     } finally {
       pending.delete(key);
       submit.classList.remove("is-busy");
@@ -1789,6 +1850,24 @@ function step(label, fn) {
   } catch (error) {
     bootErrors.push(`${label}: ${error.message}`);
     reportError(error);
+  }
+}
+
+// URL 携带的 token：捕获进 state 后立刻从地址栏抹掉 —— 浏览器历史、截图、复制
+// 分享出去的链接里都不该留着凭据；之后所有请求照旧走 header（SSE 的 EventSource
+// 带不了自定义头，服务端对 `?token=` 一视同仁，这里抹掉不影响已建立的连接）。
+{
+  const params = new URLSearchParams(location.search);
+  if (params.has("token")) {
+    const token = params.get("token").trim();
+    if (token) state.token = token;
+    params.delete("token");
+    const rest = params.toString();
+    history.replaceState(
+      null,
+      "",
+      location.pathname + (rest ? `?${rest}` : "") + location.hash,
+    );
   }
 }
 

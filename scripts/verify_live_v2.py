@@ -13,7 +13,10 @@ v1 立下的规矩是"断言必须可重跑"，而 M2/M3 之前的实机结论�
 6. **崩溃恢复**：SIGKILL 杀掉工作台（等价崩溃）后重启，`desired=running` 自动恢复；
 7. **日志通道不会拖死代理**：连打 320 个请求（足以写满 64 KiB 管道）全部成功；
 8. **实例崩溃可见且不留僵尸**：SIGKILL 掉实例后工作台不再报 running、子进程被回收、
-   日志仍可读、能重新拉起。
+   日志仍可读、能重新拉起；
+9. **v2.1 安全增强**：dashboard `?token=` 与 header 等效（含启动日志打印可点链接）、
+   `proxy_auth` 下发为 mitmproxy `proxyauth`（407/200 对照）、对外服务开关
+   （listen.host 0.0.0.0）真的按新地址重启。
 
 做法上有一个关键点：规则只改**连到哪个 IP**、不改端口，所以"命中哪个上游"由客户端
 请求里的端口决定。于是"同一个域名 + 两个环境各覆盖不同域名"就能构造出判别性对照。
@@ -23,6 +26,7 @@ v1 立下的规矩是"断言必须可重跑"，而 M2/M3 之前的实机结论�
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import os
@@ -94,25 +98,31 @@ class Upstream:
 
 
 def api(port: int, path: str, method: str = "GET", body: dict | None = None,
-        host: str | None = None, csrf: bool = True) -> tuple[int, dict]:
+        host: str | None = None, csrf: bool = True, token: str | None = None,
+        raw: bool = False) -> tuple[int, dict]:
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
     if host:
         request.add_header("Host", host)
     if method != "GET" and csrf:
         request.add_header("x-envboard-request", "1")
+    if token:
+        request.add_header("x-envboard-token", token)
     data = None
     if body is not None:
         data = json.dumps(body).encode()
         request.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(request, data=data, timeout=25) as response:
-            return response.status, json.loads(response.read().decode() or "{}")
+            payload = response.read().decode()
+            if raw:
+                return response.status, {"raw": payload}
+            return response.status, json.loads(payload or "{}")
     except urllib.error.HTTPError as error:
-        raw = error.read().decode()
+        raw_body = error.read().decode()
         try:
-            return error.code, json.loads(raw)
+            return error.code, json.loads(raw_body)
         except ValueError:
-            return error.code, {"raw": raw}
+            return error.code, {"raw": raw_body}
 
 
 def not_covered(body: str) -> bool:
@@ -131,6 +141,28 @@ def curl_body(proxy_port: int, url: str) -> str:
         capture_output=True, text=True,
     )
     return result.stdout.strip()
+
+
+def curl_status(proxy_port: int, url: str, auth: str | None = None) -> str:
+    """经代理请求，返回 HTTP 状态码（代理鉴权用例要看 407/200，不看响应体）。"""
+    proxy = f"http://{auth}@127.0.0.1:{proxy_port}" if auth else f"http://127.0.0.1:{proxy_port}"
+    result = subprocess.run(
+        ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-x", proxy,
+         "--noproxy", "", "--max-time", "15", url],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() or result.stderr.strip()[:40]
+
+
+def sse_status(port: int, path: str) -> int:
+    """SSE 端点的状态码。**不能**用 urlopen 读 body —— SSE 流永不结束，会永远阻塞；
+    这里只取响应头（状态码在 headers 里就有了）。"""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        connection.request("GET", path)
+        return connection.getresponse().status
+    finally:
+        connection.close()
 
 
 def main() -> int:
@@ -415,6 +447,108 @@ def main() -> int:
             f"before={gamma_before!r} bind_running={status_bind_running} "
             f"desc_running={status_desc_running} edit={status_edit} after={gamma_after!r} "
             f"old_name={old_status} port={edited['listen']['port']}",
+        )
+
+        # ---- 11 dashboard URL token 鉴权 ----
+        # 独立起一个带 --token 的工作台：回环监听本来不要求 token，但配了就必须带对；
+        # 浏览器与 SSE 带不了自定义头，`?token=` 必须与 header 等效。
+        token_port = free_port()
+        token_work: subprocess.Popen | None = None
+        try:
+            # 独立 state-dir：主工作台持有状态锁，第二个进程用同一目录会 flock 失败退出
+            token_work = subprocess.Popen(
+                [str(BINARY), "--state-dir", str(work / "state-token"), "--core", "mitmproxy",
+                 "--log-dir", str(logs), "web", "--listen", f"127.0.0.1:{token_port}",
+                 "--token", "s3cret-token"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            assert wait_port(token_port), "token workbench did not start"
+            banner = ""
+            deadline = time.time() + 5
+            while time.time() < deadline and "dashboard:" not in banner:
+                line = token_work.stdout.readline()
+                if not line:
+                    break
+                banner += line
+            status_none, _ = api(token_port, "/api/status", raw=True)
+            status_wrong, _ = api(token_port, "/api/status", token="wrong", raw=True)
+            status_header, _ = api(token_port, "/api/status", token="s3cret-token", raw=True)
+            page_status, page_body = api(token_port, "/?token=s3cret-token", raw=True)
+            sse_status_code = sse_status(token_port, "/api/events?token=s3cret-token")
+            bad_page, _ = api(token_port, "/?token=nope", raw=True)
+            check(
+                "11 dashboard URL token：header 与 ?token= 等效，启动日志打印可点链接",
+                status_none == 401 and status_wrong == 401 and status_header == 200
+                and page_status == 200 and sse_status_code == 200 and bad_page == 401
+                and "dashboard:" in banner and "token=s3cret-token" in banner,
+                f"none={status_none} wrong={status_wrong} header={status_header} "
+                f"page={page_status} sse={sse_status_code} bad_page={bad_page} "
+                f"banner={'…' + banner.strip().splitlines()[-1] if banner.strip() else '(empty)'}",
+            )
+        finally:
+            if token_work is not None:
+                token_work.kill()
+                token_work.wait(timeout=10)
+
+        # ---- 12 代理访问鉴权（proxy_auth → mitmproxy proxyauth）----
+        # 承接测试 10：edited 已改名 renamed 且在跑。proxy_auth 是启动时读取的字段：
+        # 运行中改被拒（409），停止后改、重启才生效。
+        status_auth_running_early, _ = api(web_port, "/api/environments/renamed", "PATCH",
+                                           {"proxy_auth": "alice:live-pass"})
+        api(web_port, "/api/environments/renamed/stop", "POST")
+        status_auth_patch, authed = api(web_port, "/api/environments/renamed", "PATCH",
+                                        {"proxy_auth": "alice:live-pass"})
+        status_auth_start, _ = api(web_port, "/api/environments/renamed/start", "POST")
+        auth_port = authed["listen"]["port"]
+        auth_url = f"http://gamma.test:{alpha.port}/"
+        deadline = time.time() + 15
+        denied = ""
+        while time.time() < deadline:
+            denied = curl_status(auth_port, auth_url)
+            if denied == "407":
+                break
+            time.sleep(0.5)
+        granted = curl_status(auth_port, auth_url, auth="alice:live-pass")
+        status_auth_running, _ = api(web_port, "/api/environments/renamed", "PATCH",
+                                     {"proxy_auth": "bob:other"})
+        check(
+            "12 代理鉴权：无凭据 407、带凭据 200、运行中改 proxy_auth 被拒、视图不回显凭据",
+            status_auth_running_early == 409
+            and status_auth_patch == 200 and authed["proxy_auth_enabled"] is True
+            and "alice:live-pass" not in json.dumps(authed)
+            and denied == "407" and granted == "200" and status_auth_running == 409,
+            f"early={status_auth_running_early} patch={status_auth_patch} denied={denied} "
+            f"granted={granted} running_patch={status_auth_running} "
+            f"enabled={authed['proxy_auth_enabled']}",
+        )
+
+        # ---- 13 对外服务开关：listen.host 0.0.0.0 ----
+        # 通配绑定在本机测不出"外部可达"，但可以证伪两件事：
+        # host 真的换成了 0.0.0.0（不是只有开关好看），且回环方向照常服务。
+        # listen 是身份字段：运行中改会被拒，先停止。
+        api(web_port, "/api/environments/renamed/stop", "POST")
+        status_host_patch, exposed = api(web_port, "/api/environments/renamed", "PATCH",
+                                         {"listen": {"host": "0.0.0.0",
+                                                     "port": authed["listen"]["port"]}})
+        status_start_wild, _ = api(web_port, "/api/environments/renamed/start", "POST")
+        deadline = time.time() + 15
+        loopback_ok = ""
+        wild_port = exposed["listen"]["port"]
+        while time.time() < deadline:
+            loopback_ok = curl_status(wild_port, f"http://gamma.test:{alpha.port}/",
+                                      auth="alice:live-pass")
+            if loopback_ok == "200":
+                break
+            time.sleep(0.5)
+        _, wild_view = api(web_port, "/api/environments/renamed")
+        check(
+            "13 对外服务开关：listen.host 换成 0.0.0.0 并按新地址重启，回环方向照常服务",
+            status_host_patch == 200 and exposed["listen"]["host"] == "0.0.0.0"
+            and status_start_wild == 200 and wild_view["listen"]["host"] == "0.0.0.0"
+            and wild_view["health"] == "running" and loopback_ok == "200",
+            f"patch={status_host_patch} start={status_start_wild} "
+            f"host={wild_view['listen']['host']} health={wild_view['health']} "
+            f"loopback={loopback_ok}",
         )
     finally:
         if workbench is not None:

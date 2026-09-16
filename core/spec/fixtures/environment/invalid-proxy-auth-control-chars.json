@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "proxy_auth 含空白/控制字符失败（Basic 认证的编码形态不允许）",
+  "input": { "name": "auth", "listen": { "port": 16301 }, "proxy_auth": "us er:pa\u0007ss" },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.proxy_auth" }
+}

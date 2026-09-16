@@ -70,6 +70,20 @@ pub async fn serve(manager: Arc<Manager>, config: WebConfig) -> Result<(), Error
             )
         })?;
     println!("envboard workbench: http://{}", config.listen);
+    // 配了 token 就把可点击的完整地址打出来：浏览器无法携带自定义头，直接打开
+    // 只能靠 `?token=`。监听通配地址（如 0.0.0.0）时用 127.0.0.1 展示 —— 通配地址
+    // 本身不可点击，token 值不受影响。
+    if let Some(token) = config.token.as_deref() {
+        let display_host = if config.listen.ip().is_unspecified() {
+            "127.0.0.1"
+        } else {
+            &config.listen.ip().to_string()
+        };
+        println!(
+            "  dashboard: http://{display_host}:{}/?token={token}",
+            config.listen.port()
+        );
+    }
     println!(
         "  (assets are embedded; CSP has no 'unsafe-inline' — see core/spec/ and src/config.rs)"
     );
@@ -142,16 +156,20 @@ async fn guard(
         );
     }
 
-    // ② 配了 token 就必须带对
+    // ② 配了 token 就必须带对：header 优先，未带时接受 `?token=`（SSE 的
+    // EventSource 带不了自定义头，浏览器直接打开工作台也只能靠 URL 携带）。
     if let Some(expected) = state.config.token.as_deref() {
         let provided = headers
             .get(TOKEN_HEADER)
-            .and_then(|value| value.to_str().ok());
-        if provided != Some(expected) {
+            .and_then(|value| value.to_str().ok())
+            .map(std::borrow::Cow::Borrowed)
+            .or_else(|| query_token(request.uri().query()));
+        let matched = provided.is_some_and(|provided| constant_time_eq(&provided, expected));
+        if !matched {
             return failure(
                 StatusCode::UNAUTHORIZED,
                 ErrorCode::InvalidConfig,
-                format!("missing or wrong {TOKEN_HEADER} header"),
+                format!("missing or wrong {TOKEN_HEADER} header or ?token= parameter"),
             );
         }
     }
@@ -179,6 +197,33 @@ async fn guard(
     }
 
     next.run(request).await
+}
+
+/// 从 URL query 里取 `token` 参数（只认裸键，无 URL 编码解析 —— token 由我们生成，
+/// 是 URL 安全字符集；带编码的值按字面比较自然不匹配，宁可拒绝）。
+fn query_token(query: Option<&str>) -> Option<std::borrow::Cow<'_, str>> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next() == Some("token") {
+            return parts.next().map(std::borrow::Cow::Borrowed);
+        }
+    }
+    None
+}
+
+/// 常量时间比较：长度不同立即失败（长度本就不是秘密），等长时逐字节 XOR 累加，
+/// 不因首个不同字节提前返回 —— 避免逐字节计时侧信道。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn api_not_found(uri: axum::http::Uri) -> Response {
@@ -436,4 +481,30 @@ async fn api_events(
         Ok(Event::default().event("snapshot").data(payload.to_string()))
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_token_reads_the_bare_token_key() {
+        assert_eq!(query_token(Some("token=abc")), Some("abc".into()));
+        assert_eq!(query_token(Some("a=1&token=abc&b=2")), Some("abc".into()));
+        // 没有值 / 只有键名 / 完全没有 token，都视为未携带
+        assert_eq!(query_token(Some("token=")), Some("".into()));
+        assert_eq!(query_token(Some("a=1")), None);
+        assert_eq!(query_token(None), None);
+        // 前缀撞名不算（xxxtoken 不是 token）
+        assert_eq!(query_token(Some("xxxtoken=abc")), None);
+    }
+
+    #[test]
+    fn constant_time_eq_is_an_exact_string_compare() {
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(!constant_time_eq("secret", "secreT"));
+        assert!(!constant_time_eq("secret", "secrets"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(constant_time_eq("", ""));
+    }
 }

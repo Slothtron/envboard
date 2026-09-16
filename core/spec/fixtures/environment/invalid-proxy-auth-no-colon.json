@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "proxy_auth 缺少冒号：必须是 user:password 形态",
+  "input": { "name": "auth", "listen": { "port": 16301 }, "proxy_auth": "no-colon" },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.proxy_auth" }
+}

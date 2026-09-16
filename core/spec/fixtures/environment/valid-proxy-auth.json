@@ -1,0 +1,17 @@
+{
+  "capability": "environment.validate",
+  "description": "启用代理访问鉴权：proxy_auth 为 user:password，trim 后入库；null 与缺省等价于不启用",
+  "input": {
+    "name": "auth",
+    "listen": { "port": 16301 },
+    "proxy_auth": "  alice:s3cret  "
+  },
+  "expect": {
+    "ok": true,
+    "name": "auth",
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "rules": null,
+    "description": "",
+    "proxy_auth": "alice:s3cret"
+  }
+}

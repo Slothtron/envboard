@@ -1,0 +1,16 @@
+{
+  "capability": "environment.validate",
+  "description": "对外服务：listen.host 绑定 0.0.0.0 是合法的裸 IP 字面量（默认 127.0.0.1，由 dashboard 开关切换）",
+  "input": {
+    "name": "public",
+    "listen": { "host": "0.0.0.0", "port": 16301 }
+  },
+  "expect": {
+    "ok": true,
+    "name": "public",
+    "listen": { "host": "0.0.0.0", "port": 16301 },
+    "rules": null,
+    "description": "",
+    "proxy_auth": null
+  }
+}

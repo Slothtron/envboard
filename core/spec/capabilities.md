@@ -41,14 +41,15 @@ environment.validate  ←  environment.merge
 
 ### 环境（`Environment`）
 
-v1 有 8 个字段，v2 **只剩 4 个**：
+v1 有 8 个字段，v2 收成 4 个，v2.1 增加第 5 个 `proxy_auth`：
 
 | 字段 | JSON 形状 | 约束 |
 |---|---|---|
 | `name` | `string` | 见下（唯一标识，也是持久化主键） |
-| `listen` | `{host, port}` | `host` 是 IP 字面量（默认 `127.0.0.1`）；`port` 见下 |
+| `listen` | `{host, port}` | `host` 是 IP 字面量（默认 `127.0.0.1`，可为 `0.0.0.0` 对外服务）；`port` 见下 |
 | `rules` | `string \| null` | 规则名（**不是路径**，见本文件「规则文件（rules）语义」） |
 | `description` | `string` | 可空；最长 200 字符 |
+| `proxy_auth` | `string \| null` | 代理访问鉴权，`user:password` 形态；`null` = 不启用（默认）。见下 |
 
 1. **`name`**：先 `trim`，再整体小写化，然后必须匹配 `^[a-z][a-z0-9_-]{0,31}$`。
    归一化后仍不合规即失败，`field = environment.name`。
@@ -70,20 +71,29 @@ v1 有 8 个字段，v2 **只剩 4 个**：
      **禁止**接受调用方给出的路径片段、`..`、绝对路径或带分隔符的名字。
 5. **`description`**：可空字符串；`trim` 后按字符计最长 200，超长失败
    `field = environment.description`。
-6. **未知字段必须失败**，禁止静默忽略（`field` 指出该字段的点分路径）。
+6. **`proxy_auth`**：`null`/缺省 = 不启用代理鉴权；非空时必须是 `user:password`：
+   恰好一个 `:`（密码里含 `:` 会与 mitmproxy `proxyauth` 的切分歧义，从源头拒绝）、
+   两段非空、不含空白与控制字符（Basic 认证的编码形态不允许）、`trim` 后总长 ≤128。
+   失败 `field = environment.proxy_auth`，**错误信息不回显输入值**（这是凭据）。
+   - 凭据的唯一出口是实例启动参数（`--set proxyauth=<user:password>`，core 下发）；
+     `options` 里的 `proxyauth` 键被 denylist 拒绝 —— 两个真相必然分叉，只有一个入口。
+   - 这是**敏感数据**：状态存储文件权限必须收紧；视图/日志只暴露"是否启用"布尔，
+     禁止回显凭据本身。
+   - 运行中实例改它必须先停止（与 `rules` 绑定同类：实例启动时读取，运行中换不上）。
+7. **未知字段必须失败**，禁止静默忽略（`field` 指出该字段的点分路径）。
    这条在 v2 里多了一层意义：v1 的 `dns_servers`、`hosts`、`color`、`domain_suffix`
    **现在会响亮报错**，而不是被当成"没用的字段"默默收下（有 fixture 钉住这一点）。
 
 ### 归一化与默认值：只有一个来源
 
-默认值（`listen.host = 127.0.0.1`、`rules = null`、`description = ""`）在 core 里定义
+默认值（`listen.host = 127.0.0.1`、`rules = null`、`description = ""`、`proxy_auth = null`）在 core 里定义
 **一次**。宿主配置只做映射，适配器**禁止**再写一份默认值。
 `environment.validate` 的输出即"归一化后的完整记录"，可直接持久化。
 
 ### 编辑已有环境（PATCH 语义）
 
 环境是**可改的**，不必删了重建。请求体是"要改的字段"的集合，没出现的字段一律不动
-（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 4 个，未知字段照样失败。
+（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 5 个，未知字段照样失败。
 
 `rules: null` 与"没给 `rules`"是**两件事**：前者是"解绑，回到不覆盖"，后者是"别动绑定"。
 工作台与 CLI 都必须显式表达解绑（工作台的下拉里「不覆盖」会发出 `null`）。
@@ -95,6 +105,7 @@ v1 有 8 个字段，v2 **只剩 4 个**：
 | `description` | ✅ 允许 | 纯展示字段，实例不读它 |
 | `rules` **绑定** | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set envboard_rules=<path>` 固定规则**路径**；换绑定它看不见，于是"配置说绑了 A、实例仍按 B 干活" |
 | `name` / `listen` | ❌ 拒绝（`conflict`） | 它们是环境的身份：客户端代理配置、状态文件、进程记录会同时失效 |
+| `proxy_auth` | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set proxyauth=…` 拿到凭据，运行中换不上 |
 | 规则文件的**内容** | ✅ 热重载 | 注入器按 mtime 重读**已绑定的那个路径**（间隔 `--reload-interval`），绑定没变就不必重启 |
 
 拒绝时的 `message` **必须**说清"先停止"与"描述可以改"，否则调用方只能猜。
@@ -103,7 +114,7 @@ v1 有 8 个字段，v2 **只剩 4 个**：
 进程记录都跟着搬到新名字下，旧名字在账本里消失。改名**不搬日志文件** —— 日志按名字落盘，
 新名字从新文件开始（见 `instance.logs`）。
 
-改了 `listen` 或 `rules` 绑定即作废**旧的失败标记**（`port_conflict` / `config_mismatch`）：
+改了 `listen`、`rules` 绑定或 `proxy_auth` 即作废**旧的失败标记**（`port_conflict` / `config_mismatch`）：
 那两个标记陈述的是"上一个配置失败了"，留着它会让界面拿**新**端口号报旧冲突。
 
 ## 端口分配（`port.allocate`）

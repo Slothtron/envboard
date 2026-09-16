@@ -38,6 +38,9 @@ pub struct EnvView {
     /// 生效后的规则条数（读文件解析得出）。
     pub rules_count: usize,
     pub proxy_command: String,
+    /// 代理鉴权是否启用。只给布尔，**不回显凭据** —— 视图会被列表/详情/SSE 广播，
+    /// 凭据只存在状态存储里。
+    pub proxy_auth_enabled: bool,
 }
 
 impl EnvView {
@@ -53,6 +56,7 @@ impl EnvView {
             "rules_count": self.rules_count,
             // "最后一公里"：用户不需要理解架构，复制粘贴就能用。
             "proxy_command": self.proxy_command,
+            "proxy_auth_enabled": self.proxy_auth_enabled,
         })
     }
 }
@@ -511,11 +515,11 @@ impl Manager {
     ///
     /// * **改描述随时可以**（纯展示字段）；
     /// * **规则文件的内容是热更新** —— 注入器按 mtime 重载**已绑定的那个路径**，不必重启；
-    /// * **改身份（改名 / 换端口）与换绑定必须先是停止状态**。这不是保守，是事实：
-    ///   实例在启动时通过 `--set envboard_rules=<path>` 拿到规则路径，运行中换绑定
-    ///   它根本看不见 —— 于是"配置说绑了 A、实例还在按 B 干活"，正是那种
-    ///   "看起来成功了但到处都对不上"的故障（状态文件的 `rules_count` 回显会把这种
-    ///   不一致如实报成 `config_mismatch`）。改名/换端口同理：客户端代理配置、
+    /// * **改身份（改名 / 换端口）、换绑定、改 `proxy_auth` 必须先是停止状态**。这不是保守，
+    ///   是事实：实例在启动时通过 `--set envboard_rules=<path>` / `--set proxyauth=…`
+    ///   拿到这些值，运行中换绑定或换凭据它根本看不见 —— 于是"配置说绑了 A、实例还在按
+    ///   B 干活"，正是那种"看起来成功了但到处都对不上"的故障（状态文件的 `rules_count`
+    ///   回显会把这种不一致如实报成 `config_mismatch`）。改名/换端口同理：客户端代理配置、
     ///   状态文件、进程记录会同时失效。
     pub fn update(&self, name: &str, patch: &Value) -> Result<EnvView, Error> {
         let raw = self.require(name)?;
@@ -525,22 +529,24 @@ impl Manager {
         let identity_changed =
             merged.name() != environment.name() || merged.listen() != environment.listen();
         let binding_changed = merged.rules() != environment.rules();
-        if (identity_changed || binding_changed) && self.is_live(name) {
+        let auth_changed = merged.proxy_auth() != environment.proxy_auth();
+        if (identity_changed || binding_changed || auth_changed) && self.is_live(name) {
             return Err(Error::new(
                 ErrorCode::Conflict,
                 format!(
                     "environment {name:?} is running; stop it before changing its name, listen \
-                     address or rules binding (an instance reads the rules path at launch, so a \
-                     new binding cannot take effect; the bound file's contents do reload live). \
+                     address, rules binding or proxy_auth (an instance reads these at launch, so \
+                     a new value cannot take effect; the bound file's contents do reload live). \
                      Description changes are allowed while running."
                 ),
             ));
         }
 
-        // 改了端口/绑定，**旧的失败标记就不再成立**：`port_conflict` 记的是"这个端口被占"，
+        // 改了端口/绑定/鉴权，**旧的失败标记就不再成立**：`port_conflict` 记的是"这个端口被占"，
         // `config_mismatch` 记的是"回显与这份配置对不上"。不清理的话，用户刚把端口换到空位上，
         // 界面仍会按旧标记报冲突 —— 而且用的是**新**端口号，等于在说谎。
-        let mark_is_stale = merged.listen() != environment.listen() || binding_changed;
+        let mark_is_stale =
+            merged.listen() != environment.listen() || binding_changed || auth_changed;
 
         let mut state = self.state.lock().unwrap();
         if merged.name() != environment.name() && state.find(merged.name()).is_some() {
@@ -580,6 +586,9 @@ impl Manager {
         }
         if merged.rules() != environment.rules() {
             changed.push("rules");
+        }
+        if auth_changed {
+            changed.push("proxy_auth");
         }
         if merged.description() != environment.description() {
             changed.push("description");
@@ -973,6 +982,7 @@ impl Manager {
             runtime_dir: self.config.runtime_dir.clone(),
             log_dir: self.config.log_dir.clone(),
             options: options.clone(),
+            proxy_auth: environment.proxy_auth().map(str::to_string),
         };
         // denylist 在 core 侧也会跑一次；这里先跑一遍，好在错误里带上正确的字段路径。
         envboard_core_api::validate_options(options)?;
@@ -1089,6 +1099,11 @@ impl Manager {
         // 而不是"状态坏了"。缺失由 `start` 响亮失败、并在视图里体现为条数 0。
         let rules_count = self.expected_rules_count_lenient(&environment);
         let listen = environment.listen();
+        // 视图**不回显凭据**（契约：proxy_auth 的唯一出口是实例启动参数；视图与日志
+        // 只暴露"是否启用"布尔）。所以代理命令不带凭据 —— 启用了鉴权的环境，
+        // 用户复制后按 `-x http://<proxy_auth>@<host>:<port>` 自行补上。
+        let proxy_command =
+            format!("export https_proxy=http://{listen} http_proxy=http://{listen}");
         Ok(EnvView {
             name: name.clone(),
             listen,
@@ -1097,7 +1112,8 @@ impl Manager {
             desired: state.desired_of(&name),
             health: self.health_blocking(&name, &environment, state),
             rules_count,
-            proxy_command: format!("export https_proxy=http://{listen} http_proxy=http://{listen}"),
+            proxy_command,
+            proxy_auth_enabled: environment.proxy_auth().is_some(),
         })
     }
 

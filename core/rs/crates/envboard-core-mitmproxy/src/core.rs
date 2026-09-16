@@ -30,7 +30,7 @@ use crate::python::{self, PythonInterpreter};
 
 /// mitmproxy 实现特有的禁令：这些键会改变进程拓扑或加载第三方代码，
 /// 属于"把 core 换成别的东西"（契约见 `core/spec/capabilities.md` 的 ProxyCore 章节）。
-const MITMPROXY_DENIED_OPTIONS: &[&str] = &["mode", "upstream", "scripts", "web"];
+const MITMPROXY_DENIED_OPTIONS: &[&str] = &["mode", "upstream", "scripts", "web", "proxyauth"];
 
 pub struct MitmproxyCoreConfig {
     /// `mitmdump` 路径（默认按 PATH 解析）。core 可执行文件与解释器路径都不写死。
@@ -207,9 +207,16 @@ impl MitmproxyCore {
             self.config.annotate_flow.to_string(),
         );
         set("envboard_env_name", spec.env.clone());
+        // 代理访问鉴权：凭据只来自环境的 `proxy_auth` 字段（options 里的 `proxyauth`
+        // 被 denylist 拒绝）。同样走命令行而不是环境变量。
         // 契约回显自检的输入：让注入器逐项核对"管理器下发的选项"有没有被宿主接受。
         // 拼错的 `--set` 会被 mitmproxy 静默忽略，只有让注入器去 ctx.options 里查才知道。
-        if let Ok(expect) = serde_json::to_string(&spec.options) {
+        let mut expected = spec.options.clone();
+        if let Some(proxy_auth) = &spec.proxy_auth {
+            set("proxyauth", proxy_auth.clone());
+            expected.insert("proxyauth".into(), proxy_auth.clone());
+        }
+        if let Ok(expect) = serde_json::to_string(&expected) {
             set("envboard_expect", expect);
         }
         // 用户透传的 core 特有选项（已过 denylist）
@@ -731,6 +738,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
+            proxy_auth: None,
         }
     }
 
@@ -767,6 +775,40 @@ mod tests {
             joined.contains("envboard_expect="),
             "the contract-echo self-check input must be passed"
         );
+    }
+
+    #[test]
+    fn proxy_auth_is_passed_and_echoed() {
+        let core = core(std::env::temp_dir());
+        let mut s = spec(&[]);
+        s.proxy_auth = Some("alice:s3cret".into());
+        let args = core.build_args(&s, Path::new("/tmp/agent/inj.py"));
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("proxyauth=alice:s3cret"),
+            "proxyauth must be set from spec.proxy_auth: {joined}"
+        );
+        // 回显自检也要包含它：否则 mitmproxy 静默丢弃 proxyauth 时我们查不出来
+        let expect = args
+            .iter()
+            .find(|arg| arg.starts_with("envboard_expect="))
+            .expect("expect must be present");
+        assert!(
+            expect.contains(r#"proxyauth":"alice:s3cret"#),
+            "expect must include proxyauth: {expect}"
+        );
+    }
+
+    #[test]
+    fn proxyauth_in_options_is_denied() {
+        let core = core(std::env::temp_dir());
+        let error = core
+            .check_options(&BTreeMap::from([(
+                "proxyauth".to_string(),
+                "a:b".to_string(),
+            )]))
+            .expect_err("proxyauth is manager-owned and cannot be overridden");
+        assert_eq!(error.field.as_deref(), Some("instance.options.proxyauth"));
     }
 
     #[test]

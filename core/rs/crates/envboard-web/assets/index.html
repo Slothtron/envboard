@@ -200,7 +200,8 @@
           <div class="tab-panel" data-panel="overview" id="panel-overview" role="tabpanel" aria-labelledby="tabbtn-overview">
             <div class="info-grid">
               <div class="info-cell"><span class="info-label">实际状态</span><span class="info-value mono" id="ov-health">—</span></div>
-              <div class="info-cell"><span class="info-label">监听端口</span><span class="info-value mono" id="ov-port">—</span></div>
+              <div class="info-cell"><span class="info-label">监听地址</span><span class="info-value mono" id="ov-port">—</span></div>
+              <div class="info-cell"><span class="info-label">访问鉴权</span><span class="info-value mono" id="ov-auth">—</span></div>
               <div class="info-cell"><span class="info-label">期望状态</span><span class="info-value mono" id="ov-desired">—</span></div>
               <div class="info-cell"><span class="info-label">规则绑定</span><span class="info-value mono" id="ov-rules">—</span></div>
               <div class="info-cell"><span class="info-label">规则条数</span><span class="info-value mono" id="ov-rules-count">—</span></div>
@@ -244,6 +245,17 @@
                 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select>
                 <span class="field-hint">绑定在下次启动时生效；规则文件内容是热重载的</span>
               </label>
+              <label class="field field-check">
+                <input type="checkbox" name="public" id="env-form-public">
+                <span class="field-label">对外服务（绑定 0.0.0.0）</span>
+                <span class="field-hint">默认只监听 127.0.0.1；勾选后局域网内可直接连此代理</span>
+              </label>
+              <label class="field">
+                <span class="field-label">访问鉴权</span>
+                <input type="password" name="proxy_auth" id="env-form-proxy-auth" placeholder="user:password" autocomplete="new-password">
+                <span class="field-hint">留空 = 不启用。代理访问需要此凭据（Basic 认证）；勾选「对外服务」时强烈建议启用</span>
+              </label>
+              <p class="hint is-hidden" id="env-form-auth-warning">代理将暴露给局域网且未启用访问鉴权 —— 任何能连通的机器都能借它发请求，建议填写上面的「访问鉴权」。</p>
               <label class="field">
                 <span class="field-label">描述</span>
                 <input name="description" placeholder="灰度环境" autocomplete="off">

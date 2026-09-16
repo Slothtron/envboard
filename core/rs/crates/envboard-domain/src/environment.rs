@@ -1,8 +1,9 @@
 //! 环境（`Environment`）领域模型 —— 纯逻辑，不碰 fs / 网络 / 宿主。
 //!
 //! 契约见 `core/spec/capabilities.md`（§领域不变量）。v2 把 v1 的 8 字段收成 4 个：
-//! `name` / `listen` / `rules` / `description`。被删除的字段（`dns_servers`、
-//! `hosts`、`domain_suffix`、`color`…）现在会**响亮失败**，不会被当成无用字段收下。
+//! `name` / `listen` / `rules` / `description`；v2.1 增加第 5 个字段 `proxy_auth`
+//! （代理访问鉴权，`user:password`）。被删除的字段（`dns_servers`、`hosts`、
+//! `domain_suffix`、`color`…）现在会**响亮失败**，不会被当成无用字段收下。
 
 use std::net::IpAddr;
 
@@ -10,7 +11,7 @@ use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, Listen};
 use serde_json::{Map, Value};
 
 /// 对外 JSON 形状里的字段名（未知字段判定用同一张表）。
-pub const KNOWN_FIELDS: &[&str] = &["name", "listen", "rules", "description"];
+pub const KNOWN_FIELDS: &[&str] = &["name", "listen", "rules", "description", "proxy_auth"];
 
 /// 契约里的路径前缀 —— 所有 `field` 都从它开始。
 pub const PATH: &str = "environment";
@@ -21,6 +22,9 @@ pub const NAME_MAX_LEN: usize = 32;
 /// `description` 上限（字符数），见 `core/spec/capabilities.md`。
 pub const DESCRIPTION_MAX_CHARS: usize = 200;
 
+/// `proxy_auth`（`user:password`）总长上限。
+pub const PROXY_AUTH_MAX_LEN: usize = 128;
+
 /// 一个环境 = 一个监听端口 + 一份可选的规则绑定。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
@@ -28,6 +32,7 @@ pub struct Environment {
     listen: Listen,
     rules: Option<String>,
     description: String,
+    proxy_auth: Option<String>,
 }
 
 impl Environment {
@@ -42,6 +47,7 @@ impl Environment {
             listen,
             rules,
             description: description.into(),
+            proxy_auth: None,
         }
     }
 
@@ -59,6 +65,10 @@ impl Environment {
 
     pub fn description(&self) -> &str {
         &self.description
+    }
+
+    pub fn proxy_auth(&self) -> Option<&str> {
+        self.proxy_auth.as_deref()
     }
 
     /// 归一化后的完整记录 —— 可直接持久化，也是契约 fixture 比对的形状。
@@ -80,6 +90,13 @@ impl Environment {
         out.insert(
             "description".into(),
             Value::String(self.description.clone()),
+        );
+        out.insert(
+            "proxy_auth".into(),
+            match &self.proxy_auth {
+                Some(value) => Value::String(value.clone()),
+                None => Value::Null,
+            },
         );
         Value::Object(out)
     }
@@ -112,12 +129,14 @@ impl Environment {
         let (host, port) = parse_listen(object.get("listen"))?;
         let rules = normalize_rules(object.get("rules"))?;
         let description = parse_description(object.get("description"))?;
+        let proxy_auth = parse_proxy_auth(object.get("proxy_auth"))?;
 
         Ok(Self {
             name,
             listen: Listen::new(host, port),
             rules,
             description,
+            proxy_auth,
         })
     }
 
@@ -319,6 +338,56 @@ fn parse_description(value: Option<&Value>) -> Result<String, Error> {
     Ok(text)
 }
 
+/// `proxy_auth` 解析：`null`/缺省 = 不启用；否则必须是 `user:password`。
+///
+/// 规则（契约见 `core/spec/capabilities.md`）：
+/// * 恰好一个 `:`，两段都非空 —— 用户名或密码本身含 `:` 的场景不支持
+///   （mitmproxy 的 `proxyauth` 也按第一个 `:` 切分，这里从源头禁掉歧义）；
+/// * 两段与整体都**不含空白字符与控制字符**（Basic 认证的编码形态不允许）；
+/// * trim 后总长 ≤ [`PROXY_AUTH_MAX_LEN`]。
+///
+/// 这是**凭据**：出错信息里只说规则，绝不回显用户输入的值。
+fn parse_proxy_auth(value: Option<&Value>) -> Result<Option<String>, Error> {
+    let field = format!("{PATH}.proxy_auth");
+    let Some(value) = value else { return Ok(None) };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value.as_str().ok_or_else(|| {
+        Error::invalid_config(
+            &field,
+            format!("proxy_auth must be a string or null, got {value}"),
+        )
+    })?;
+    let text = raw.trim();
+    let (user, password) = text.split_once(':').ok_or_else(|| {
+        Error::invalid_config(
+            &field,
+            "proxy_auth must be `user:password` (exactly one colon, both sides non-empty)",
+        )
+    })?;
+    let ok_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| !c.is_whitespace() && !c.is_control() && c != ':')
+    };
+    if !ok_part(user) || !ok_part(password) {
+        return Err(Error::invalid_config(
+            &field,
+            "proxy_auth must be `user:password` without whitespace or control characters, \
+             and no colon inside either part",
+        ));
+    }
+    if text.chars().count() > PROXY_AUTH_MAX_LEN {
+        return Err(Error::invalid_config(
+            &field,
+            format!("proxy_auth is longer than {PROXY_AUTH_MAX_LEN} characters"),
+        ));
+    }
+    Ok(Some(text.to_string()))
+}
+
 /// 裸 IP 字面量解析：见 [`envboard_core_api::parse_ip_literal`]。
 ///
 /// 刻意**不接受**主机名与 `ip:port`：监听地址是环境的对外身份，
@@ -391,5 +460,58 @@ mod tests {
             .merged(&json!({"listen": {"host": "0.0.0.0"}}))
             .unwrap_err();
         assert_eq!(error.field.as_deref(), Some("environment.listen.port"));
+    }
+
+    #[test]
+    fn proxy_auth_is_parsed_and_normalized() {
+        let env = Environment::from_json(&json!({
+            "name": "auth",
+            "listen": {"port": 16600},
+            "proxy_auth": "  alice:s3cret  "
+        }))
+        .unwrap();
+        assert_eq!(env.proxy_auth(), Some("alice:s3cret"));
+        // 缺省与显式 null 都是不启用
+        let none =
+            Environment::from_json(&json!({"name": "auth", "listen": {"port": 16600}})).unwrap();
+        assert_eq!(none.proxy_auth(), None);
+        let cleared = none.merged(&json!({"proxy_auth": null})).unwrap();
+        assert_eq!(cleared.proxy_auth(), None);
+    }
+
+    #[test]
+    fn invalid_proxy_auth_fails_loudly() {
+        let base = json!({"name": "auth", "listen": {"port": 16600}});
+        for (value, why) in [
+            (json!(""), "empty"),
+            (json!("   "), "whitespace only"),
+            (json!("no-colon"), "no colon"),
+            (json!("a:b:c"), "multiple colons"),
+            (json!(":pass"), "empty user"),
+            (json!("user:"), "empty password"),
+            (json!("us er:pass"), "whitespace inside"),
+            (json!("user:pa\u{7}ss"), "control character"),
+            (json!(42), "not a string"),
+            (json!(format!("u:p{}", "x".repeat(126))), "longer than 128"),
+        ] {
+            let mut input = base.clone();
+            input["proxy_auth"] = value;
+            let error = Environment::from_json(&input)
+                .err()
+                .unwrap_or_else(|| panic!("proxy_auth case {why:?} unexpectedly passed"));
+            assert_eq!(
+                error.field.as_deref(),
+                Some("environment.proxy_auth"),
+                "case {why:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_rejects_unknown_fields_still() {
+        let base =
+            Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
+        let error = base.merged(&json!({"prox_auth": "a:b"})).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.prox_auth"));
     }
 }

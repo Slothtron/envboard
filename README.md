@@ -19,6 +19,9 @@
 | 按 host 改写上连目标（真 mitmproxy `server_connect`） | ✅ |
 | 共享 CA（所有实例一张，客户端只装一次） | ✅ |
 | 工作台（环境列表 / 启停 / 编辑 / 规则导入与载入 / 跨环境对比 / 日志 / SSE） | ✅ |
+| 工作台 URL token 鉴权（header 优先，`?token=` 等效；启动日志打印可点链接） | ✅ |
+| 代理访问鉴权（环境 `proxy_auth` 字段 → mitmproxy `proxyauth`，Basic 认证） | ✅ |
+| 对外服务开关（环境监听 `0.0.0.0`，默认 `127.0.0.1`） | ✅ |
 | CLI（本地 API 的瘦客户端；无常驻实例时自己驱动管理器） | ✅ |
 | 期望状态 reconcile（崩溃/重启后自动恢复） | ✅ |
 | 单实例锁、状态原子写 + 0600 | ✅ |
@@ -95,10 +98,27 @@ envboard rules show beta                        # 改规则文件前先取回原
 
 非法配置**加载即失败**并给出字段路径（如 `environment.listen.port`）。
 
+### 工作台鉴权与对外暴露
+
+- **token**：`web --token <值>` 启用工作台鉴权后，启动日志会打印
+  `dashboard: http://<host>:<port>/?token=<值>`，点击即可在浏览器直接打开
+  （浏览器与 SSE 的 EventSource 带不了自定义头，所以服务端同样接受 `?token=`；
+  header `x-envboard-token` 优先）。前端拿到 URL 上的 token 后会立刻从地址栏抹掉，
+  之后所有请求走 header。注意 `?token=` 会出现在访问日志与浏览器历史里，
+  API 调用请优先用 header。
+- **代理访问鉴权**：环境新增 `proxy_auth` 字段（`user:password`，恰好一个冒号、
+  两段非空、无空白/控制字符、总长 ≤128；`null` = 不启用）。启用后实例以
+  `--set proxyauth=<user:password>` 启动，客户端凭据才能连代理（否则 407）；
+  凭据明文存于状态目录（文件 0600），
+  视图与日志只暴露"是否启用"，不回显值本身；运行中修改要先停止实例。
+- **对外服务**：环境监听默认 `127.0.0.1`；工作台表单的「对外服务」开关把
+  `listen.host` 换成 `0.0.0.0`（也可 PATCH `listen` 显式指定）。勾选而未启用
+  `proxy_auth` 时表单会给警示 —— 代理暴露给局域网后任何能连通的机器都能借它发请求。
+
 ## 架构
 
 ```
-core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、40 个 golden fixture
+core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、47 个 golden fixture
 core/rs/crates/
   envboard-core-api   ProxyCore trait、实例契约、错误码、端口（时钟/日志）  ← 根，无内部依赖
   envboard-domain     环境校验/合并、端口选择、reconcile 决策              ← 纯逻辑
@@ -108,7 +128,7 @@ core/rs/crates/
   envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
   envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
   envboard-cli        envboard 二进制
-  envboard-contract-tests  消费全部 40 个契约 fixture
+  envboard-contract-tests  消费全部 47 个契约 fixture
 adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
 ```
 
@@ -132,7 +152,7 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 | 层 | 手段 | 关键断言 |
 |---|---|---|
 | 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**包内文本不得引用本仓之外的本地文档**（见下） |
-| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 40 个 fixture 由实现消费；`rules.parse` 两侧一致 |
+| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 47 个 fixture 由实现消费；`rules.parse` 两侧一致 |
 | 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
 | 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
 | 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
@@ -221,6 +241,6 @@ envboard env list
 - `capabilities.md` —— 能力清单、领域不变量、端口分配与生命周期语义、ProxyCore 能力矩阵
 - `rules.md` —— hosts 规则语法的 **BNF**（容错规则、跳过原因码、渲染的逐字节要求）
 - `errors.md` —— 统一错误码与健康状态表
-- `fixtures/` —— 40 个 golden case
+- `fixtures/` —— 47 个 golden case
 
 改实现之前先问"契约该不该改"；该改就改契约并同步 fixture。

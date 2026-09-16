@@ -471,6 +471,8 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .info-value { font-size: var(--text-lg); color: var(--text); word-break: break-word; }
 /* 期望 ≠ 实际：把「实际状态」标红，异常不必靠人肉比对两格才发现 */
 .info-value.is-mismatch { color: var(--bad); font-weight: 600; }
+/* 非回环监听：暴露面变大的醒目标识（概览的「监听地址」格） */
+.info-value.is-warning { color: var(--bad); font-weight: 600; }
 
 /* ---- 命令卡 ---- */
 .cmd-card {
@@ -507,6 +509,11 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .field { display: grid; gap: var(--space-1); min-width: 0; }
 .field-label { font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.03em; color: var(--muted); }
 .field-hint { font-size: var(--text-xs); color: var(--muted-2); }
+/* 复选框字段：勾选框与标签同行，提示换行在下方 */
+.field-check { grid-template-columns: auto 1fr; align-items: center; }
+.field-check .field-hint { grid-column: 1 / -1; }
+/* 布局警告：勾选对外服务又没配鉴权时出现（is-hidden 控制显隐） */
+.hint.is-warning { color: var(--bad); }
 /* 字段级错误文本：紧贴输入框下方，比 toast 更可行动（toast 会消失） */
 .field-error { font-size: var(--text-xs); font-weight: 500; color: var(--bad); }
 .form-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }

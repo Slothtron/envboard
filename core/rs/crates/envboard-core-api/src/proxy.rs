@@ -102,6 +102,10 @@ pub struct InstanceSpec {
     pub log_dir: Option<PathBuf>,
     /// core 特有选项，处理器不理解也不解释，只做 denylist 后原样透传。
     pub options: BTreeMap<String, String>,
+    /// 代理访问鉴权（`user:password`），来自环境的 `proxy_auth` 字段。
+    /// `None` = 不启用。凭据的唯一来源是环境字段，`options` 里的 `proxyauth`
+    /// 键被 denylist 拒绝 —— 两个真相必然分叉，不如只有一个入口。
+    pub proxy_auth: Option<String>,
 }
 
 impl InstanceSpec {
@@ -118,6 +122,7 @@ pub const RESERVED_OPTION_KEYS: &[&str] = &[
     "confdir",
     "status_file",
     "rules",
+    "proxyauth",
 ];
 
 /// 会改变进程拓扑或加载第三方代码的键：它们不是"core 特有配置"，
