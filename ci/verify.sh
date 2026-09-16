@@ -149,28 +149,16 @@ step_live() {
 }
 
 case "$STEP" in
-  all)
-    step_policy
-    step_rust
-    step_contract
-    step_artifact
-    step_adapter
-    ;;
-  policy)        step_policy ;;
-  rust)          step_policy; step_rust ;;
-  contract)      step_contract ;;
-  artifact)      step_artifact ;;
-  adapter)       step_adapter ;;
-  dual)          step_dual ;;
-  rust-fmt)      step_rust_fmt ;;
-  rust-clippy)   step_rust_clippy ;;
-  rust-check)    step_rust_check ;;
-  rust-build)    step_rust_build ;;
-  rust-test)     step_rust_test ;;
-  rust-live)     step_live_manager ;;
-  live)          step_live ;;
+  all)      step_policy; step_rust; step_contract; step_artifact; step_adapter ;;
+  policy)   step_policy ;;
+  rust)     step_policy; step_rust ;;
+  contract) step_contract ;;
+  artifact) step_artifact ;;
+  adapter)  step_adapter ;;
+  live)     step_live ;;
   *)
     echo "unknown step: $STEP" >&2
+    echo "可选：all（默认）/ policy / rust / contract / artifact / adapter / live" >&2
     exit 2
     ;;
 esac

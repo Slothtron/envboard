@@ -396,6 +396,43 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   对照与启动日志横幅）、`proxy_auth` 下发后 407/200 对照（含运行中改被拒、
   视图不回显凭据）、`listen.host = 0.0.0.0` 换址重启且回环方向照常服务。
 
+### Changed (breaking：工程工具链)
+
+- **仓库的工程门禁全部改用 Rust 写，工具链收敛为 `cargo` 一条。**
+  9 个 Python 工具脚本与 1 个 Node 入口壳全部退场，"禁止引入其他语言工具链"从文档
+  约束变成门禁会红的事实：
+
+  | 旧 | 新 |
+  |---|---|
+  | `scripts/naming_lint.py` | `cargo test -p envboard-policy-tests --test naming` |
+  | `scripts/doc_scope_lint.py` | `… --test doc_scope` |
+  | `scripts/rust_dependency_lint.py` | `… --test deps` |
+  | `scripts/compile_check.py` | 由 `dual` 真加载注入器 + `… --test adapter` 的静态检查承接 |
+  | `scripts/artifact_check.py` | `cargo test -p envboard-cli --test artifact` |
+  | `scripts/verify_contract.py` | 形状进 `envboard-contract-tests`，Python 侧消费由 `dual` 覆盖 |
+  | `scripts/verify_dual_impl.py` | `cargo test -p envboard-rules --test dual_impl -- --ignored` |
+  | `scripts/verify_live_v2.py` | `cargo test -p envboard-cli --test live_workbench -- --ignored` |
+  | `scripts/spike_m0_5.py` | 删除（机制已由 `live_manager` 常态覆盖） |
+  | `package.json` | 删除（它的唯一作用是转发 `npm run verify`） |
+
+- **新增门禁「工具链收敛」**（`envboard-policy-tests` 的 `toolchain`）：文件面不许有
+  Python / Node / TS 的工具链痕迹、调用面不许出现 `npm` / `pip` / `mypy` / `<解释器> -m`、
+  反向守卫 `adapters/` 仍是单文件注入器。迁移期由一张**双向**白名单承载待退场文件
+  （条目失效同样失败），**现已清空 = 收敛完成**。
+- **`ci/verify.sh` 收缩为纯编排**：分层（`policy` / `rust` / `contract` / `artifact` /
+  `adapter` / `live`）、顺序、依赖探测与响亮失败；判据一律搬进测试，脚本里不再有断言。
+  `bash ci/verify.sh rust` 现在是**零第二种语言运行时**的子集（不需要 Python / Node）。
+- **子进程/依赖前提变化**：默认层需要适配器宿主的解释器（跑注入器对拍），缺了**响亮
+  失败**并给出两条出路，不再静默跳过；fmt / clippy 随 toolchain 一起来，因此成为必需
+  步骤（此前缺失时打印 SKIPPED 继续跑）。新增依赖 `toml`，只被门禁解析 `Cargo.toml` 用。
+- **全部 crate 显式 `publish = false`**：本仓不发布 crate，发布物是 `envboard` 二进制；
+  发布工件清单（二进制 + 5 个必需文件 + systemd unit）由 `artifact` 门禁逐项校验。
+- **实质改进**：实机套件改裸 TCP 直连代理（不再 spawn `curl`，320 次请求 2.85s → 0.44s，
+  整套 17.5s → 12.9s）；`dual` / `artifact` / 实机测试改用 `CARGO_BIN_EXE_<bin>` 取被测
+  二进制，cargo 保证构建次序，去掉"必须先 `cargo build`"的顺序依赖。
+- **文档**：设计文档、开发计划、实机验收转录不再入库（改为包内本机工作材料）；
+  入库文本只保留 `README.md` / `CHANGELOG.md` / `core/spec/**`。
+
 ## [0.1.0] - 2026-09-15
 
 ### Added

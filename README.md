@@ -187,13 +187,16 @@ core/rs/crates/
   envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
   envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
   envboard-cli        envboard 二进制
-  envboard-contract-tests  消费全部 58 个契约 fixture
+  envboard-contract-tests  消费全部 58 个契约 fixture（只有测试目标）
+  envboard-policy-tests    工程门禁本身（只有测试目标，不进发布物）
 adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
+scripts/systemd/      部署工件（用户级 unit）
 ```
 
 依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：core-api 是根；domain / rules / core-api
 是**纯逻辑**（不得依赖 tokio / libc）；web 只认识管理器的公开 API，不认识具体 core
 （所以换 core 不必动它）。`adapters/` 只做宿主接线，不含业务逻辑。
+`envboard-policy-tests` 是例外的一类 —— 它是**开发工具**，谁都不许依赖它，也不进发布物。
 
 注入器只做三件事：读+解析规则、在 `server_connect` 里改写上连目标、回写状态文件。
 它不知道自己是哪个环境，也不碰状态目录 —— 所以随时可以丢掉。
@@ -203,24 +206,52 @@ adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 includ
 单一入口（托管方无关，CI 直接调它即可）：
 
 ```bash
-bash ci/verify.sh            # 默认层：编译/命名/文本自包含/依赖方向/格式/clippy/单测/契约对拍/产物校验/冒烟
-bash ci/verify.sh rust       # 只跑 Rust 相关
+bash ci/verify.sh            # 默认层：policy + rust + contract + artifact + adapter
+bash ci/verify.sh rust       # 纯 Rust 子集：policy + rust（不需要 Python / Node）
 bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理器（需要宿主）
+bash ci/verify.sh policy     # 只跑仓库纪律那一层
 ```
 
-| 层 | 手段 | 关键断言 |
-|---|---|---|
-| 文本纪律 | `cargo test -p envboard-policy-tests`（`naming` / `doc_scope` / `toolchain`） | 代码身份零命中发包标识；**入库文本不得引用不在仓库里的本地文档**（见下） |
-| 契约 | `cargo test -p envboard-contract-tests` | 58 个 fixture 的形状与语义都由实现消费；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 |
-| 跨语言对拍 | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
-| 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
-| 实机 | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
-| 浏览器 | 人工走查（真浏览器 + `getComputedStyle` 对齐令牌；转录是本机工作材料，不入库） | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训） |
+层、手段与外部依赖（脚本本身**只做编排**，判据全在测试里）：
+
+| 层 | 手段 | 关键断言 | 需要什么 |
+|---|---|---|---|
+| `policy` | `cargo test -p envboard-policy-tests` | 见下面「工具链纪律」与「文本自包含」两节 | 只有 cargo |
+| `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测（端口分配、reconcile、锁、健康判定含僵尸判活、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑：热改 vs 必须停机**） | 只有 cargo |
+| `contract` | `cargo test -p envboard-contract-tests` | 58 个 fixture 的形状与语义都由实现消费；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 | 只有 cargo |
+| `artifact` | `cargo test -p envboard-cli --test artifact` | 发布工件清单齐全、v1 残留为零、二进制里真的内嵌了注入器 | 只有 cargo |
+| `adapter` | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） | 适配器宿主的解释器 |
+| `live` | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** | mitmdump + 网络 |
+| `live` | 人工走查浏览器层（真浏览器 + `getComputedStyle` 对齐令牌） | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训）；转录是本机工作材料，不入库 | 真浏览器 |
+
+解释器缺失时默认层**响亮失败**并给出两条出路（装适配器宿主，或跑 `verify.sh rust`），
+不静默跳过 —— 跳过等于那一层的护栏消失。
 
 实机与验收的**转录**是本机工作材料，不入库；可重跑的断言在 `bash ci/verify.sh live` 那一层。
 
 工作台界面的视觉令牌、CSP 约束与交互纪律以 `core/rs/crates/envboard-web/assets/app.css`
 第 ① 区为准（那里是机器可读的唯一来源）。
+
+### 工具链纪律
+
+**这个仓库只有一条工具链：`cargo`。** 除 `adapters/` 下的宿主适配器脚本外，不许有第二种
+语言的工具链痕迹 —— 门禁自己也不许用别的语言写。这条约束由门禁自己证明，不是靠自觉：
+
+| 判据 | 内容 |
+|---|---|
+| 文件面 | 不许有 Python / Node / TS 的源码与清单文件（`*.py`、`pyproject.toml`、`package.json`、`node_modules/`、`*.ts`、打包器配置…）；`node_modules/` 与 `__pycache__/` 单独判存在性 |
+| 调用面 | 可执行面（`ci/*.sh`、`*.service`、CI 描述文件）不许出现 `npm` / `pip` / `mypy` / `pytest` 等命令，也不许 `<解释器> -m <工具>`；被执行的仓库内脚本只允许是适配器脚本 |
+| 反向守卫 | `adapters/` 下仍是**单文件**、纯标准库 + mitmproxy 的注入器 |
+
+为什么这么较真：门禁必须与产品同一条工具链、同一个类型系统，否则就是"用另一套语言维护
+这个仓库的工程纪律" —— 而那套语言的类型错误没人检查，门禁自身也会漂移。
+`bash ci/verify.sh rust` 就是这条纪律的可执行形式：它在一个没有 Python、没有 Node 的
+环境里也全绿。
+
+**禁止**为了"写起来快"重新引入脚本语言写门禁。要加一条新门禁，就加一个新测试：
+纯文本 / 结构门禁放 `envboard-policy-tests`（一门禁一文件），需要已构建二进制的门禁
+放它所属 crate 的 `tests/`（用 `CARGO_BIN_EXE_<bin>` 取二进制），需要真宿主的门禁标
+`#[ignore]` 并由 `ci/verify.sh` 的对应层用 `--ignored` 触发。`ci/verify.sh` 只做编排。
 
 ### 文本自包含（`doc-scope-lint`）
 
