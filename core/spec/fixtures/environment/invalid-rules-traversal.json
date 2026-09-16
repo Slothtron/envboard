@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "规则名是路径穿越的唯一防线：白名单名字 + 固定父目录 + 固定后缀，禁止 ../ 与分隔符",
+  "input": { "name": "prod", "listen": { "port": 16600 }, "rules": "../etc/passwd" },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.rules" }
+}

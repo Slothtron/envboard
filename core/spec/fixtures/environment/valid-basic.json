@@ -1,19 +1,17 @@
 {
   "capability": "environment.validate",
-  "description": "beta 环境：一套自定义 DNS + 一个静态 hosts 覆盖",
+  "description": "完整环境：显式监听地址 + 绑定规则文件 + 描述。归一化后即可持久化",
   "input": {
     "name": "beta",
-    "dns_servers": ["10.0.0.53", "10.0.0.54"],
-    "domain_suffix": "beta.example.com",
-    "hosts": { "api.example.com": "10.0.0.11" },
-    "color": "#4c8dff",
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "rules": "beta",
     "description": "灰度环境"
   },
   "expect": {
     "ok": true,
     "name": "beta",
-    "dns_servers": ["10.0.0.53", "10.0.0.54"],
-    "domain_suffix": "beta.example.com",
-    "hosts": { "api.example.com": "10.0.0.11" }
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "rules": "beta",
+    "description": "灰度环境"
   }
 }

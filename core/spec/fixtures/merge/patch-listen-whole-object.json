@@ -1,0 +1,9 @@
+{
+  "capability": "environment.merge",
+  "description": "listen 是整体替换（不做深合并），且改完后仍必须满足 port 必填 —— 只给 host 会失败",
+  "input": {
+    "base": { "name": "gray", "listen": { "host": "127.0.0.1", "port": 16600 } },
+    "patch": { "listen": { "host": "0.0.0.0" } }
+  },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.port" }
+}

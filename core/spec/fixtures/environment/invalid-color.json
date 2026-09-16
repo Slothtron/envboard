@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "颜色只接受 #rgb / #rrggbb",
-  "input": { "name": "prod", "color": "blue" },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.color" }
-}

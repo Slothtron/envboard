@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "端口越界（> 65535）",
+  "input": { "name": "prod", "listen": { "port": 70000 } },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.port" }
+}

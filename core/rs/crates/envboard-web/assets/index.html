@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>envboard — 多环境管理器</title>
+  <!-- 样式与脚本一律外置：CSP 里没有 'unsafe-inline'，内联会被浏览器拒绝。
+       这正是 v1 踩过的坑（内联脚本被宿主 CSP 拒绝，而 curl 断言看不出来）。 -->
+  <!-- 内联 data: 图标而不是加一个 404 的 favicon.ico：CSP 的 img-src 明确允许 data:，
+       浏览器因此不会再为缺图标报一条控制台错误（验收会看控制台）。 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1115'/%3E%3Cpath d='M8 21V11l8 6 8-6v10' stroke='%234c8dff' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>envboard</h1>
+      <span class="subtitle">一个环境 = 一个实例 = 一个端口</span>
+    </div>
+    <div class="status" id="status-bar">
+      <span class="pill" id="core-pill">core: …</span>
+      <span class="pill" id="conn-pill">连接中…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>环境</h2>
+        <div class="actions">
+          <button id="refresh" class="ghost" type="button">刷新</button>
+        </div>
+      </div>
+      <table id="env-table">
+        <thead>
+          <tr>
+            <th>名字</th><th>状态</th><th>端口</th><th>规则</th><th>期望</th>
+            <th>代理命令</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="env-body">
+          <tr><td colspan="7" class="empty">加载中…</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <h2 id="env-form-title">新建环境</h2>
+          <span class="pill" id="env-form-mode" hidden>编辑中</span>
+        </div>
+        <!-- 同一个表单两种模式：提交时按 data-editing 决定 POST 还是 PATCH。
+             刻意不搞"行内编辑"—— 两套 DOM 迟早不一致，而这里字段集本来就一样。 -->
+        <!-- 名字的 pattern 必须能在 **`v` 标志**下编译：Chrome 现在用 `v`（不是 `u`）校验
+             `pattern`，而 `v` 模式里裸的 `-` 是非法字符类成员 —— 于是整个 pattern 被
+             浏览器**静默忽略**，只在控制台留一行 SyntaxError（实测）。转义成 `\-` 后
+             两种模式都合法。契约本身见 core/spec/capabilities.md 的 `^[a-z][a-z0-9_-]{0,31}$`。 -->
+        <form id="env-form" class="form" data-editing="">
+          <label>名字 <input name="name" placeholder="beta" required pattern="[a-z][a-z0-9_\-]*"></label>
+          <label>端口 <input name="port" placeholder="留空 = 自动分配" inputmode="numeric"></label>
+          <label>规则 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select></label>
+          <label>描述 <input name="description" placeholder="灰度环境"></label>
+          <div class="form-actions">
+            <button type="submit" class="primary" id="env-form-submit">创建</button>
+            <button type="button" class="ghost" id="env-form-cancel" hidden>取消编辑</button>
+          </div>
+        </form>
+        <p class="hint" id="env-form-hint"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>跨环境对比</h2></div>
+        <form id="compare-form" class="form inline">
+          <label>域名 <input name="host" placeholder="api.example.com" required></label>
+          <button type="submit" class="primary">对比</button>
+        </form>
+        <div id="compare-result" class="result"></div>
+        <p class="hint">纯静态查表：规则是确定性的，所以这个问题不发任何请求、也不会失败。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>规则库</h2></div>
+        <ul id="rules-list" class="list"></ul>
+        <form id="rules-form" class="form">
+          <label>名字 <input name="name" placeholder="beta" required></label>
+          <label>内容 <textarea name="text" rows="4" placeholder="10.0.0.11 api.example.com"></textarea></label>
+          <button type="submit" class="primary">导入</button>
+        </form>
+        <p class="hint" id="rules-hint">导入是整份覆盖同名文件；改之前先点列表里的「载入」，
+          免得盲覆盖。绑定它的实例按 mtime 热重载，不必重启。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>实例日志</h2>
+          <span class="pill" id="logs-env">—</span>
+        </div>
+        <pre id="logs" class="logs">点某个环境的「日志」看尾部输出。</pre>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <span>规则生效方式：建连时改写上连目标（不改 Host、不改 SNI 基准）</span>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,12 @@
+[package]
+name = "envboard-domain"
+description = "envboard 的领域模型（纯逻辑）：环境校验/合并、端口选择、reconcile 决策"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+envboard-core-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true

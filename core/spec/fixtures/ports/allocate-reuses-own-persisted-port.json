@@ -1,0 +1,13 @@
+{
+  "capability": "port.allocate",
+  "description": "重启既有环境：一律复用其持久化端口，即使它出现在占用集合里也不冲突（那通常是自己上一次监听的残留；真被外人占走的由启动失败 → port_conflict 处理）",
+  "input": {
+    "existing": 16301,
+    "requested": null,
+    "candidates": [16500, 16501],
+    "taken": [16301],
+    "range": { "min": 16000, "max": 16999 },
+    "max_attempts": 32
+  },
+  "expect": { "ok": true, "port": 16301, "warnings": [] }
+}

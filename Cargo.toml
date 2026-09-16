@@ -1,0 +1,48 @@
+# envboard —— 多语言仓库的 workspace 根。
+#
+# Rust 布局：workspace 根**必须唯一且全仓一致**，二选一（包根 virtual
+# manifest 或 `core/rs/`）。这里选**包根**：`cargo test` 在本目录即可跑全量，
+# `core/rs/` 下不放第二份 workspace `Cargo.toml`。
+#
+# 成员用 glob，加 crate 不需要改这里。
+[workspace]
+resolver = "3"
+members = ["core/rs/crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.98"
+
+[workspace.dependencies]
+# 内部 crate：只写 path，避免版本漂移
+envboard-core-api = { path = "core/rs/crates/envboard-core-api" }
+envboard-domain = { path = "core/rs/crates/envboard-domain" }
+envboard-rules = { path = "core/rs/crates/envboard-rules" }
+envboard-core-fake = { path = "core/rs/crates/envboard-core-fake" }
+envboard-manager = { path = "core/rs/crates/envboard-manager" }
+envboard-core-mitmproxy = { path = "core/rs/crates/envboard-core-mitmproxy" }
+envboard-web = { path = "core/rs/crates/envboard-web" }
+
+# 外部依赖：版本写在这里，成员一律 `workspace = true`。
+#
+# 两条纪律：
+#   1. `Cargo.lock` 必须入库，`cargo build --offline` 是验收项 —— 依赖要克制；
+#   2. 不引模板引擎/WASM/前端构建链；CLI 之外不引大框架（web 层到 M3 再说）。
+async-trait = "0.1.92"
+axum = "0.7.9"
+futures-util = "0.3.34"
+tokio-stream = "0.1.19"
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# 成员可以再追加 features（见 envboard-core-mitmproxy 的 `process`）
+clap = { version = "4.6.6", features = ["derive"] }
+
+[profile.release]
+# 单机工具，体积与启动速度优先于极致优化
+lto = "thin"
+strip = true

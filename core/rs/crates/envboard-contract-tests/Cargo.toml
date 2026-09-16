@@ -1,0 +1,19 @@
+[package]
+name = "envboard-contract-tests"
+description = "消费 core/spec/fixtures 的 Rust 侧契约测试（只有测试目标）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 这是一个**只有测试目标**的 crate：它的产物就是 `cargo test` 的断言。
+# 存在的理由见 core/spec/capabilities.md —— `environment.*` / `port.allocate` /
+# `instance.reconcile` 只有 Rust 实现，因此它们的契约测试只能落在 Rust 里；
+# `rules.parse` 是两侧都有的能力，另由 scripts/verify_dual_impl.py 做逐字节对拍。
+[dependencies]
+
+[dev-dependencies]
+envboard-core-api.workspace = true
+envboard-domain.workspace = true
+envboard-rules.workspace = true
+serde_json.workspace = true

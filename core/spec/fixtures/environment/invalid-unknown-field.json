@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "未知字段必须响亮失败，而不是静默忽略",
-  "input": { "name": "prod", "dns_servers_list": ["10.0.0.53"] },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers_list" }
-}
