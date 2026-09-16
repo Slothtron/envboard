@@ -143,6 +143,37 @@ envboard rules show beta                        # 改规则文件前先取回原
   `listen.host` 换成 `0.0.0.0`（也可 PATCH `listen` 显式指定）。勾选而未启用
   `proxy_auth` 时表单会给警示 —— 代理暴露给局域网后任何能连通的机器都能借它发请求。
 
+### HTTP 端点
+
+工作台就是这些端点的全部对外面。**鉴权规则**：除 `/app.css` `/app.js` 两个内嵌静态资产
+（不含任何数据，浏览器子资源请求带不了凭据）外，**每个端点都要求 token**（header 或
+`?token=`，SSE 用后者）；变更类（非 GET/HEAD）还要求 `x-envboard-request: 1`（CSRF 防线），
+且 `Host` 必须等于配置的监听地址（DNS rebinding 防线）。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/` | 工作台页面（内嵌 HTML 外壳） |
+| GET | `/app.css` / `/app.js` | 内嵌静态资产（唯一豁免 token 的两个路径） |
+| GET | `/api/status` | 管理器与 core 概况、`port_range` 等配置回显 |
+| GET | `/api/environments` | 环境列表（工作台视图对象数组） |
+| POST | `/api/environments` | 建环境（`name` 必填；`listen.port` 缺省 = 自动分配） |
+| GET | `/api/environments/:name` | 单环境详情 |
+| PATCH | `/api/environments/:name` | 改环境（未提及字段不动；`null` 清空；运行中限描述） |
+| DELETE | `/api/environments/:name` | 删环境（先停止） |
+| POST | `/api/environments/:name/start` | 启动实例（期望状态置 running） |
+| POST | `/api/environments/:name/stop` | 停止实例 |
+| POST | `/api/environments/:name/restart` | 重启实例 |
+| POST | `/api/environments/:name/reallocate` | 显式重分配端口（`port_conflict` 的解法） |
+| GET | `/api/environments/:name/logs?lines=N` | 实例日志尾部（读 `<state_dir>/logs/<env>.log`） |
+| GET | `/api/rules` | 规则库列表（名字 + 条数） |
+| POST | `/api/rules` | 导入规则（`{name, text}`，覆盖同名） |
+| GET | `/api/rules/:name` | 规则文件原文 |
+| DELETE | `/api/rules/:name` | 删规则（仍被环境绑定时 `conflict`） |
+| GET | `/api/compare?host=<域名>` | 跨环境静态对比：该域名在各环境被覆盖成什么（不发请求） |
+| GET | `/api/events` | SSE 快照（每秒一次全量环境视图；EventSource 只能靠 `?token=` 鉴权） |
+
+未匹配的路径返回 JSON 形状的 404（`{error:{code,message}}`），前端据此提示而不是"响应不是 JSON"。
+
 ## 架构
 
 ```

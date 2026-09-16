@@ -85,7 +85,14 @@ function headers(json) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  // **每个请求都在这里统一带上凭据与 CSRF 头**：曾经只有 `mutate()` 显式传 headers，
+  // 于是所有 GET（日志、规则原文、跨环境对比）在开了 token 后一起 401 —— 环境列表
+  // 走的是 SSE 快照（URL 带 token），所以看着"只有日志坏了"。
+  // 收口到一处，新增调用点不可能再忘记。
+  const response = await fetch(path, {
+    ...options,
+    headers: { ...headers(options.body !== undefined), ...(options.headers || {}) },
+  });
   const text = await response.text();
   let body = null;
   if (text) {

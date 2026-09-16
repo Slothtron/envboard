@@ -541,10 +541,58 @@ def main() -> int:
                 f"css={css_status} js={js_status} api_none={api_status_none} "
                 f"banner={'…' + banner.strip().splitlines()[-1] if banner.strip() else '(empty)'}",
             )
+            # ---- 11d 端面清点：**每一个** API 端点都必须要求 token ----
+            # 这条是"新增端点忘了鉴权"的兜底。曾踩过：前端只有 mutate() 带凭据，
+            # 所有 GET（日志/规则原文/对比）在开 token 后静默 401，而页面看着"只有日志坏了"。
+            # 白名单只有两个内嵌静态资产（不含数据，浏览器子资源带不了凭据）。
+            endpoints: list[tuple[str, str]] = [
+                ("GET", "/api/status"),
+                ("GET", "/api/environments"),
+                ("POST", "/api/environments"),
+                ("GET", "/api/environments/probe"),
+                ("PATCH", "/api/environments/probe"),
+                ("DELETE", "/api/environments/probe"),
+                ("POST", "/api/environments/probe/start"),
+                ("POST", "/api/environments/probe/stop"),
+                ("POST", "/api/environments/probe/restart"),
+                ("POST", "/api/environments/probe/reallocate"),
+                ("GET", "/api/environments/probe/logs"),
+                ("GET", "/api/rules"),
+                ("POST", "/api/rules"),
+                ("GET", "/api/rules/probe"),
+                ("DELETE", "/api/rules/probe"),
+                ("GET", "/api/compare?host=probe.test"),
+                ("GET", "/api/events"),
+            ]
+            unauthenticated: dict[str, int] = {}
+            for method, path in endpoints:
+                status, _ = api(token_port, path, method, body={} if method in ("POST", "PATCH") else None,
+                                csrf=False, raw=True)
+                if status != 401:
+                    unauthenticated[f"{method} {path}"] = status
+            # 带上 token 后不能再是 401（404/409 之类的业务回答都算通过）
+            authorized = sse_status(token_port, "/api/events?token=s3cret-token")
+            check(
+                "11d 全部 API 端点无 token 一律 401（静态资产是唯一白名单）",
+                not unauthenticated and authorized == 200,
+                f"leaks={unauthenticated or 'none'} sse_with_token={authorized} "
+                f"endpoints={len(endpoints)}",
+            )
+
+            # 单独覆盖 `?token=` 的非 SSE 用法（GET 与变更类都要认）
+            logs_via_query, _ = api(token_port, "/api/status?token=s3cret-token", raw=True)
+            logs_no_query, _ = api(token_port, "/api/status", raw=True)
+            check(
+                "11e ?token= 对普通 GET 同样有效",
+                logs_via_query == 200 and logs_no_query == 401,
+                f"with_query={logs_via_query} without={logs_no_query}",
+            )
+
         finally:
             if token_work is not None:
                 token_work.kill()
                 token_work.wait(timeout=10)
+
 
         # ---- 12 代理访问鉴权（proxy_auth → mitmproxy proxyauth）----
         # 承接测试 10：edited 已改名 renamed 且在跑。proxy_auth 是启动时读取的字段：
