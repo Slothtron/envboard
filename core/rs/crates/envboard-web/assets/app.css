@@ -550,6 +550,17 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
   border-color: var(--bad);
   box-shadow: 0 0 0 3px var(--bad-bg);
 }
+/* 显式开关（表单里唯一的 checkbox）：必须绕开 `.form input` 的整行形态
+   （width:100% / height / padding 会把复选框拉成一条）。 */
+.field-check { display: flex; gap: var(--space-2); align-items: flex-start; }
+.form input[type="checkbox"] {
+  width: 16px; height: 16px; min-width: 16px;
+  margin: 2px 0 0; padding: 0;
+  accent-color: var(--accent);
+}
+.field-check-text { display: grid; gap: var(--space-1); min-width: 0; }
+/* 开关的标题按正文读（它是一句话，不是一个字段名），与输入框的 `.field-label` 区分开 */
+.field-check-text .field-label { font-size: var(--text-base); font-weight: 600; letter-spacing: normal; color: var(--text); }
 
 /* ---- 按钮 ---- */
 .btn {

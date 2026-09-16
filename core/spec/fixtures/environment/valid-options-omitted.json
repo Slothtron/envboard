@@ -1,0 +1,16 @@
+{
+  "capability": "environment.validate",
+  "description": "省略 options 时取默认空对象 —— 归一化输出里 `options` 始终存在，便于确定性持久化",
+  "input": {
+    "name": "gamma",
+    "listen": { "host": "127.0.0.1", "port": 16302 }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gamma",
+    "listen": { "host": "127.0.0.1", "port": 16302 },
+    "rules": null,
+    "options": {},
+    "description": ""
+  }
+}

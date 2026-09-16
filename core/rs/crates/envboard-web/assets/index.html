@@ -204,6 +204,7 @@
               <div class="info-cell"><span class="info-label">期望状态</span><span class="info-value mono" id="ov-desired">—</span></div>
               <div class="info-cell"><span class="info-label">规则绑定</span><span class="info-value mono" id="ov-rules">—</span></div>
               <div class="info-cell"><span class="info-label">规则条数</span><span class="info-value mono" id="ov-rules-count">—</span></div>
+              <div class="info-cell"><span class="info-label">实例选项</span><span class="info-value mono" id="ov-options">—</span></div>
               <div class="info-cell"><span class="info-label">描述</span><span class="info-value" id="ov-desc">—</span></div>
             </div>
 
@@ -243,6 +244,21 @@
                 <span class="field-label">规则</span>
                 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select>
                 <span class="field-hint">绑定在下次启动时生效；规则文件内容是热重载的</span>
+              </label>
+              <!-- 选项开关：当前只做 ssl_insecure（语义确定、最常用的一项）。加第二个开关时，
+                   这里加一块，并在 app.js 的 startEdit / formPayload / syncEditLock 里接上
+                   同一个键名。其余 core 选项仍走下面的 K=V 文本框。 -->
+              <label class="field field-check">
+                <input type="checkbox" name="ssl_insecure">
+                <span class="field-check-text">
+                  <span class="field-label">跳过上游证书校验（ssl_insecure）</span>
+                  <span class="field-hint">上游用自签 / 私有 CA 证书时打开；会关掉该环境对所有上游的证书校验，只建议内网测试环境</span>
+                </span>
+              </label>
+              <label class="field">
+                <span class="field-label">其他实例选项</span>
+                <textarea name="options" rows="3" placeholder="ssl_verify_upstream_trusted_ca=/path/ca.pem" spellcheck="false"></textarea>
+                <span class="field-hint">上面开关之外的 core 选项，每行一个 K=V（留空 = 不透传）；启动时固定，改动要先停止</span>
               </label>
               <label class="field">
                 <span class="field-label">描述</span>

@@ -1,0 +1,19 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 没提 options 就保持不动（与 rules/description 同款语义）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": { "host": "127.0.0.1", "port": 16600 },
+      "options": { "ssl_insecure": "true" }
+    },
+    "patch": { "description": "只改描述" }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gray",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "options": { "ssl_insecure": "true" },
+    "description": "只改描述"
+  }
+}
