@@ -217,6 +217,15 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   而它的注释同样可能指向本仓之外的文档（实测确实有一条）。现在把 `.gitignore` / `.dockerignore`
   显式列入扫描集合（文件数 111 → 112）。
 
+### Changed（文档脱敏）
+
+- `docs/acceptance/v0.1.0.md`（v1 实机验收转录）里的家目录用户名与当时读到的**真实系统 DNS 地址**
+  换成通用值：家目录统一写成 `/home/u/`（形状不变），DNS 地址改为文档专用网段 `192.0.2.53`
+  （RFC 5737）。断言、时间戳、退出码一并保持原样 —— 脱敏只改"能指回某个具体人/某台真实机器"
+  的部分。文件开头写明了这次替换，避免读者以为它就是当时的原始输出。
+- 同一轮排查确认**真实 hosts 文件从未入库**（`examples/hosts.txt` 一直在忽略之列，
+  入库的是脱敏示例 `examples/hosts.sample.txt`，用的是 RFC 5737 地址与 `example.com`）。
+
 ### Removed（M4 — 收敛与迁移，breaking）
 
 - **v1 的 Python 实现整块移除**：`src/envboard/`（model / registry / mapping / resolver /
