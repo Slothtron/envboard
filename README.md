@@ -210,28 +210,27 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 
 | 层 | 手段 | 关键断言 |
 |---|---|---|
-| 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**包内文本不得引用本仓之外的本地文档**（见下） |
+| 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**入库文本不得引用不在仓库里的本地文档**（见下） |
 | 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 58 个 fixture 由实现消费；`rules.parse` 两侧一致 |
 | 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
 | 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
 | 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
 | M0.5 spike | `scripts/spike_m0_5.py` | 共享 CA 配对、HTTPS 改写与 SNI、连接复用、PDEATHSIG |
-| 浏览器 | `docs/acceptance/m3-workbench.md` | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训） |
+| 浏览器 | 人工走查（真浏览器 + `getComputedStyle` 对齐令牌；转录是本机工作材料，不入库） | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训） |
 
-实机证据在 `docs/acceptance/`：`m0.5-spike.md`、`m3-workbench.md`、`log-channel.md`、
-`edit-environment.md`（`v0.1.0.md` 是 v1 的历史证据，v1 代码已在本版移除）。
+实机与验收的**转录**是本机工作材料，不入库；可重跑的断言在 `bash ci/verify.sh live` 那一层。
 
-工作台界面的视觉令牌、CSP 约束与交互纪律见 `docs/ui-spec.md`；令牌的机器可读定义在
-`core/rs/crates/envboard-web/assets/app.css` 第 ① 区，两者不一致时以 `app.css` 为准。
+工作台界面的视觉令牌、CSP 约束与交互纪律以 `core/rs/crates/envboard-web/assets/app.css`
+第 ① 区为准（那里是机器可读的唯一来源）。
 
 ### 文本自包含（`doc-scope-lint`）
 
-**本仓内的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`、
-`docs/**` 与代码注释都不例外。判据有三条，由 `scripts/doc_scope_lint.py` 机械执行：
+**入库的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`
+与代码注释都不例外。判据有三条，由 `scripts/doc_scope_lint.py` 机械执行：
 
-1. **零命中本仓之外本地文档的指称**：不给路径、不给链接、不给章节号、不点名字。
-   设计文档、开发计划、流程规范、工作区规范文件同在此列 —— 它们在包仓库之外，
-   对 clone 本仓的人不可解析；
+1. **零命中不在仓库里的文档的指称**：不给路径、不给链接、不给章节号、不点名字。
+   设计文档、开发计划、实机验收转录、工作区规范文件同在此列 —— 它们在本机 `.agents/`
+   目录下或更外面，**不入库**，对 clone 本仓的人不可解析；
 2. **指向本仓的路径必须真实存在**（写错的、或写完没建的一律失败）；
 3. **`§` 引用必须带本仓锚点**：写明是哪份本仓文件（`core/spec/rules.md` §3.1），
    引用本文件自己的章节则写"本文件"。
@@ -239,8 +238,7 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 该写什么：把结论**直接写在这里**，或指向本仓内**真实存在**的文件与标题。
 **不在禁列**的是可复核的外部事实坐标 —— 宿主源码位置（`mitmproxy/addons/tlsconfig.py:291`）、
 实测命令与输出、版本号、协议编号、外部 URL；它们是证据，不是"另一份只在本机存在的文档"。
-仅 `CHANGELOG.md` 的历史条目与 `docs/acceptance/v0.1.0.md`（v1 验收转录）豁免第 2 条：
-它们记录的是当时存在、如今已删的文件。
+仅 `CHANGELOG.md` 的历史条目豁免第 2 条：它记录的是当时存在、如今已删的文件。
 
 ## 运维（systemd）
 
@@ -291,7 +289,7 @@ envboard env list
 - **客户端要改代理配置**（换端口即换环境）。工作台给出的那行 `export https_proxy=…`
   就是为此。
 - **`sni is None` 分支未经实测**：显式代理下 curl 总会带 SNI，构造不出该分支；目前只有
-  源码核读结论（见 `docs/acceptance/m0.5-spike.md` 的「2. HTTPS 改写」一节）。
+  源码核读结论（读的是注入器里那条 `sni is None` 的回退路径）。
 - **实例日志默认落盘**：日志写在 `<state_dir>/logs/`，单文件上限 8 MiB（保留一份 `.1`）。
   默认详细度下日志里有请求的连接/流向信息（不含请求体，除非你把 `flow_detail` 调大）；
   不想让它落盘就用 `--no-log-file`，代价是回到"管道必须被持续读走"的形态。

@@ -23,6 +23,10 @@ npm-debug.log*
 envboard.json
 *.log
 
+# 本机工作材料：设计文档、开发计划、实机验收转录。它们**故意不入库** ——
+# 入库的面向交付文档只有 README.md / CHANGELOG.md / core/spec/。
+.agents/
+
 # 真实 hosts 映射：含内网 IP 与内部域名，只在本机当导入源用，不入库。
 # 仓库里保留的是脱敏示例 examples/hosts.sample.txt。
 /examples/hosts.txt

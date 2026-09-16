@@ -112,10 +112,11 @@ def main() -> int:
         print(f"rust-dependency-lint FAILED: no crates at {CRATES_DIR}")
         return 1
 
-    # workspace 根唯一（包根 virtual manifest）
+    # workspace 根唯一（包根 virtual manifest）。跳过产物与本机工作材料目录：
+    # 后者不入库，里面出现一份 manifest 不该判这份门禁红。
     workspace_manifests = []
     for manifest in ROOT.rglob("Cargo.toml"):
-        if "target" in manifest.parts:
+        if "target" in manifest.parts or ".agents" in manifest.parts:
             continue
         try:
             data = tomllib.loads(manifest.read_text(encoding="utf-8"))

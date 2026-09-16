@@ -44,8 +44,8 @@ CODE_SUFFIXES = {
     ".yaml",
 }
 
-#: 不进入扫描的目录（产物与依赖）。
-SKIP_DIRS = {".git", "target", "node_modules", "__pycache__", ".zvec-grep"}
+#: 不进入扫描的目录（产物、依赖与本机工作材料）。
+SKIP_DIRS = {".git", "target", "node_modules", "__pycache__", ".zvec-grep", ".agents"}
 
 
 def scan_paths() -> list[str]:

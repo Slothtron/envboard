@@ -27,7 +27,7 @@ HTTP 代理模式的上连根本不走 mitmproxy 的 resolver（`proxy/server.py
 # mitmdump 用 `-s` 加载脚本时不会把模块登记进 `sys.modules`，而 `@dataclass` 在处理
 # 字符串注解时要去 `sys.modules[cls.__module__]` 查命名空间 —— 结果就是启动即崩
 # （`AttributeError: 'NoneType' object has no attribute '__dict__'`）。
-# 实测记录：docs/acceptance/m0.5-spike.md 同批工作里发现并修掉。
+# 实测踩过并据此去掉：当时那句 `from __future__ import annotations` 就是这么崩的。
 import argparse
 import ipaddress
 import json
