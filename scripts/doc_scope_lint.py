@@ -53,7 +53,10 @@ SUFFIXES = {
 #: 而按后缀筛会把它们整类漏掉（实测漏掉过一条指向仓外规范文件的引用）。
 EXTRA_FILES = {".gitignore", ".dockerignore"}
 
-SKIP_DIRS = {"target", "node_modules", ".git", "__pycache__", ".zvec-grep"}
+#: `.agents/` 是**本机工作材料**（设计稿 / 开发计划 / 实机验收转录），不入库、
+#: 因而对 clone 本仓的人根本不存在 —— 它**不在自包含的适用范围里**，也不该被本门禁扫到。
+#: 判据：门禁只审"入库文本"，而 `.agents/**` 被全局 ignore 覆盖。
+SKIP_DIRS = {"target", "node_modules", ".git", "__pycache__", ".zvec-grep", ".agents"}
 #: 门禁脚本自己要在词表里写出这些词，所以豁免它。
 SELF = {"doc_scope_lint.py"}
 
