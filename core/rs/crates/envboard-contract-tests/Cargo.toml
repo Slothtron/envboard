@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# 本仓不发布 crate：发布物是 `envboard` 二进制。
+# 显式声明（而不是靠"没写 publish"）让"不发布"成为 manifest 事实。
+publish = false
+
 # 这是一个**只有测试目标**的 crate：它的产物就是 `cargo test` 的断言。
 # 存在的理由见 core/spec/capabilities.md —— `environment.*` / `port.allocate` /
 # `instance.reconcile` 只有 Rust 实现，因此它们的契约测试只能落在 Rust 里；

@@ -8,7 +8,9 @@
 //! 4. `Cargo.lock` 与 `rust-toolchain.toml` 在位（可复现构建与运行下限的前提）；
 //! 5. 注册表与磁盘**一一对应**（未登记即失败、登记了但没了也失败）；
 //! 6. **只有测试目标**的 crate 不得有产物依赖（它们不进产物，也不该拖进产物依赖）；
-//! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）。
+//! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）；
+//! 8. **每份 manifest 显式声明 `publish = false`** —— 本仓不发布 crate，发布物是二进制；
+//!    把这件事写成 manifest 事实，才让默认层"不跑 `cargo package --list`"有据可依。
 
 mod common;
 
@@ -287,6 +289,18 @@ fn the_rust_layering_holds() {
             }
         }
 
+        // 8. 不发布 crate：显式 publish = false。
+        let publishes = manifest
+            .get("package")
+            .and_then(|package| package.get("publish"))
+            .and_then(|value| value.as_bool());
+        if publishes != Some(false) {
+            problems.push(format!(
+                "{name}: 必须在 [package] 里显式写 `publish = false`（本仓不发布 crate，\
+                 发布物是 `envboard` 二进制；不写不等于声明了）"
+            ));
+        }
+
         // 7. 门禁 crate 不得被依赖。
         let all_edges: BTreeSet<String> = internal_deps(&manifest, PROD_SECTIONS)
             .union(&internal_deps(&manifest, DEV_SECTIONS))
@@ -312,6 +326,9 @@ fn the_rust_layering_holds() {
     report(
         "deps",
         problems,
-        format!("{} 个 crate，分层完整；纯逻辑：{PURE_CRATES:?}", seen.len()),
+        format!(
+            "{} 个 crate，分层完整、全部显式 publish = false；纯逻辑：{PURE_CRATES:?}",
+            seen.len()
+        ),
     );
 }

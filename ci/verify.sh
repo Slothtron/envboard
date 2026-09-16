@@ -114,20 +114,8 @@ step_contract() {
 # artifact 层：发布物内容
 # --------------------------------------------------------------------------- #
 
-step_clean() {
-  # 实机跑过 mitmweb 之后必然留下 __pycache__；发布物检查前先清掉。
-  find "$ROOT" -path "$ROOT/.git" -prune -o \
-    \( -name '__pycache__' -o -name '*.pyc' -o -name '*.pyo' \) -print0 2>/dev/null |
-    xargs -0 -r rm -rf
-  echo "clean: removed bytecode caches"
-}
-
-step_pack() { step_clean; "$PYTHON" scripts/artifact_check.py; }
-
 step_artifact() {
-  # 发布物检查这一阶段还要解释器（旧脚本）；S4 之后它是纯 cargo 步骤。
-  require_interpreter || return 0
-  run "artifact" step_pack
+  run "artifact" cargo test -p envboard-cli --test artifact "${LOCKED[@]}"
 }
 
 # --------------------------------------------------------------------------- #
@@ -139,33 +127,9 @@ step_artifact() {
 
 step_dual() { cargo test -p envboard-rules --test dual_impl "${LOCKED[@]}" -- --ignored; }
 
-# 冒烟（不需要 mitmproxy）：二进制能跑、注入器物化与 --render 都通。
-step_smoke() {
-  # 注意：不要 `local work` + `trap ... RETURN` —— `set -u` 下 trap 在函数返回后执行，
-  # 那时变量已出作用域，会以 "unbound variable" 让整步失败（这个坑踩过一次）。
-  SMOKE_DIR="$(mktemp -d)"
-  local work="$SMOKE_DIR"
-  "$ROOT/target/debug/envboard" --help >/dev/null
-  "$ROOT/target/debug/envboard" --state-dir "$work" --core fake status >/dev/null
-  "$ROOT/target/debug/envboard" --state-dir "$work" --core fake env add smoke --port 16666 >/dev/null
-  "$ROOT/target/debug/envboard" --state-dir "$work" --core fake env list | grep -q smoke
-  # 注入器必须能被物化，且 --render 在**没有 mitmproxy**的解释器下也能跑
-  "$ROOT/target/debug/envboard" --state-dir "$work" --core fake env add probe --port 16667 >/dev/null
-  local rendered
-  rendered="$("$PYTHON" "$ROOT/adapters/mitmproxy/envboard_mitmproxy.py" --render \
-    --fixture "$ROOT/core/spec/fixtures/rules/normalization.json")"
-  case "$rendered" in
-    *"# envboard rules file"*) ;;
-    *) echo "injector --render produced unexpected output"; return 1 ;;
-  esac
-  rm -rf "$SMOKE_DIR"
-  echo "smoke OK (binary + fake core + injector --render)"
-}
-
 step_adapter() {
   require_interpreter || return 0
-  run "adapter/dual"  step_dual
-  run "adapter/smoke" step_smoke
+  run "adapter/dual" step_dual
 }
 
 # --------------------------------------------------------------------------- #
@@ -196,9 +160,8 @@ case "$STEP" in
   policy)        step_policy ;;
   rust)          step_policy; step_rust ;;
   contract)      step_contract ;;
-  artifact|pack) step_artifact ;;
+  artifact)      step_artifact ;;
   adapter)       step_adapter ;;
-  smoke)         step_smoke ;;
   dual)          step_dual ;;
   rust-fmt)      step_rust_fmt ;;
   rust-clippy)   step_rust_clippy ;;
@@ -208,7 +171,6 @@ case "$STEP" in
   rust-live)     step_live_manager ;;
   live-v2)       step_live_v2 ;;
   spike)         step_spike ;;
-  clean)         step_clean ;;
   live)          step_live ;;
   *)
     echo "unknown step: $STEP" >&2

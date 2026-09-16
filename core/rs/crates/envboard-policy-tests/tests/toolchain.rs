@@ -19,12 +19,7 @@ mod common;
 use common::{find_dirs, has_word, read_text, report, walk_relative, workspace_root};
 
 /// 迁移白名单：待退场的旧工具链文件。每迁完一条就删掉一行；**清空 = 收敛完成**。
-const PENDING: &[&str] = &[
-    "package.json",
-    "scripts/artifact_check.py",
-    "scripts/spike_m0_5.py",
-    "scripts/verify_live_v2.py",
-];
+const PENDING: &[&str] = &["scripts/spike_m0_5.py", "scripts/verify_live_v2.py"];
 
 /// 唯一允许的非 Rust 角落：宿主适配器。这种脚本是**产品代码**，由宿主解释器加载。
 const ADAPTER_PREFIX: &str = "adapters/";

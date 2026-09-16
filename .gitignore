@@ -12,11 +12,6 @@ venv/
 # 而 `Cargo.lock` 必须入库 —— 它是可复现构建（`cargo build --locked`）的前提。
 target/
 
-# Node（根 package.json 只是 `npm run verify` 的入口壳；仍然覆盖，
-# 避免 npm 产生的任何本地状态被误入库）
-node_modules/
-npm-debug.log*
-
 # 本机状态（绝不应入库）
 .zvec-grep/
 .envboard-*.tmp
