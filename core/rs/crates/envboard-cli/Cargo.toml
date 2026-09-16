@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# 本仓不发布 crate：发布物是 `envboard` 二进制。
+# 显式声明（而不是靠"没写 publish"）让"不发布"成为 manifest 事实。
+publish = false
+
 [[bin]]
 name = "envboard"
 path = "src/main.rs"
@@ -20,3 +24,7 @@ envboard-web.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# 实机测试要 SIGKILL 工作台拉起的实例进程（它不是测试的子进程）。
+libc.workspace = true

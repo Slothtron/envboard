@@ -1,6 +1,6 @@
 //! envboard 环境管理器。
 //!
-//! 分层（依赖单向，`scripts/rust_dependency_lint.py` 强制）：
+//! 分层（依赖单向，由 `envboard-policy-tests` 的 `deps` 门禁强制）：
 //!
 //! ```text
 //! envboard-core-api（trait / 契约词汇）

@@ -176,13 +176,16 @@ core/rs/crates/
   envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
   envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
   envboard-cli        envboard 二进制
-  envboard-contract-tests  消费全部 68 个契约 fixture
-adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
+  envboard-contract-tests  消费全部 68 个契约 fixture（只有测试目标）
+  envboard-policy-tests    工程门禁本身（只有测试目标，不进发布物）
+adapters/mitmproxy/   单文件注入器（只用标准库与宿主自带的依赖；被二进制 include_str! 内嵌）
+scripts/systemd/      部署工件（用户级 unit）
 ```
 
-依赖方向由 `scripts/rust_dependency_lint.py` 强制：core-api 是根；domain / rules / core-api
+依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：core-api 是根；domain / rules / core-api
 是**纯逻辑**（不得依赖 tokio / libc）；web 只认识管理器的公开 API，不认识具体 core
 （所以换 core 不必动它）。`adapters/` 只做宿主接线，不含业务逻辑。
+`envboard-policy-tests` 是例外的一类 —— 它是**开发工具**，谁都不许依赖它，也不进发布物。
 
 每个环境有自己的 agent 目录，注入器、配置与规则软链都在里面：
 
@@ -205,35 +208,62 @@ adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 includ
 单一入口（托管方无关，CI 直接调它即可）：
 
 ```bash
-bash ci/verify.sh            # 默认层：编译/命名/文本自包含/依赖方向/格式/clippy/单测/契约对拍/产物校验/冒烟
-bash ci/verify.sh rust       # 只跑 Rust 相关
+bash ci/verify.sh            # 默认层：policy + rust + contract + artifact + adapter
+bash ci/verify.sh rust       # 纯 Rust 子集：policy + rust（不需要 Python / Node）
 bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理器（需要宿主）
+bash ci/verify.sh policy     # 只跑仓库纪律那一层
 ```
 
-| 层 | 手段 | 关键断言 |
-|---|---|---|
-| 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**包内文本不得引用本仓之外的本地文档**（见下） |
-| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 68 个 fixture 由实现消费；`rules.parse` 与 `insecure.hosts` 两侧一致 |
-| 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
-| 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
-| 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、**按域名放宽上游校验（含运行中热改，以及名单外域名仍然 502 的对照）**、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
-| M0.5 spike | `scripts/spike_m0_5.py` | 共享 CA 配对、HTTPS 改写与 SNI、连接复用、PDEATHSIG |
-| 浏览器 | `docs/acceptance/m3-workbench.md` | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训） |
+层、手段与外部依赖（脚本本身**只做编排**，判据全在测试里）：
 
-实机证据在 `docs/acceptance/`：`m0.5-spike.md`、`m3-workbench.md`、`log-channel.md`、
-`edit-environment.md`（`v0.1.0.md` 是 v1 的历史证据，v1 代码已在本版移除）。
+| 层 | 手段 | 关键断言 | 需要什么 |
+|---|---|---|---|
+| `policy` | `cargo test -p envboard-policy-tests` | 见下面「工具链纪律」与「文本自包含」两节 | 只有 cargo |
+| `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测（端口分配、reconcile、锁、健康判定含僵尸判活、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑：热改 vs 必须停机**） | 只有 cargo |
+| `contract` | `cargo test -p envboard-contract-tests` | 68 个 fixture 的形状与语义都由实现消费（含 `rules.parse` 与 `insecure.hosts`）；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 | 只有 cargo |
+| `artifact` | `cargo test -p envboard-cli --test artifact` | 发布工件清单齐全、v1 残留为零、二进制里真的内嵌了注入器 | 只有 cargo |
+| `adapter` | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） | 适配器宿主的解释器 |
+| `live` | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、**按域名放宽上游校验（含运行中热改，以及名单外域名仍然 502 的对照）**、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** | mitmdump + 网络 |
+| `live` | 人工走查浏览器层（真浏览器 + `getComputedStyle` 对齐令牌） | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训）；转录是本机工作材料，不入库 | 真浏览器 |
 
-工作台界面的视觉令牌、CSP 约束与交互纪律见 `docs/ui-spec.md`；令牌的机器可读定义在
-`core/rs/crates/envboard-web/assets/app.css` 第 ① 区，两者不一致时以 `app.css` 为准。
+解释器缺失时默认层**响亮失败**并给出两条出路（装适配器宿主，或跑 `verify.sh rust`），
+不静默跳过 —— 跳过等于那一层的护栏消失。
+
+实机与验收的**转录**是本机工作材料，不入库；可重跑的断言在 `bash ci/verify.sh live` 那一层。
+
+工作台界面的视觉令牌、CSP 约束与交互纪律以 `core/rs/crates/envboard-web/assets/app.css`
+第 ① 区为准（那里是机器可读的唯一来源）。
+
+### 工具链纪律
+
+**这个仓库只有一条工具链：`cargo`。** 除 `adapters/` 下的宿主适配器脚本外，不许有第二种
+语言的工具链痕迹 —— 门禁自己也不许用别的语言写。这条约束由门禁自己证明，不是靠自觉：
+
+| 判据 | 内容 |
+|---|---|
+| 文件面 | 不许有 Python / Node / TS 的源码与清单文件（`*.py`、`pyproject.toml`、`package.json`、`node_modules/`、`*.ts`、打包器配置…）；`node_modules/` 与 `__pycache__/` 单独判存在性 |
+| 调用面 | 可执行面（`ci/*.sh`、`*.service`、CI 描述文件）不许出现 `npm` / `pip` / `mypy` / `pytest` 等命令，也不许 `<解释器> -m <工具>`；被执行的仓库内脚本只允许是适配器脚本 |
+| 反向守卫 | `adapters/` 下仍是**单文件**注入器，import 只用标准库与宿主自带依赖的白名单 |
+
+为什么这么较真：门禁必须与产品同一条工具链、同一个类型系统，否则就是"用另一套语言维护
+这个仓库的工程纪律" —— 而那套语言的类型错误没人检查，门禁自身也会漂移。
+`bash ci/verify.sh rust` 就是这条纪律的可执行形式：它在一个没有 Python、没有 Node 的
+环境里也全绿。
+
+**禁止**为了"写起来快"重新引入脚本语言写门禁。要加一条新门禁，就加一个新测试：
+纯文本 / 结构门禁放 `envboard-policy-tests`（一门禁一文件），需要已构建二进制的门禁
+放它所属 crate 的 `tests/`（用 `CARGO_BIN_EXE_<bin>` 取二进制），需要真宿主的门禁标
+`#[ignore]` 并由 `ci/verify.sh` 的对应层用 `--ignored` 触发。`ci/verify.sh` 只做编排。
 
 ### 文本自包含（`doc-scope-lint`）
 
-**本仓内的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`、
-`docs/**` 与代码注释都不例外。判据有三条，由 `scripts/doc_scope_lint.py` 机械执行：
+**入库的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`
+与代码注释都不例外。判据有三条，由 `cargo test -p envboard-policy-tests --test doc_scope`
+机械执行：
 
-1. **零命中本仓之外本地文档的指称**：不给路径、不给链接、不给章节号、不点名字。
-   设计文档、开发计划、流程规范、工作区规范文件同在此列 —— 它们在包仓库之外，
-   对 clone 本仓的人不可解析；
+1. **零命中不在仓库里的文档的指称**：不给路径、不给链接、不给章节号、不点名字。
+   设计文档、开发计划、实机验收转录、工作区规范文件同在此列 —— 它们在本机 `.agents/`
+   目录下或更外面，**不入库**，对 clone 本仓的人不可解析；
 2. **指向本仓的路径必须真实存在**（写错的、或写完没建的一律失败）；
 3. **`§` 引用必须带本仓锚点**：写明是哪份本仓文件（`core/spec/rules.md` §3.1），
    引用本文件自己的章节则写"本文件"。
@@ -241,8 +271,7 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 该写什么：把结论**直接写在这里**，或指向本仓内**真实存在**的文件与标题。
 **不在禁列**的是可复核的外部事实坐标 —— 宿主源码位置（`mitmproxy/addons/tlsconfig.py:291`）、
 实测命令与输出、版本号、协议编号、外部 URL；它们是证据，不是"另一份只在本机存在的文档"。
-仅 `CHANGELOG.md` 的历史条目与 `docs/acceptance/v0.1.0.md`（v1 验收转录）豁免第 2 条：
-它们记录的是当时存在、如今已删的文件。
+仅 `CHANGELOG.md` 的历史条目豁免第 2 条：它记录的是当时存在、如今已删的文件。
 
 ## 运维（systemd）
 
@@ -299,7 +328,7 @@ envboard env list
 - **客户端要改代理配置**（换端口即换环境）。工作台给出的那行 `export https_proxy=…`
   就是为此。
 - **`sni is None` 分支未经实测**：显式代理下 curl 总会带 SNI，构造不出该分支；目前只有
-  源码核读结论（见 `docs/acceptance/m0.5-spike.md` 的「2. HTTPS 改写」一节）。
+  源码核读结论（读的是注入器里那条 `sni is None` 的回退路径）。
 - **实例日志默认落盘**：日志写在 `<state_dir>/logs/`，单文件上限 8 MiB（保留一份 `.1`）。
   默认详细度下日志里有请求的连接/流向信息（不含请求体，除非你把 `flow_detail` 调大）；
   不想让它落盘就用 `--no-log-file`，代价是回到"管道必须被持续读走"的形态。

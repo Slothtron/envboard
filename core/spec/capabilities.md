@@ -21,8 +21,8 @@
 | `instance.reconcile` | 期望状态与实际状态对齐：reconcile 顺序、孤儿清理判定、端口冲突标记 | `fixtures/lifecycle/` |
 
 `fixtures/` 只放**纯逻辑**的确定性 golden。真正依赖网络与宿主的部分（拉起进程、
-探活、CA 物化、浏览器行为）不进契约，由 `README.md` 的支持矩阵与 `docs/acceptance/`
-的实机证据覆盖 —— 这条边界与 v1 一致。
+探活、CA 物化、浏览器行为）不进契约，由 `README.md` 的支持矩阵与 `ci/verify.sh`
+的实机层覆盖 —— 这条边界与 v1 一致。
 
 ## 依赖图
 

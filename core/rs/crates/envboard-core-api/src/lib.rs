@@ -1,7 +1,7 @@
 //! envboard 的 proxy core 抽象与统一错误码。
 //!
-//! 这是 core 层的**根 crate**：不依赖任何其它内部 crate（依赖方向由
-//! `scripts/rust_dependency_lint.py` 强制）。契约见包根 `core/spec/`。
+//! 这是 core 层的**根 crate**：不依赖任何其它内部 crate（依赖方向由工程门禁强制，
+//! 见 `envboard-policy-tests` 的 `deps`）。契约见包根 `core/spec/`。
 
 pub mod error;
 pub mod ports;
