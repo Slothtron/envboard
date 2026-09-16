@@ -1,6 +1,6 @@
 //! 实机端到端（v2）：真 `mitmdump`、真改写、真管理器。
 //!
-//! 这一层回答的是"脚本化不了的实机行为"，13 组断言：
+//! 这一层回答的是"脚本化不了的实机行为"，14 组断言：
 //!
 //! 1. **两个环境同时可用、且结果不同** —— 同一个 URL 经不同端口出去结果必须不同，
 //!    这正是"换端口即换环境"的可证伪形式；
@@ -12,11 +12,15 @@
 //! 7. **崩溃恢复**：SIGKILL 工作台后重启，`desired=running` 的环境自动恢复；
 //! 8. **日志通道不会拖死代理**：连打 320 个请求全部成功；
 //! 9. **实例崩溃可见且不留僵尸**：SIGKILL 实例后不再报 running、子进程被回收；
-//! 10. **编辑已建环境**：运行中换绑定被拒、停止后可补绑并改名换端口、新配置真的生效；
+//! 10. **编辑已建环境**：运行中换绑定**热生效**（绑定由固定名软链承载，不重启实例）、
+//!     停止后可改名换端口、新配置真的生效；
 //! 11. **dashboard token 鉴权**：默认启用且自动生成、`--without-token` 在非回环被拒、
 //!     header 与 `?token=` 等效、静态资产豁免、**全部 API 端点无 token 一律 401**；
 //! 12. **代理鉴权**：`proxy_auth` 下发为 mitmproxy `proxyauth`（无凭据 407、带凭据 200）；
-//! 13. **对外服务开关**：`listen.host` 换 `0.0.0.0` 并按新地址重启，回环方向照常服务。
+//! 13. **对外服务开关**：`listen.host` 换 `0.0.0.0` 并按新地址重启，回环方向照常服务；
+//! 14. **按域名放宽上游证书校验（`insecure_hosts`）**：自签上游在名单外必然 502，
+//!     运行中把它加进名单即热生效（不重启、健康保持 running），同一实例里另一个
+//!     被改写但未列出的域名仍旧 502。
 //!
 //! 做法上有一个关键点：规则只改**连到哪个 IP**、不改端口，所以"命中哪个上游"由客户端
 //! 请求里的端口决定 —— 于是"同一域名 + 两个环境各覆盖不同域名"就构造出了判别性对照。
@@ -305,6 +309,95 @@ fn start_upstream(name: &'static str) -> u16 {
     port
 }
 
+/// 自签证书的 HTTPS 上游 —— `insecure_hosts` 要处理的可复现现场（上游证书不在信任库里）。
+///
+/// 现造一张带 SAN 的自签证书，再用 `openssl s_server -www` 在同一端口上做 HTTPS。
+/// 用一个进程同时干"发证书"和"当上游"两件事：既省一个宿主工具，也不必把私钥入库
+/// （`.gitignore` 本来就不收 `*.key` / `*.pem`）。
+fn start_tls_upstream(work: &Path, host: &str) -> (u16, Child) {
+    let cert = work.join(format!("{host}.crt"));
+    let key = work.join(format!("{host}.key"));
+    let generated = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            key.to_str().expect("key path"),
+            "-out",
+            cert.to_str().expect("cert path"),
+            "-days",
+            "1",
+            "-subj",
+            &format!("/CN={host}"),
+            "-addext",
+            &format!("subjectAltName=DNS:{host}"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run openssl req");
+    assert!(generated.success(), "自签证书没造出来（openssl req 失败）");
+
+    let port = free_port();
+    let child = Command::new("openssl")
+        .args([
+            "s_server",
+            "-accept",
+            &port.to_string(),
+            "-cert",
+            cert.to_str().expect("cert path"),
+            "-key",
+            key.to_str().expect("key path"),
+            "-www",
+            "-quiet",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn openssl s_server");
+    assert!(
+        wait_port(port, Duration::from_secs(10)),
+        "自签 HTTPS 上游没起来"
+    );
+    (port, child)
+}
+
+/// 经代理请求 **HTTPS** 并返回状态码。
+///
+/// 只有这一条路径用 curl：经代理访问 HTTPS 要先 `CONNECT` 再在隧道里做 TLS 握手，
+/// 而 TLS 客户端不在标准库里 —— 自造一个等于重写 curl。明文请求仍然全部走裸 TCP
+/// （见 [`proxy_get`]），320 次连打那条断言因此还是零进程开销。
+///
+/// 客户端侧带 `-k`：这条用例判的是**上游**握手（放宽前后），不是 mitmproxy 出示给
+/// 客户端的证书；让客户端侧也失败会把两种失败混在一起，读不出结论。
+fn curl_https_status(proxy_port: u16, url: &str) -> u16 {
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "-k",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-x",
+            &format!("http://127.0.0.1:{proxy_port}"),
+            "--noproxy",
+            "",
+            "--max-time",
+            "20",
+            url,
+        ])
+        .output()
+        .expect("run curl");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
 // --------------------------------------------------------------------------- //
 // 工作台进程
 // --------------------------------------------------------------------------- //
@@ -374,13 +467,20 @@ fn spawn_workbench(state: &Path, extra: &[&str]) -> Child {
 }
 
 #[test]
-#[ignore = "需要真 mitmdump 与真网络；由 ci/verify.sh 的 live 层用 --ignored 触发"]
+#[ignore = "需要真宿主（mitmdump / openssl / curl）与真网络；由 ci/verify.sh 的 live 层用 --ignored 触发"]
 fn the_workbench_behaves_on_a_real_host() {
-    if which("mitmdump").is_none() {
+    let missing: Vec<&str> = ["mitmdump", "openssl", "curl"]
+        .into_iter()
+        .filter(|tool| which(tool).is_none())
+        .collect();
+    if !missing.is_empty() {
         panic!(
-            "live 层需要真 mitmdump，但 PATH 上没有它。\n\
+            "live 层需要真宿主工具 {missing:?}，但 PATH 上没有全部。\n\
+             三条工具各有归属：mitmdump 是被测环境本身，openssl 现造自签证书并充当\n\
+             自签 HTTPS 上游（第 14 组的可复现现场），curl 只用于经代理的 HTTPS 请求\n\
+             —— TLS 客户端不在标准库里，而明文请求都走裸 TCP。\n\
              两条出路：\n\
-               1) 装 mitmproxy（`uv tool install mitmproxy` 等），让它出现在 PATH 上；\n\
+               1) 装上缺的工具（mitmproxy 自带 mitmdump；openssl / curl 通常随系统）；\n\
                2) 不跑这一层：cargo test --workspace（本测试已标 #[ignore]）"
         );
     }
@@ -950,8 +1050,8 @@ fn the_workbench_behaves_on_a_real_host() {
     let gamma_url = format!("http://gamma.test:{alpha_upstream}/");
     let gamma_before = proxy_get(created_port, &gamma_url, None).body;
 
-    // 运行中换绑定：服务端必须拒绝（实例在启动时才固定规则路径，热改绑定只会造成
-    // "配置说绑了、实例没按它干"的不一致）。描述则允许热改。
+    // 运行中换绑定是**热**的：绑定由固定名软链承载（管理器原子换链 + 重写 config.json），
+    // 运行中的注入器按轮询间隔跟上，实例不必重启。描述同样允许热改。
     let bind_running = api(
         web_port,
         "PATCH",
@@ -970,6 +1070,17 @@ fn the_workbench_behaves_on_a_real_host() {
         None,
         Some(r#"{"description":"运行中改的描述"}"#),
     );
+
+    // 不重启就等新绑定生效 —— 这一条才是"热"的可证伪形式
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut gamma_hot = String::new();
+    while Instant::now() < deadline {
+        gamma_hot = proxy_get(created_port, &gamma_url, None).body;
+        if gamma_hot == "alpha-upstream" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 
     api(
         web_port,
@@ -1012,17 +1123,18 @@ fn the_workbench_behaves_on_a_real_host() {
     )
     .status;
     checks.record(
-        "10 编辑：运行中换绑定被拒、停止后可补绑规则并改名换端口、新配置真的生效",
+        "10 编辑：运行中补绑规则热生效（不重启）、停止后可改名换端口、新配置真的生效",
         not_covered(&gamma_before)
-            && bind_running.status == 409
+            && bind_running.status == 200
             && desc_running.status == 200
+            && gamma_hot == "alpha-upstream"
             && edited["rules"] == "edited"
             && edited["name"] == "renamed"
             && start_renamed.status == 200
             && gamma_after == "alpha-upstream"
             && old_status == 404,
         format!(
-            "before={gamma_before:?} bind_running={} desc_running={} edit={} after={gamma_after:?} old_name={old_status} port={edited_port}",
+            "before={gamma_before:?} bind_running={} hot={gamma_hot:?} desc_running={} edit={} after={gamma_after:?} old_name={old_status} port={edited_port}",
             bind_running.status, desc_running.status, edited["name"].as_str().unwrap_or("?")
         ),
     );
@@ -1256,9 +1368,9 @@ fn the_workbench_behaves_on_a_real_host() {
     token_child.kill().expect("kill token workbench");
     let _ = token_child.wait();
 
-    // ---- 12 代理访问鉴权（proxy_auth → mitmproxy proxyauth）----
-    // 承接测试 10：edited 已改名 renamed 且在跑。proxy_auth 是启动时读取的字段：
-    // 运行中改被拒（409），停止后改、重启才生效。
+    // ---- 12 代理访问鉴权（proxy_user / proxy_password → mitmproxy proxyauth）----
+    // 承接测试 10：edited 已改名 renamed 且在跑。两个凭据字段都是启动时读取的：
+    // 运行中改被拒（409），停止后改、重启才生效；视图只回一个布尔，永不回显取值。
     let auth_running_early = api(
         web_port,
         "PATCH",
@@ -1266,7 +1378,7 @@ fn the_workbench_behaves_on_a_real_host() {
         None,
         true,
         None,
-        Some(r#"{"proxy_auth":"alice:live-pass"}"#),
+        Some(r#"{"proxy_user":"alice","proxy_password":"live-pass"}"#),
     )
     .status;
     api(
@@ -1285,7 +1397,7 @@ fn the_workbench_behaves_on_a_real_host() {
         None,
         true,
         None,
-        Some(r#"{"proxy_auth":"alice:live-pass"}"#),
+        Some(r#"{"proxy_user":"alice","proxy_password":"live-pass"}"#),
     );
     let authed = json(&auth_patched);
     api(
@@ -1315,15 +1427,18 @@ fn the_workbench_behaves_on_a_real_host() {
         None,
         true,
         None,
-        Some(r#"{"proxy_auth":"bob:other"}"#),
+        Some(r#"{"proxy_user":"bob","proxy_password":"other"}"#),
     )
     .status;
     checks.record(
-        "12 代理鉴权：无凭据 407、带凭据 200、运行中改 proxy_auth 被拒、视图不回显凭据",
+        "12 代理鉴权：无凭据 407、带凭据 200、运行中改凭据被拒、视图不回显凭据取值",
         auth_running_early == 409
             && auth_patched.status == 200
             && authed["proxy_auth_enabled"] == true
-            && !auth_patched.body.contains("alice:live-pass")
+            // 只断言**取值**不回显：`proxy_auth_enabled` 这个键名本身就含 `proxy_auth`
+            // 子串，拿键名当判据会误报。
+            && !auth_patched.body.contains("live-pass")
+            && !auth_patched.body.contains("alice")
             && denied == 407
             && granted == 200
             && auth_running == 409,
@@ -1401,6 +1516,130 @@ fn the_workbench_behaves_on_a_real_host() {
             wild_view["health"]
         ),
     );
+
+    // ---- 14 insecure_hosts：按域名放宽上游证书校验（运行中热生效）----
+    // 端到端判别性对照：规则把两个域名都改写到同一个**自签** HTTPS 上游，
+    // 只有列进 insecure_hosts 的那个能通，另一个必须仍然 502。
+    let (tls_port, mut tls_upstream) = start_tls_upstream(&work, "relaxed.test");
+    // body 用 serde_json 构造：这段规则文本里需要**真正的换行**，手写转义容易出错
+    // （踩过：把 `\n` 写成实字符会让 JSON 非法，导入静默失败，直到"绑定失败"才暴露）。
+    let rules_body = serde_json::json!({
+        "name": "tlsdemo",
+        "text": "127.0.0.1 relaxed.test\n127.0.0.1 strict.test\n",
+    })
+    .to_string();
+    let rules_post = api(
+        web_port,
+        "POST",
+        "/api/rules",
+        None,
+        true,
+        None,
+        Some(&rules_body),
+    );
+    let created_tls = api(
+        web_port,
+        "POST",
+        "/api/environments",
+        None,
+        true,
+        None,
+        Some(r#"{"name":"tlsdemo","rules":"tlsdemo"}"#),
+    );
+    let tls_create = created_tls.status;
+    let tls_proxy = json(&created_tls)["listen"]["port"].as_u64().unwrap_or(0) as u16;
+    let started_tls = api(
+        web_port,
+        "POST",
+        "/api/environments/tlsdemo/start",
+        None,
+        true,
+        None,
+        None,
+    )
+    .status;
+    let relaxed_url = format!("https://relaxed.test:{tls_port}/");
+    let strict_url = format!("https://strict.test:{tls_port}/");
+
+    // 1) 名单为空：改写生效，但上游证书不在信任库里 → 严格校验 → 502
+    let before = curl_https_status(tls_proxy, &relaxed_url);
+    let health_before = json(&api(
+        web_port,
+        "GET",
+        "/api/environments/tlsdemo",
+        None,
+        true,
+        None,
+        None,
+    ))["health"]
+        .as_str()
+        .unwrap_or("?")
+        .to_string();
+
+    // 2) **运行中**把域名加进名单：不重启、不 stop/start，等注入器轮询到新配置
+    let hot_patch = api(
+        web_port,
+        "PATCH",
+        "/api/environments/tlsdemo",
+        None,
+        true,
+        None,
+        Some(r#"{"insecure_hosts":["relaxed.test"]}"#),
+    );
+    let listed = json(&hot_patch);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut after = 0u16;
+    while Instant::now() < deadline {
+        after = curl_https_status(tls_proxy, &relaxed_url);
+        if after == 200 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let health_after = json(&api(
+        web_port,
+        "GET",
+        "/api/environments/tlsdemo",
+        None,
+        true,
+        None,
+        None,
+    ))["health"]
+        .as_str()
+        .unwrap_or("?")
+        .to_string();
+
+    // 3) 同一个实例：同样被改写、但**没**列进名单的域名仍然严格 → 502
+    let control = curl_https_status(tls_proxy, &strict_url);
+    checks.record(
+        "14 insecure_hosts 端到端：名单外严格校验 502 → 运行中加名单热生效 200（健康始终 running）→ 同一实例未列出的域名仍 502",
+        tls_create == 201
+            && started_tls == 200
+            && before == 502
+            && hot_patch.status == 200
+            && listed["insecure_hosts"] == serde_json::json!(["relaxed.test"])
+            && health_before == "running"
+            && health_after == "running"
+            && after == 200
+            && control == 502,
+        format!(
+            "rules_import={} create={tls_create} start={started_tls} before={before} hot_patch={} listed={:?} \
+             health={health_before}→{health_after} after={after} control={control} port={tls_proxy} upstream={tls_port}",
+            rules_post.status, hot_patch.status, listed["insecure_hosts"]
+        ),
+    );
+
+    api(
+        web_port,
+        "POST",
+        "/api/environments/tlsdemo/stop",
+        None,
+        true,
+        None,
+        None,
+    );
+    tls_upstream.kill().expect("kill the self-signed upstream");
+    let _ = tls_upstream.wait();
 
     workbench.kill();
     let _ = std::fs::remove_dir_all(&work);

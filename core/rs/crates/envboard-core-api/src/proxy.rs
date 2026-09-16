@@ -4,8 +4,9 @@
 //! core 抽象：编排层只认识它，不认识具体代理实现。设计要点：
 //!
 //! * 接口粒度收在**启动参数 + 状态回传**——再细就会泄漏某个 core 的形状；
-//! * [`InstanceSpec::options`] 是**唯一**允许 core 特有配置进入实例的通道，
-//!   但它有 denylist（见 [`validate_options`]），否则逃生门会从另一头漏掉抽象；
+//! * 实例的配置**只有一等字段**这一条路（监听地址、注入器目录、放行域名、代理凭据）；
+//!   曾经存在过一个任意 `options` 透传通道，它让"放宽上游证书校验"这种安全控制
+//!   可以绕过契约，已删除；
 //! * 实例**不知道自己是哪个环境**——环境名只在注解与状态文件里作为展示数据出现。
 
 use std::collections::BTreeMap;
@@ -20,6 +21,16 @@ use crate::error::Error;
 
 /// 默认监听地址：只在 core 定义一次，适配器禁止再来一份。
 pub const DEFAULT_LISTEN_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// 每个环境目录里注入器读的配置文件名（管理器唯一写者）。
+pub const CONFIG_FILE_NAME: &str = "config.json";
+
+/// 每个环境目录里规则文件的**固定名**软链。
+///
+/// 环境绑定哪份规则由这条链指向谁决定，`config.json` 里的 `rules` 只用来做
+/// **链接完整性校验**（链指向的名字与配置不一致 = 响亮报错，不猜用哪一个）。
+/// 这样"换绑定"就是换一条链，注入器不必知道名字、也不必重启。
+pub const RULES_LINK_NAME: &str = "envboard.rules";
 
 /// 环境的监听地址 —— 环境的**外部身份**（一个环境 = 一个实例 = 一个端口）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -55,6 +66,10 @@ impl fmt::Display for Listen {
 ///
 /// **三者都要比**：只看 PID 存活会误杀 PID 复用后的无关进程；只看 PID + cmdline
 /// 仍然不够，因为同一份配置的实例 cmdline **完全相同**，所以必须带上启动时刻。
+///
+/// cmdline 里可能带凭据（`--set proxyauth=user:password`），所以它**记录前必须脱敏**
+/// （见 [`redact_cmdline`]）：账本是长期留存的产物，没有理由把凭据复制进去。
+/// 比对时两侧都脱敏，所以"启用鉴权的实例"仍然能被正确认出来。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessIdentity {
     pub pid: i32,
@@ -65,13 +80,43 @@ pub struct ProcessIdentity {
 
 impl ProcessIdentity {
     pub fn same_process(&self, other: &Self) -> bool {
-        self.pid == other.pid && self.starttime == other.starttime && self.cmdline == other.cmdline
+        self.pid == other.pid
+            && self.starttime == other.starttime
+            && redact_cmdline(&self.cmdline) == redact_cmdline(&other.cmdline)
     }
 
     /// 是不是"同一个进程但内容变了"（PID + 启动时刻相同，cmdline 不同）。
     pub fn same_process_different_cmdline(&self, other: &Self) -> bool {
-        self.pid == other.pid && self.starttime == other.starttime && self.cmdline != other.cmdline
+        self.pid == other.pid
+            && self.starttime == other.starttime
+            && redact_cmdline(&self.cmdline) != redact_cmdline(&other.cmdline)
     }
+
+    /// 记录前调用：把凭据形状的参数值换成 `***`。
+    pub fn redacted(mut self) -> Self {
+        self.cmdline = redact_cmdline(&self.cmdline);
+        self
+    }
+}
+
+/// 把 `--set proxyauth=<凭据>` 的值替换成 `***`。
+///
+/// 认两种形态：`["--set", "proxyauth=…"]` 与 `["--set=proxyauth=…"]`。
+/// 其余参数原样保留 —— 脱敏只针对**凭据键**，改别的参数会让身份判定失去意义。
+pub fn redact_cmdline(args: &[String]) -> Vec<String> {
+    args.iter().map(|arg| redact_arg(arg)).collect()
+}
+
+fn redact_arg(arg: &str) -> String {
+    if arg.starts_with("proxyauth=") {
+        return "proxyauth=***".to_string();
+    }
+    if let Some(rest) = arg.strip_prefix("--set=")
+        && rest.starts_with("proxyauth=")
+    {
+        return "--set=proxyauth=***".to_string();
+    }
+    arg.to_string()
 }
 
 /// 启动一个实例所需的全部输入。
@@ -79,8 +124,12 @@ impl ProcessIdentity {
 pub struct InstanceSpec {
     pub env: String,
     pub listen: Listen,
-    /// 绑定的规则文件（已解析成绝对路径）。`None` = 不覆盖任何域名。
-    pub rules: Option<PathBuf>,
+    /// 本实例的 agent 目录（`<state_dir>/agent/<env>`）。
+    ///
+    /// 注入器、[`CONFIG_FILE_NAME`] 与 [`RULES_LINK_NAME`] 都在这里。规则路径**不在**
+    /// 启动参数里：注入器只认自己目录旁边的固定名，管理器负责把那条链指对 —— 于是
+    /// "换绑定"变成一次原子换链，运行中的实例下一次轮询就能跟上。
+    pub agent_dir: PathBuf,
     /// 状态文件路径 —— **由管理器指定绝对路径**，注入器不拼环境名。
     pub status_file: PathBuf,
     /// 跨实例共享物（如共享 CA）所在目录。
@@ -100,72 +149,50 @@ pub struct InstanceSpec {
     /// 落在 `dir` 里的文件由管理器读尾部并轮转（`envboard-manager/src/logs.rs`），
     /// core 不重复实现一份文件读取。
     pub log_dir: Option<PathBuf>,
-    /// core 特有选项，处理器不理解也不解释，只做 denylist 后原样透传。
-    pub options: BTreeMap<String, String>,
-    /// 代理访问鉴权（`user:password`），来自环境的 `proxy_auth` 字段。
-    /// `None` = 不启用。凭据的唯一来源是环境字段，`options` 里的 `proxyauth`
-    /// 键被 denylist 拒绝 —— 两个真相必然分叉，不如只有一个入口。
-    pub proxy_auth: Option<String>,
+    /// 按域名放宽上游证书校验的完整域名清单（已归一化 + 去重 + 排序）。
+    ///
+    /// 空 = 全部严格校验。放宽**只**能经这条一等字段，没有全局开关。
+    pub insecure_hosts: Vec<String>,
+    /// 代理访问鉴权用户名；`None` = 不启用。与 [`InstanceSpec::proxy_password`] 同生共死。
+    pub proxy_user: Option<String>,
+    /// 代理访问鉴权密码。凭据的唯一来源是环境字段，且只经实例启动参数下发。
+    pub proxy_password: Option<String>,
 }
 
 impl InstanceSpec {
-    pub fn validate(&self) -> Result<(), Error> {
-        validate_options(&self.options)
+    /// 本实例的配置文件路径。
+    pub fn config_file(&self) -> PathBuf {
+        self.agent_dir.join(CONFIG_FILE_NAME)
     }
-}
 
-/// 管理器自有键：这些值由启动契约下发，用户透过 `options` 覆盖会让
-/// "实例的形态"出现两个真相。
-pub const RESERVED_OPTION_KEYS: &[&str] = &[
-    "listen_host",
-    "listen_port",
-    "confdir",
-    "status_file",
-    "rules",
-    "proxyauth",
-];
+    /// 本实例的规则软链路径（**固定名**）。
+    pub fn rules_link(&self) -> PathBuf {
+        self.agent_dir.join(RULES_LINK_NAME)
+    }
 
-/// 会改变进程拓扑或加载第三方代码的键：它们不是"core 特有配置"，
-/// 而是"把 core 换成别的东西"（`scripts` 能再挂一个 addon 进来，绕过启动契约）。
-pub const TOPOLOGY_OPTION_KEYS: &[&str] = &["mode", "upstream", "scripts"];
-
-/// 同上，但按前缀匹配（某个 core 的整族选项）。
-///
-/// `web` 覆盖 mitmweb 的全部选项（`web_port` / `web_host` / `web_open_browser` …）：
-/// 它们只对 mitmweb 生效，配到 headless 实例上会被**静默忽略**，
-/// 与其让用户以为生效了，不如直接拒绝。
-pub const TOPOLOGY_OPTION_PREFIXES: &[&str] = &["web"];
-
-/// 环境变量式的保留前缀：`envboard_*` 是管理器与注入器之间的约定，不允许从
-/// `options` 覆盖。
-pub const RESERVED_OPTION_PREFIX: &str = "envboard_";
-
-/// `InstanceSpec.options` 的 denylist 校验（契约见 `core/spec/capabilities.md`）。
-///
-/// 只列"绝不允许"，其余键原样透传；某个 core 实现可以再收紧（例如 mitmproxy
-/// 实现额外禁掉自己特有的危险选项），但**不能放宽**这张表。
-pub fn validate_options(options: &BTreeMap<String, String>) -> Result<(), Error> {
-    for key in options.keys() {
-        let field = format!("instance.options.{key}");
-        if key.starts_with(RESERVED_OPTION_PREFIX) {
-            return Err(Error::invalid_config(
-                field,
-                format!("option {key:?} is reserved for the manager/injector contract"),
-            ));
-        }
-        if RESERVED_OPTION_KEYS.contains(&key.as_str())
-            || TOPOLOGY_OPTION_KEYS.contains(&key.as_str())
-            || TOPOLOGY_OPTION_PREFIXES
-                .iter()
-                .any(|prefix| key.starts_with(prefix))
-        {
-            return Err(Error::invalid_config(
-                field,
-                format!("option {key:?} is owned by the manager and cannot be overridden"),
-            ));
+    /// `proxyauth` 的期望取值（`user:password`）；未启用鉴权时为 `None`。
+    ///
+    /// 这是**唯一**把两个字段拼回 mitmproxy 形状的地方 —— 拼装只发生在边界上。
+    pub fn proxyauth(&self) -> Option<String> {
+        match (&self.proxy_user, &self.proxy_password) {
+            (Some(user), Some(password)) => Some(format!("{user}:{password}")),
+            _ => None,
         }
     }
-    Ok(())
+
+    /// 实例启动时由管理器下发、且**必须**被宿主接受的 `--set` 键值。
+    ///
+    /// 用途是让注入器回显自检（`StatusReport.options_echo`）：mitmproxy 对未知或拼错的
+    /// `--set` 是静默忽略的，而 `proxyauth` 是安全控制 —— 被忽略就等于代理在"以为开了
+    /// 鉴权"的状态下裸奔。契约形状由本方法一处给出，写配置的一方与拼参数的一方都用它，
+    /// 不会出现两个真相。
+    pub fn launch_expected(&self) -> BTreeMap<String, String> {
+        let mut expected = BTreeMap::new();
+        if let Some(proxyauth) = self.proxyauth() {
+            expected.insert("proxyauth".to_string(), proxyauth);
+        }
+        expected
+    }
 }
 
 /// 一个已启动（或正在启动）的实例。
@@ -239,7 +266,11 @@ pub struct CoreCapabilities {
     pub listen: bool,
     pub dynamic_certs: bool,
     pub rewrite_upstream: bool,
-    pub per_instance_options: bool,
+    /// 是否支持**按域名放宽上游证书校验**（`insecure_hosts`）。
+    ///
+    /// 不支持时必须显式声明 `false`：管理器据此决定要不要把这份配置算进"生效回显"，
+    /// 而不是去比一个永远为 0 的字段。
+    pub per_domain_insecure: bool,
     pub shared_ca: bool,
     pub flow_annotation: bool,
     /// 状态文件里是否如实回显 `rules_count`。
@@ -269,6 +300,19 @@ pub struct StatusReport {
     pub rules_path: Option<String>,
     #[serde(default)]
     pub rules_count: usize,
+    /// 生效配置的条目数（放行域名）。
+    #[serde(default)]
+    pub insecure_hosts_count: usize,
+    /// 实例当前生效的那份 `config.json` 的 sha256。
+    ///
+    /// 管理器拿它与自己写下的字节对比：相等 = 已生效；不等但在收敛窗口内 = 还在收敛；
+    /// 超窗仍不等 = `config_mismatch`。**空串 = 上一代实例**（那份实现还没有这个字段），
+    /// 说明它跑的根本不是这套通道，reconcile 会把它重启一次。
+    #[serde(default)]
+    pub config_hash: String,
+    /// 最近一次热重载失败的原因（校验不过时保留旧快照）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
     #[serde(default)]
     pub reload_interval_secs: u64,
     pub core_version: String,
@@ -277,12 +321,15 @@ pub struct StatusReport {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
-    /// **契约回显**：注入器对"管理器下发的每个选项"逐项核对的结论。
+    /// **契约回显**：注入器对"管理器下发的每个 `--set`"逐项核对的结论。
     ///
     /// 键是选项名，值是 `"ok"` 或一段说明（未注册 / 取值不同）。为什么需要它：
     /// mitmproxy 对**未知或拼错的 `--set` 是静默忽略**的（实测），
     /// 所以"命令没报错"不能当作配置生效 —— 注入器是唯一能回答"这些键到底有没有
     /// 被宿主接受"的地方，它把答案写在这里，管理器再比对。
+    ///
+    /// 现在只剩管理器自己下发的键（`proxyauth`）：它是安全控制，
+    /// 被静默忽略会让代理在"以为开了鉴权"的状态下裸奔。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options_echo: BTreeMap<String, String>,
 }
@@ -301,6 +348,11 @@ impl StatusReport {
         } else {
             Some(bad.join("; "))
         }
+    }
+
+    /// 这个实例是不是上一代二进制拉起来的（没有配置哈希回执）。
+    pub fn is_legacy(&self) -> bool {
+        self.config_hash.is_empty()
     }
 
     pub fn from_json_slice(raw: &[u8]) -> Result<Self, Error> {
@@ -324,8 +376,7 @@ pub trait ProxyCore: Send + Sync {
 
     fn capabilities(&self) -> CoreCapabilities;
 
-    /// 启动一个实例。实现方负责校验 [`InstanceSpec::options`]（至少跑
-    /// [`validate_options`]），并在失败时返回**响亮**的错误。
+    /// 启动一个实例。实现方负责在失败时返回**响亮**的错误。
     async fn start(&self, spec: InstanceSpec) -> Result<InstanceHandle, Error>;
 
     /// 停止一个实例：先优雅，超时再强杀。
@@ -358,49 +409,81 @@ pub trait ProxyCore: Send + Sync {
 mod tests {
     use super::*;
 
-    fn options(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn options_escape_hatch_allows_core_specific_keys() {
-        // ssl_insecure 是"core 特有配置"的典型：管理器不理解它，原样透传。
-        let allowed = options(&[("ssl_insecure", "true")]);
-        assert!(validate_options(&allowed).is_ok());
-    }
-
-    #[test]
-    fn options_denylist_blocks_manager_owned_keys() {
-        for key in [
-            "listen_port",
-            "listen_host",
-            "confdir",
-            "rules",
-            "status_file",
-        ] {
-            let denied = options(&[(key, "x")]);
-            let error = validate_options(&denied).unwrap_err();
-            assert_eq!(error.code, crate::error::ErrorCode::InvalidConfig);
-            assert_eq!(
-                error.field.as_deref(),
-                Some(format!("instance.options.{key}").as_str())
-            );
+    fn spec(port: u16) -> InstanceSpec {
+        InstanceSpec {
+            env: "beta".into(),
+            listen: Listen::localhost(port),
+            agent_dir: std::env::temp_dir().join("envboard-agent-beta"),
+            status_file: std::env::temp_dir().join("beta.status.json"),
+            shared_state_dir: std::env::temp_dir(),
+            runtime_dir: std::env::temp_dir(),
+            log_dir: None,
+            insecure_hosts: Vec::new(),
+            proxy_user: None,
+            proxy_password: None,
         }
     }
 
     #[test]
-    fn options_denylist_blocks_topology_and_envboard_prefix() {
-        for key in ["mode", "upstream", "scripts", "web_open_browser"] {
-            assert!(
-                validate_options(&options(&[(key, "x")])).is_err(),
-                "{key} must be denied"
-            );
+    fn proxyauth_is_assembled_only_at_the_boundary() {
+        let mut spec = spec(16_301);
+        assert_eq!(spec.proxyauth(), None);
+        spec.proxy_user = Some("alice".into());
+        spec.proxy_password = Some("s3cret".into());
+        assert_eq!(spec.proxyauth().as_deref(), Some("alice:s3cret"));
+    }
+
+    #[test]
+    fn instance_paths_are_fixed_names_beside_the_injector() {
+        let spec = spec(16_301);
+        assert_eq!(
+            spec.config_file(),
+            std::env::temp_dir().join("envboard-agent-beta/config.json")
+        );
+        assert_eq!(
+            spec.rules_link(),
+            std::env::temp_dir().join("envboard-agent-beta/envboard.rules")
+        );
+    }
+
+    #[test]
+    fn credentials_are_redacted_before_they_reach_a_record() {
+        let identity = ProcessIdentity {
+            pid: 111,
+            starttime: 900,
+            cmdline: vec![
+                "mitmdump".into(),
+                "--set".into(),
+                "proxyauth=alice:s3cret".into(),
+                "--set".into(),
+                "listen_port=16301".into(),
+            ],
         }
-        // 前缀保留：注入器/管理器的约定不允许被 options 覆盖
-        assert!(validate_options(&options(&[("envboard_rules", "/tmp/x")])).is_err());
+        .redacted();
+        assert_eq!(identity.cmdline[2], "proxyauth=***");
+        assert_eq!(identity.cmdline[4], "listen_port=16301");
+        assert!(!identity.cmdline.iter().any(|arg| arg.contains("s3cret")));
+
+        // `--set=key=value` 形态同样要脱敏
+        let inline = redact_cmdline(&["--set=proxyauth=alice:s3cret".to_string()]);
+        assert_eq!(inline, vec!["--set=proxyauth=***".to_string()]);
+    }
+
+    #[test]
+    fn identity_comparison_ignores_the_rotated_credential_value() {
+        let recorded = ProcessIdentity {
+            pid: 111,
+            starttime: 900,
+            cmdline: vec!["--set".into(), "proxyauth=old:pw".into()],
+        };
+        let live = ProcessIdentity {
+            pid: 111,
+            starttime: 900,
+            cmdline: vec!["--set".into(), "proxyauth=new:pw".into()],
+        };
+        // 轮换密码不该让"这是同一个进程"变成假
+        assert!(recorded.same_process(&live));
+        assert!(!recorded.same_process_different_cmdline(&live));
     }
 
     #[test]
@@ -425,16 +508,34 @@ mod tests {
             env_name: "beta".into(),
             pid: 42,
             listen: Listen::localhost(16301),
-            rules_path: Some("/tmp/beta.rules".into()),
+            rules_path: Some("/tmp/agent/beta/envboard.rules".into()),
             rules_count: 3,
+            insecure_hosts_count: 1,
+            config_hash: "abc123".into(),
+            config_error: None,
             reload_interval_secs: 5,
             core_version: "12.2.3".into(),
             agent_version: "0.1.0".into(),
             updated_at: 1_700_000_000,
             last_error: None,
-            options_echo: BTreeMap::from([("ssl_insecure".to_string(), "ok".to_string())]),
+            options_echo: BTreeMap::from([("proxyauth".to_string(), "ok".to_string())]),
         };
         let raw = report.to_json_vec().unwrap();
         assert_eq!(StatusReport::from_json_slice(&raw).unwrap(), report);
+        assert!(!report.is_legacy());
+    }
+
+    #[test]
+    fn a_status_file_without_a_config_hash_is_from_the_previous_generation() {
+        // 上一代注入器写的状态文件没有 config_hash / insecure_hosts_count 两个键。
+        let raw = br#"{
+            "env_name": "beta", "pid": 1,
+            "listen": {"host": "127.0.0.1", "port": 16301},
+            "rules_count": 2, "reload_interval_secs": 5,
+            "core_version": "12.2.3", "agent_version": "0.0.9", "updated_at": 1700000000
+        }"#;
+        let report = StatusReport::from_json_slice(raw).unwrap();
+        assert!(report.is_legacy());
+        assert_eq!(report.insecure_hosts_count, 0);
     }
 }

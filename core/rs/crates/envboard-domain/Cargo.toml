@@ -12,5 +12,8 @@ publish = false
 
 [dependencies]
 envboard-core-api.workspace = true
+# host 归一化/校验的唯一实现在 rules crate（环境层用它校验 insecure_hosts 条目，
+# 不复制一份 label 规则）。两边都是纯逻辑，方向也不会成环。
+envboard-rules.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,16 @@
+{
+  "capability": "environment.validate",
+  "description": "旧形状 proxy_auth（user:password）读时无损拆分：整体 trim 后按第一个冒号切开，写出只留新字段",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "proxy_auth": "  alice:s3cret  "
+  },
+  "expect": {
+    "ok": true,
+    "proxy_user": "alice",
+    "proxy_password": "s3cret"
+  }
+}

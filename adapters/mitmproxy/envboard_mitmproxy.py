@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
-"""envboard 注入器 —— 一个文件、纯标准库（外加 mitmproxy 本身），职责只有三件事。
+"""envboard 注入器 —— 一个文件、纯标准库（外加 mitmproxy 本身），职责只有四件事。
 
-1. **读 + 解析 hosts 规则**（契约：`core/spec/rules.md` 的 BNF）；
-2. **在 `server_connect` 里改写上连目标**（只改"往哪连"，不改请求内容、Host、SNI 基准）；
-3. **回写状态文件**，让管理器能判断"配置到底有没有生效"。
+1. **读 `<自身目录>/config.json`**（管理器写下、热重载的配置通道）；
+2. **读 `<自身目录>/envboard.rules`**（固定名软链，指向当前绑定的规则库文件）；
+3. **在 `server_connect` 里改写上连目标**（只改"往哪连"，不改请求内容、Host、SNI 基准）；
+4. **按域名放宽上游证书校验**：名单内的域名在 `tls_start_server` 里用 `VERIFY_NONE`
+   自建上游 context，名单外的一律走 mitmproxy 的严格校验；
+   外加**回写状态文件**，让管理器能判断"配置到底有没有生效"。
 
-它**不参与环境管理**：不知道自己是哪个环境（`envboard_env_name` 只是展示数据），
-不知道有哪些兄弟实例，也不碰任何状态目录。这样才能"随时可以丢掉"。
+它**不参与环境管理**：不知道有哪些兄弟实例，也不碰任何状态目录（除了自己的状态文件）。
+这样才能"随时可以丢掉"。
+
+## 配置与热重载
+
+`config.json` 与规则软链都在注入器**旁边**，所以"配置放在哪"不需要参数：
+
+* 配置按**内容哈希**判变化，规则按链 + 目标的 `(mtime_ns, size)` 判变化；
+* 变了就整份重建一个**不可变快照**（`Policy`），hooks 单次取用 —— 单条连接内配置一致；
+* 热重载失败**保留旧快照**并写 `config_error`（不中断代理）；启动首读失败则抛错退出
+  （不留半配置实例）。
 
 ## 两种用法
 
-* **作为 addon**：`mitmdump -s envboard_mitmproxy.py --set envboard_rules=...`
-  （由 `envboard-core-mitmproxy` 物化并拉起）；
+* **作为 addon**：`mitmdump -s envboard_mitmproxy.py --set confdir=… --set listen_host=…`
+  （由 `envboard-core-mitmproxy` 物化到每个环境自己的目录里再拉起）。
+  没有 `envboard_*` 选项：那些值全在 `config.json` 里。
 * **作为 CLI**：`python3 envboard_mitmproxy.py --render --fixture <case.json>`
   —— 把规范化文本打到 stdout，供跨语言对拍使用。
   这个模式**不需要装 mitmproxy**，因为它的解析与渲染只依赖标准库。
@@ -20,7 +33,6 @@
 
 HTTP 代理模式的上连根本不走 mitmproxy 的 resolver（`proxy/server.py` 直接
 `asyncio.open_connection(*address)`），per-host 覆盖只有"改连到哪"这一条路。
-证据与替代方案对比见。
 """
 
 # 注意：**不要**在这里写 `from __future__ import annotations`。
@@ -29,6 +41,7 @@ HTTP 代理模式的上连根本不走 mitmproxy 的 resolver（`proxy/server.py
 # （`AttributeError: 'NoneType' object has no attribute '__dict__'`）。
 # 实测踩过并据此去掉：当时那句 `from __future__ import annotations` 就是这么崩的。
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -45,7 +58,7 @@ try:  # pragma: no cover - 取决于运行方式
 except Exception:  # noqa: BLE001 - 任何导入失败都退化为 CLI 模式
     ctx = None  # type: ignore[assignment]
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"
 STATUS_MIN_INTERVAL = 1.0
 
 #: host 的 label 规则，与 `core/spec/rules.md` §3.1 一字不差。
@@ -284,76 +297,302 @@ def render_rules(entries: dict[str, str], source: str = "") -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 每环境配置（Rust ←→ 注入器之间的唯一通道）
+# --------------------------------------------------------------------------- #
+
+#: 由管理器写在注入器**旁边**的配置文件名。
+CONFIG_FILE_NAME = "config.json"
+#: 规则文件的固定名软链 —— 绑定哪份规则由它指向谁决定。
+RULES_LINK_NAME = "envboard.rules"
+#: `config.json` 的格式版本；不认识的版本一律拒绝。
+CONFIG_VERSION = 1
+#: 放行域名清单的条数上限（与 Rust 侧同一个数字）。
+INSECURE_HOSTS_MAX = 200
+NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+CONFIG_KEYS = frozenset(
+    {
+        "version",
+        "env",
+        "status_file",
+        "rules",
+        "insecure_hosts",
+        "launch_expected",
+        "reload_interval_secs",
+        "annotate",
+    }
+)
+
+
+class ConfigError(Exception):
+    """配置不可用。
+
+    两条路径的行为刻意不同：**启动**时首读失败即抛错退出（不留半配置实例）；
+    **热重载**时失败只记 `config_error` 并保留上一份快照（不中断代理）。
+    """
+
+
+def agent_dir() -> str:
+    """注入器自己所在的目录 —— 配置与规则软链都在它旁边。"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+# --------------------------------------------------------------------------- #
+# 契约：insecure_hosts（按域名放宽上游校验）
+#
+# 与 rules 的 host 归一化**刻意不同**：不剥 `*.`，出现 `*` / `?` 一律非法；
+# 匹配是**完全相等**（无子域继承、无后缀匹配）。
+# --------------------------------------------------------------------------- #
+
+
+def normalize_insecure_host(value: str) -> str:
+    return value.strip().lower().rstrip(".")
+
+
+def validate_insecure_host(value: str) -> str | None:
+    """归一化 + 校验；非法（通配符 / label 不合法）返回 None。"""
+    host = normalize_insecure_host(value)
+    if "*" in host or "?" in host:
+        return None
+    return validate_host(host)
+
+
+def insecure_candidate(sni: Any, address: Any) -> str | None:
+    """命中判定的候选：归一化后的 SNI；没有 SNI 时退回上连地址。
+
+    SNI 存在但不在名单里**不**退回地址 —— 退回会让一次命名失配变成一次静默放行。
+    """
+    raw = sni if sni else address
+    if not raw:
+        return None
+    host = normalize_insecure_host(str(raw))
+    return host or None
+
+
+def insecure_match(case_input: dict[str, Any]) -> dict[str, Any]:
+    """契约 fixture（`insecure.hosts`）的参考实现 —— 与 Rust 侧逐条对齐。"""
+    hosts = case_input.get("hosts") or []
+    candidate = insecure_candidate(case_input.get("sni"), case_input.get("address"))
+    return {"match": candidate is not None and candidate in set(hosts)}
+
+
+# --------------------------------------------------------------------------- #
+# 配置解析（强 schema）
+# --------------------------------------------------------------------------- #
+
+
+def parse_config(raw: bytes) -> dict[str, Any]:
+    """把 `config.json` 的字节解析成一份校验过的配置。
+
+    **未知键即非法**：配置文件是契约，宽松解析会让"写错了键名"变成静默失效。
+    """
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ConfigError(f"{CONFIG_FILE_NAME} is not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{CONFIG_FILE_NAME} must be a JSON object")
+
+    unknown = sorted(set(doc) - CONFIG_KEYS)
+    if unknown:
+        raise ConfigError(f"{CONFIG_FILE_NAME} has unknown keys: {unknown}")
+
+    version = doc.get("version")
+    if version != CONFIG_VERSION:
+        raise ConfigError(
+            f"unsupported {CONFIG_FILE_NAME} version {version!r} (expected {CONFIG_VERSION})"
+        )
+
+    env = doc.get("env")
+    if not isinstance(env, str) or not env:
+        raise ConfigError("config.env must be a non-empty string")
+
+    status_file = doc.get("status_file")
+    if not isinstance(status_file, str) or not status_file:
+        raise ConfigError("config.status_file must be a non-empty string")
+
+    rules = doc.get("rules")
+    if rules is not None and (not isinstance(rules, str) or not NAME_RE.match(rules)):
+        raise ConfigError("config.rules must be null or a rules name (^[a-z][a-z0-9_-]{0,31}$)")
+
+    raw_hosts = doc.get("insecure_hosts")
+    if not isinstance(raw_hosts, list):
+        raise ConfigError("config.insecure_hosts must be an array")
+    if len(raw_hosts) > INSECURE_HOSTS_MAX:
+        raise ConfigError(
+            f"config.insecure_hosts has {len(raw_hosts)} entries; the limit is {INSECURE_HOSTS_MAX}"
+        )
+    hosts: list[str] = []
+    for index, item in enumerate(raw_hosts):
+        host = validate_insecure_host(item) if isinstance(item, str) else None
+        if host is None:
+            raise ConfigError(
+                f"config.insecure_hosts[{index}] is not a complete domain name "
+                "(wildcards are rejected: list every domain explicitly)"
+            )
+        if host not in hosts:
+            hosts.append(host)
+
+    expected = doc.get("launch_expected")
+    if not isinstance(expected, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in expected.items()
+    ):
+        raise ConfigError("config.launch_expected must be an object of strings")
+
+    interval = doc.get("reload_interval_secs")
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
+        raise ConfigError("config.reload_interval_secs must be an integer >= 1")
+
+    annotate = doc.get("annotate")
+    if not isinstance(annotate, bool):
+        raise ConfigError("config.annotate must be a boolean")
+
+    return {
+        "env": env,
+        "status_file": status_file,
+        "rules": rules,
+        "insecure_hosts": sorted(hosts),
+        "launch_expected": dict(expected),
+        "reload_interval_secs": interval,
+        "annotate": annotate,
+    }
+
+
+def resolve_rules(directory: str, config: dict[str, Any]) -> tuple[str | None, str | None]:
+    """把"固定名软链"解析成规则文件路径。
+
+    返回 `(路径或 None, 错误或 None)`。三种情形：
+    * 链不存在 / 悬空 → `(None, None)`：该环境**不覆盖任何域名**（契约语义，不是错误）；
+    * 链指向的名字与 `config.rules` 不一致 → `(None, 错误)`：响亮报错，**不猜**用哪一个；
+    * 正常 → `(链路径, None)`。
+    """
+    link = os.path.join(directory, RULES_LINK_NAME)
+    if not os.path.lexists(link):
+        return None, None
+
+    try:
+        target = os.readlink(link)
+    except OSError as exc:  # noqa: BLE001 - 读不动链就没什么可猜的
+        return None, f"cannot read the rules link {link}: {exc}"
+
+    base = os.path.basename(target)
+    bound = config["rules"]
+    if bound is None:
+        return None, (
+            f"the rules link points at {base!r} but the configuration binds no rules "
+            "(the manager did not clean it up)"
+        )
+    if base != f"{bound}{RULES_SUFFIX}":
+        return None, (
+            f"the rules link points at {base!r} but the configuration binds {bound!r}; "
+            "refusing to guess which one is in effect"
+        )
+    if not os.path.exists(link):
+        # 悬空链：目标文件不在，与"链不存在"一样 = 不覆盖。
+        return None, None
+    return link, None
+
+
+def load_rules(path: str) -> tuple[dict[str, str], int, str | None]:
+    """读并解析规则文件；失败时返回空表 + 错误说明（调用方保留旧快照）。"""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        return {}, 0, f"cannot read the rules file {path}: {exc}"
+    import_result = parse_hosts_text(text)
+    return dict(import_result.entries), import_result.accepted, None
+
+
+# --------------------------------------------------------------------------- #
 # 运行时状态
 # --------------------------------------------------------------------------- #
 
 
-class RuleTable:
-    """规则表 + mtime 热重载。
+class Policy:
+    """**不可变**的生效配置快照。
 
-    轮询而不是 inotify：注入器要保持"单文件、纯标准库、跨平台"，而 mtime 轮询
-    是这三条下唯一不引入依赖的做法（延迟等于轮询间隔，默认 5s，够用）。
+    hooks 只读它，热重载做的是 `self._policy = new` 这一次属性替换 ——
+    所以单个连接内看到的一定是同一份配置（不会读到"改了一半"的状态）。
     """
 
-    def __init__(self, path: str, interval: float) -> None:
-        self.path = path
-        self.interval = max(float(interval), 1.0)
-        self._lock = threading.Lock()
-        self._entries: dict[str, str] = {}
-        self._mtime: float | None = None
-        self._count = 0
-        self._error: str | None = None
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+    __slots__ = (
+        "env",
+        "annotate",
+        "insecure_hosts",
+        "entries",
+        "rules_path",
+        "rules_count",
+        "config_hash",
+        "reload_interval_secs",
+        "launch_expected",
+    )
 
-    @property
-    def entries(self) -> dict[str, str]:
-        with self._lock:
-            return self._entries
+    def __init__(
+        self,
+        *,
+        env: str,
+        annotate: bool,
+        insecure_hosts: frozenset[str],
+        entries: dict[str, str],
+        rules_path: str | None,
+        rules_count: int,
+        config_hash: str,
+        reload_interval_secs: int,
+        launch_expected: dict[str, str],
+    ) -> None:
+        self.env = env
+        self.annotate = annotate
+        self.insecure_hosts = insecure_hosts
+        self.entries = entries
+        self.rules_path = rules_path
+        self.rules_count = rules_count
+        self.config_hash = config_hash
+        self.reload_interval_secs = reload_interval_secs
+        self.launch_expected = launch_expected
 
-    @property
-    def count(self) -> int:
-        with self._lock:
-            return self._count
 
-    @property
-    def error(self) -> str | None:
-        with self._lock:
-            return self._error
+def build_policy(
+    directory: str, config: dict[str, Any], raw: bytes
+) -> tuple[Policy, str | None]:
+    """从一份已校验的配置构建快照。绑定的链不一致时抛 [`ConfigError`]。"""
+    rules_path, link_error = resolve_rules(directory, config)
+    if link_error:
+        raise ConfigError(link_error)
+    entries: dict[str, str] = {}
+    count = 0
+    rules_error: str | None = None
+    if rules_path:
+        entries, count, rules_error = load_rules(rules_path)
 
-    def load(self) -> None:
-        if not self.path:
-            with self._lock:
-                self._entries, self._count, self._error = {}, 0, None
-            return
-        try:
-            stat = os.stat(self.path)
-            with self._lock:
-                if self._mtime == stat.st_mtime:
-                    return
-            with open(self.path, encoding="utf-8") as handle:
-                text = handle.read()
-            parsed = parse_hosts_text(text)
-            with self._lock:
-                self._entries = dict(parsed.entries)
-                self._count = parsed.accepted
-                self._mtime = stat.st_mtime
-                self._error = None
-        except OSError as exc:
-            with self._lock:
-                self._error = f"cannot read rules file {self.path}: {exc}"
+    policy = Policy(
+        env=config["env"],
+        annotate=config["annotate"],
+        insecure_hosts=frozenset(config["insecure_hosts"]),
+        entries=entries,
+        rules_path=rules_path,
+        rules_count=count,
+        config_hash=hashlib.sha256(raw).hexdigest(),
+        reload_interval_secs=config["reload_interval_secs"],
+        launch_expected=config["launch_expected"],
+    )
+    return policy, rules_error
 
-    def start(self) -> None:
-        self.load()
-        self._thread = threading.Thread(target=self._loop, name="envboard-reload", daemon=True)
-        self._thread.start()
 
-    def _loop(self) -> None:
-        while not self._stop.wait(self.interval):
-            self.load()
+def link_stamp(link: str) -> tuple[Any, ...]:
+    """软链的观测指纹：链指向谁 + 目标文件的 `(mtime_ns, size)`。
 
-    def stop(self) -> None:
-        self._stop.set()
+    为什么要带 `readlink` 的结果：换绑定可能让链的 mtime 分辨率不够，
+    但目标名一定变；而"目标内容被重写"则改 mtime/size。两件事都覆盖到了。
+    """
+    try:
+        target = os.readlink(link)
+    except OSError:
+        return ("absent",)
+    try:
+        stat = os.stat(link)
+    except OSError:
+        return (target, "dangling")
+    return (target, stat.st_mtime_ns, stat.st_size)
 
 
 class StatusWriter:
@@ -397,47 +636,139 @@ class StatusWriter:
 
 
 # --------------------------------------------------------------------------- #
+# TLS：按域名放宽上游校验
+# --------------------------------------------------------------------------- #
+
+
+def _unverified_server_context(tls_start: Any, server: Any, host: str) -> Any:
+    """为本条连接自建一个 `VERIFY_NONE` 的上游 context。
+
+    主体与 mitmproxy 自己的 `tlsconfig.tls_start_server` 逐项对齐（同一批
+    `ctx.options`），**唯一的语义差别**是 `verify=VERIFY_NONE`：
+    证书链不校验、主机名不校验，其余（ALPN、cipher、TLS 版本、ECDH 曲线）保持原样。
+
+    实测到的两条边界（踩过才知道）：
+    * `-s` 脚本的 `tls_start_server` **先于** `tlsconfig` 执行 —— 所以这里能抢先
+      提供 `ssl_conn`，后者看到非 None 就直接返回；
+    * `server.sni` 必须显式设置，否则测试机按 SNI 选不到 vhost（客户端可不发 SNI）。
+    """
+    from OpenSSL import SSL
+    from mitmproxy.net import tls as net_tls
+
+    try:
+        from mitmproxy.addons.tlsconfig import _default_ciphers
+    except ImportError:  # pragma: no cover - 私有 API 漂移时的兜底
+        _default_ciphers = None
+
+    client = tls_start.context.client
+    if not server.alpn_offers:
+        if client.alpn_offers:
+            server.alpn_offers = (
+                tuple(client.alpn_offers)
+                if ctx.options.http2
+                else tuple(item for item in client.alpn_offers if item != b"h2")
+            )
+        else:
+            server.alpn_offers = []
+
+    cipher_list = server.cipher_list or (
+        ctx.options.ciphers_server.split(":")
+        if ctx.options.ciphers_server
+        else (
+            _default_ciphers(net_tls.Version[ctx.options.tls_version_server_min])
+            if _default_ciphers
+            else None
+        )
+    )
+
+    ssl_ctx = net_tls.create_proxy_server_context(
+        method=net_tls.Method.TLS_CLIENT_METHOD,
+        min_version=net_tls.Version[ctx.options.tls_version_server_min],
+        max_version=net_tls.Version[ctx.options.tls_version_server_max],
+        cipher_list=tuple(cipher_list) if cipher_list else None,
+        ecdh_curve=net_tls.get_curve(ctx.options.tls_ecdh_curve_server),
+        verify=net_tls.Verify.VERIFY_NONE,
+        ca_path=None,
+        ca_pemfile=None,
+        client_cert=None,
+        legacy_server_connect=True,
+    )
+    ssl_conn = SSL.Connection(ssl_ctx)
+    server.sni = host
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        ssl_conn.set_tlsext_host_name(host.encode("idna"))
+    if server.alpn_offers:
+        ssl_conn.set_alpn_protos(list(server.alpn_offers))
+    ssl_conn.set_connect_state()
+    return ssl_conn
+
+
+# --------------------------------------------------------------------------- #
 # addon
 # --------------------------------------------------------------------------- #
 
 
 class Injector:
     def __init__(self) -> None:
-        self.rules: RuleTable | None = None
+        self._lock = threading.Lock()
+        self._policy = Policy(
+            env="",
+            annotate=False,
+            insecure_hosts=frozenset(),
+            entries={},
+            rules_path=None,
+            rules_count=0,
+            config_hash="",
+            reload_interval_secs=5,
+            launch_expected={},
+        )
+        self._config_error: str | None = None
+        self._rules_error: str | None = None
+        self._seen_hash = ""
+        self._rules_stamp: tuple[Any, ...] = ()
+        self._interval = 5.0
+        self._directory = ""
+        self._listen_host = ""
+        self._listen_port = 0
+        self._echo: dict[str, str] = {}
         self.status: StatusWriter | None = None
         self.rewrites = 0
-        self._annotate = False
-        self._env_name = ""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     # -- 生命周期 ---------------------------------------------------------- #
 
-    def load(self, loader) -> None:
-        loader.add_option("envboard_rules", str, "", "path to the rules file (absolute)")
-        loader.add_option("envboard_status_file", str, "", "path to the status file (absolute)")
-        # 类型必须是 mitmproxy 认的那几种（bool / int / str / Sequence[str]）。
-        # 实测：`float` 会让 mitmdump **启动即失败**（`unsupported option type: float`），
-        # 所以间隔用整秒 —— 契约里写的也是 `--set envboard_reload_interval=5`。
-        loader.add_option(
-            "envboard_reload_interval", int, 5, "seconds between rules file mtime checks"
-        )
-        loader.add_option("envboard_annotate_flow", bool, False, "tag flows with the env name")
-        loader.add_option("envboard_env_name", str, "", "display-only environment name")
-        loader.add_option(
-            "envboard_expect",
-            str,
-            "",
-            "JSON of options the manager intends to set; the injector verifies each one",
-        )
-
     def running(self) -> None:
-        options = ctx.options  # type: ignore[union-attr]
-        self._annotate = bool(options.envboard_annotate_flow)
-        self._env_name = str(options.envboard_env_name)
-        listen_host = str(options.listen_host)
-        listen_port = int(options.listen_port)
+        """首读配置并建立运行时。
 
-        self.rules = RuleTable(str(options.envboard_rules), int(options.envboard_reload_interval))
-        self.rules.start()
+        **启动路径不留半配置实例**：读不到、读不懂、链对不上，一律抛错退出 ——
+        管理器等不到新鲜的状态文件，就会把这次启动判定为失败并收掉进程。
+        """
+        self._directory = agent_dir()
+        options = ctx.options  # type: ignore[union-attr]
+        self._listen_host = str(options.listen_host)
+        self._listen_port = int(options.listen_port)
+
+        config_path = os.path.join(self._directory, CONFIG_FILE_NAME)
+        try:
+            with open(config_path, "rb") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            raise RuntimeError(
+                f"envboard: cannot read {config_path}: {exc} "
+                "(the manager writes it before launch)"
+            ) from exc
+
+        config = parse_config(raw)
+        policy, rules_error = build_policy(self._directory, config, raw)
+        self._policy = policy
+        self._rules_error = rules_error
+        self._seen_hash = policy.config_hash
+        self._rules_stamp = link_stamp(os.path.join(self._directory, RULES_LINK_NAME))
+        self._interval = float(policy.reload_interval_secs)
+        self._echo = self._verify_expected(options, policy.launch_expected)
 
         try:
             from mitmproxy import version as mitmproxy_version
@@ -446,50 +777,44 @@ class Injector:
         except Exception:  # noqa: BLE001
             core_version = "unknown"
 
-        echo = self._verify_expected_options(options)
         self.status = StatusWriter(
-            str(options.envboard_status_file),
+            config["status_file"],
             {
-                "env_name": self._env_name,
+                "env_name": policy.env,
                 "pid": os.getpid(),
-                "listen": {"host": listen_host, "port": listen_port},
-                "rules_path": str(options.envboard_rules) or None,
-                "rules_count": self.rules.count,
-                "reload_interval_secs": int(options.envboard_reload_interval),
+                "listen": {"host": self._listen_host, "port": self._listen_port},
+                "rules_path": policy.rules_path,
+                "rules_count": policy.rules_count,
+                "insecure_hosts_count": len(policy.insecure_hosts),
+                "config_hash": policy.config_hash,
+                "config_error": None,
+                "reload_interval_secs": policy.reload_interval_secs,
                 "core_version": core_version,
                 "agent_version": AGENT_VERSION,
                 "updated_at": int(time.time()),
-                "last_error": self.rules.error,
-                "options_echo": echo,
+                "last_error": self._rules_error,
+                "options_echo": self._echo,
             },
         )
         self.status.write()
         self.status.start()
+
+        self._thread = threading.Thread(target=self._loop, name="envboard-reload", daemon=True)
+        self._thread.start()
         ctx.log.info(  # type: ignore[union-attr]
-            f"envboard injector ready: rules={self.rules.count} from {options.envboard_rules!r}"
+            f"envboard injector ready: env={policy.env} rules={policy.rules_count} "
+            f"insecure_hosts={len(policy.insecure_hosts)}"
         )
 
     @staticmethod
-    def _verify_expected_options(options) -> dict[str, str]:
-        """逐项核对"管理器下发的选项"有没有被宿主接受。
+    def _verify_expected(options: Any, expected: dict[str, str]) -> dict[str, str]:
+        """逐项核对"管理器下发的启动契约键"有没有被宿主接受。
 
         为什么需要：**mitmproxy 对未知或拼错的 `--set` 是静默忽略的**（实测），
-        所以"命令没报错"不能当作配置生效。注入器是唯一能回答这个问题的位置 ——
-        它把结论写进状态文件，管理器据此判定 `config_mismatch`。
+        所以"命令没报错"不能当作配置生效。`proxyauth` 是安全控制 ——
+        被忽略就等于代理在"以为开了鉴权"的状态下裸奔，必须让管理器看得见。
         """
         verdicts: dict[str, str] = {}
-        raw = str(getattr(options, "envboard_expect", "") or "")
-        if not raw:
-            return verdicts
-        try:
-            expected = json.loads(raw)
-        except ValueError as exc:
-            verdicts["<envboard_expect>"] = f"cannot parse expect payload: {exc}"
-            return verdicts
-        if not isinstance(expected, dict):
-            verdicts["<envboard_expect>"] = "expect payload must be a JSON object"
-            return verdicts
-
         for key, value in expected.items():
             try:
                 actual = getattr(options, key)
@@ -503,10 +828,80 @@ class Injector:
         return verdicts
 
     def done(self) -> None:
-        if self.rules:
-            self.rules.stop()
+        self._stop.set()
         if self.status:
             self.status.stop()
+
+    # -- 热重载 ------------------------------------------------------------ #
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._refresh()
+            except Exception as exc:  # noqa: BLE001 - 轮询线程绝不能死
+                with self._lock:
+                    self._config_error = f"hot reload failed: {exc}"
+                self._publish()
+
+    def _refresh(self) -> None:
+        """`config.json` 与规则目标有变化就整份重读；失败保留旧快照。"""
+        config_path = os.path.join(self._directory, CONFIG_FILE_NAME)
+        try:
+            with open(config_path, "rb") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            with self._lock:
+                self._config_error = f"cannot read {CONFIG_FILE_NAME}: {exc}"
+            self._publish()
+            return
+
+        # 配置按**内容哈希**判变化（比 mtime 稳，且文件只有几百字节）；
+        # 规则按链 + 目标的 `(mtime_ns, size)` 判 —— 换绑定与改内容都覆盖到。
+        digest = hashlib.sha256(raw).hexdigest()
+        stamp = link_stamp(os.path.join(self._directory, RULES_LINK_NAME))
+        with self._lock:
+            if digest == self._seen_hash and stamp == self._rules_stamp:
+                return
+            self._seen_hash = digest
+            self._rules_stamp = stamp
+
+        try:
+            config = parse_config(raw)
+            policy, rules_error = build_policy(self._directory, config, raw)
+        except ConfigError as exc:
+            # 响亮但**不致命**：代理继续按上一份快照干活，状态文件里报出来。
+            with self._lock:
+                self._config_error = str(exc)
+            self._publish()
+            return
+
+        with self._lock:
+            self._policy = policy
+            self._config_error = None
+            self._rules_error = rules_error
+            self._interval = float(policy.reload_interval_secs)
+        self._publish()
+        ctx.log.info(  # type: ignore[union-attr]
+            f"envboard injector reloaded: rules={policy.rules_count} "
+            f"insecure_hosts={len(policy.insecure_hosts)}"
+        )
+
+    def _publish(self) -> None:
+        if self.status is None:
+            return
+        with self._lock:
+            policy = self._policy
+            config_error = self._config_error
+            rules_error = self._rules_error
+        self.status.write(
+            rules_path=policy.rules_path,
+            rules_count=policy.rules_count,
+            insecure_hosts_count=len(policy.insecure_hosts),
+            config_hash=policy.config_hash,
+            config_error=config_error,
+            reload_interval_secs=policy.reload_interval_secs,
+            last_error=rules_error,
+        )
 
     # -- 核心：改写上连目标 ------------------------------------------------- #
 
@@ -514,24 +909,59 @@ class Injector:
         """只改"往哪连"：不动请求内容、不动 Host 头、不动 SNI 基准。
 
         钩子里**只做一次字典查找**（微秒级）。`server_connect` 是 blocking hook
-        （`StartHook.blocking = True`，`proxy/commands.py:121`），但 blocking 的含义是
-        "本层暂停并缓冲事件"，真正的禁忌是在钩子里做 I/O —— 这里没有 I/O。
+        （`StartHook.blocking = True`），但 blocking 的含义是"本层暂停并缓冲事件"，
+        真正的禁忌是在钩子里做 I/O —— 这里没有 I/O。
         """
-        if self.rules is None:
-            return
+        policy = self._policy
         address = data.server.address
         if not address:
             return
         host, port = address
-        target = self.rules.entries.get(host.lower().rstrip("."))
+        target = policy.entries.get(host.lower().rstrip("."))
         if not target:
             return
         self.rewrites += 1
         data.server.address = (target, port)
 
+    def tls_start_server(self, tls_start) -> None:
+        """名单内的域名放宽上游证书校验；其余一律严格。
+
+        单次取快照：一条连接内看到的配置是一致的。判定是**精确相等**
+        （契约见 `insecure_hosts` 一节），没有通配、没有后缀匹配。
+        """
+        policy = self._policy
+        if not policy.insecure_hosts:
+            return
+        server = tls_start.conn
+        try:
+            from mitmproxy import connection
+        except Exception:  # noqa: BLE001 - 拿不到类型就没法安全判定
+            return
+        if not isinstance(server, connection.Server) or not server.address:
+            return
+        if tls_start.ssl_conn is not None:
+            # 已有 addon 提供了 context（或我们不是第一个），不抢。
+            return
+
+        host = insecure_candidate(tls_start.context.client.sni, server.address[0])
+        if host is None or host not in policy.insecure_hosts:
+            return
+
+        try:
+            # 只在最后一步赋值：中途出错就什么都不改，让 mitmproxy 走**严格**校验。
+            # 宁可连不上，也不能在出错时把校验静默关掉。
+            ssl_conn = _unverified_server_context(tls_start, server, host)
+        except Exception as exc:  # noqa: BLE001
+            ctx.log.warn(  # type: ignore[union-attr]
+                f"envboard: cannot relax upstream verification for {host}: {exc}"
+            )
+            return
+        tls_start.ssl_conn = ssl_conn
+
     def request(self, flow) -> None:
-        if self._annotate and self._env_name:
-            flow.comment = f"[env:{self._env_name}]"
+        policy = self._policy
+        if policy.annotate and policy.env:
+            flow.comment = f"[env:{policy.env}]"
 
     # -- 给对拍用的自省 ---------------------------------------------------- #
 

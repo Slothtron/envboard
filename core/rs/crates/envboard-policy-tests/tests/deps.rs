@@ -23,7 +23,9 @@ use std::collections::{BTreeSet, HashSet};
 const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
     // 根：契约词汇，不依赖任何内部 crate
     ("envboard-core-api", &[]),
-    ("envboard-domain", &["envboard-core-api"]),
+    // 环境层要校验 `insecure_hosts` 的每个条目 —— host 的归一化/校验只在 rules
+    // 里有那一份实现，不在 domain 里复制第二份 label 规则。两者都是纯逻辑，也不成环。
+    ("envboard-domain", &["envboard-core-api", "envboard-rules"]),
     ("envboard-rules", &["envboard-core-api"]),
     (
         "envboard-core-fake",

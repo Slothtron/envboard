@@ -22,10 +22,17 @@ use common::{read_text, report, walk_relative, workspace_root};
 const ADAPTER_DIR: &str = "adapters/mitmproxy";
 const INJECTOR_NAME: &str = "envboard_mitmproxy.py";
 
-/// 允许 import 的模块：标准库白名单（本脚本只用这些）+ 宿主。
+/// 允许 import 的模块。
+///
+/// 分两类：**标准库**，以及**宿主运行时自带的东西** —— `mitmproxy` 及其自己的依赖
+/// （`OpenSSL` 随 mitmproxy 一起装，注入器被物化到宿主解释器旁边，所以它在运行时可用）。
+/// 判据要守住的是"单文件 + 不引本仓其他代码 + 不额外引入宿主之外的第三方"；
+/// 想加新 import 就必须动这张白名单，是一次需要说明理由的动作。
 const ALLOWED_IMPORTS: &[&str] = &[
+    // 标准库
     "argparse",
     "dataclasses",
+    "hashlib",
     "ipaddress",
     "json",
     "os",
@@ -34,7 +41,9 @@ const ALLOWED_IMPORTS: &[&str] = &[
     "threading",
     "time",
     "typing",
+    // 宿主运行时（mitmproxy 及其自带依赖）
     "mitmproxy",
+    "OpenSSL",
 ];
 
 /// 被点名的越界模块（出现在这里时错误消息更直白）。

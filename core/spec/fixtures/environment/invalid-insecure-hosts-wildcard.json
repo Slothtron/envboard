@@ -1,0 +1,18 @@
+{
+  "capability": "environment.validate",
+  "description": "拒绝通配符 `*`：放宽校验必须逐条点名，错误路径精确到下标",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "insecure_hosts": [
+      "*.kdocs.cn"
+    ]
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.insecure_hosts.0"
+  }
+}

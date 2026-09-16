@@ -28,19 +28,16 @@ use crate::ca;
 use crate::injector;
 use crate::python::{self, PythonInterpreter};
 
-/// mitmproxy 实现特有的禁令：这些键会改变进程拓扑或加载第三方代码，
-/// 属于"把 core 换成别的东西"（契约见 `core/spec/capabilities.md` 的 ProxyCore 章节）。
-const MITMPROXY_DENIED_OPTIONS: &[&str] = &["mode", "upstream", "scripts", "web", "proxyauth"];
-
 pub struct MitmproxyCoreConfig {
     /// `mitmdump` 路径（默认按 PATH 解析）。core 可执行文件与解释器路径都不写死。
     pub core_bin: PathBuf,
     /// 显式配置的解释器；`None` 时按 [`python::discover`] 的规则探测。
     pub python: Option<PathBuf>,
-    /// 注入器物化目录（`<state_dir>/agent/`）。
+    /// 注入器物化目录（`<state_dir>/agent/`）。每个环境一个子目录。
+    ///
+    /// 注入器读的 `config.json`、规则软链与它自己都在 `<agent_dir>/<env>/` 里；
+    /// 轮询间隔与注解开关也在那份配置里，不再经 `--set` 下发。
     pub agent_dir: PathBuf,
-    pub reload_interval_secs: u64,
-    pub annotate_flow: bool,
     /// 等状态文件出现的上限（秒）。超时即判定启动失败。
     pub startup_timeout_secs: u64,
 }
@@ -175,8 +172,16 @@ impl MitmproxyCore {
 
     /// 按启动契约拼参数。
     ///
-    /// **全部经命令行，不经环境变量**：DSH 会清洗子进程环境里的凭据形状变量（本工作区
+    /// **只有 mitmproxy 自己的选项**：`-s` 指到本环境的注入器，`confdir` 指向共享目录，
+    /// 监听地址由环境决定，`proxyauth` 只在启用了代理鉴权时下发。
+    ///
+    /// 其余一切（状态文件、规则绑定、放行域名清单、轮询间隔、注解开关）都走
+    /// `<自身目录>/config.json` —— 那条通道让它们能**热生效**，而且没有"用户可控的
+    /// `--set`"这种能把契约绕过去的入口。
+    ///
+    /// 凭据经命令行而不是环境变量：DSH 会清洗子进程环境里的凭据形状变量（本工作区
     /// 已确立的规矩），而且命令行更可观测、更好复现。
+    /// 代价是 `ps` 能看到 `proxyauth=…`（记录进账本前会脱敏，见 `redact_cmdline`）。
     pub fn build_args(&self, spec: &InstanceSpec, injector_path: &Path) -> Vec<String> {
         let mut args: Vec<String> = vec!["-s".into(), injector_path.display().to_string()];
         let mut set = |key: &str, value: String| {
@@ -187,59 +192,10 @@ impl MitmproxyCore {
         set("confdir", spec.shared_state_dir.display().to_string());
         set("listen_host", spec.listen.host.to_string());
         set("listen_port", spec.listen.port.to_string());
-        set(
-            "envboard_rules",
-            spec.rules
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-        );
-        set(
-            "envboard_status_file",
-            spec.status_file.display().to_string(),
-        );
-        set(
-            "envboard_reload_interval",
-            self.config.reload_interval_secs.to_string(),
-        );
-        set(
-            "envboard_annotate_flow",
-            self.config.annotate_flow.to_string(),
-        );
-        set("envboard_env_name", spec.env.clone());
-        // 代理访问鉴权：凭据只来自环境的 `proxy_auth` 字段（options 里的 `proxyauth`
-        // 被 denylist 拒绝）。同样走命令行而不是环境变量。
-        // 契约回显自检的输入：让注入器逐项核对"管理器下发的选项"有没有被宿主接受。
-        // 拼错的 `--set` 会被 mitmproxy 静默忽略，只有让注入器去 ctx.options 里查才知道。
-        let mut expected = spec.options.clone();
-        if let Some(proxy_auth) = &spec.proxy_auth {
-            set("proxyauth", proxy_auth.clone());
-            expected.insert("proxyauth".into(), proxy_auth.clone());
-        }
-        if let Ok(expect) = serde_json::to_string(&expected) {
-            set("envboard_expect", expect);
-        }
-        // 用户透传的 core 特有选项（已过 denylist）
-        for (key, value) in &spec.options {
-            set(key, value.clone());
+        if let Some(proxyauth) = spec.proxyauth() {
+            set("proxyauth", proxyauth);
         }
         args
-    }
-
-    fn check_options(&self, options: &BTreeMap<String, String>) -> Result<(), Error> {
-        envboard_core_api::validate_options(options)?;
-        for key in options.keys() {
-            if MITMPROXY_DENIED_OPTIONS
-                .iter()
-                .any(|denied| key == denied || key.starts_with("web"))
-            {
-                return Err(Error::invalid_config(
-                    format!("instance.options.{key}"),
-                    format!("option {key:?} would change the process topology and is denied"),
-                ));
-            }
-        }
-        Ok(())
     }
 
     async fn wait_for_status(&self, path: &Path) -> Result<StatusReport, Error> {
@@ -352,7 +308,8 @@ impl ProxyCore for MitmproxyCore {
             listen: true,
             dynamic_certs: true,
             rewrite_upstream: true,
-            per_instance_options: true,
+            // 按域名放宽上游证书校验：注入器在 `tls_start_server` 里按 SNI 精确判定。
+            per_domain_insecure: true,
             shared_ca: true,
             flow_annotation: true,
             // 注入器如实回显规则条数与选项核对结论 → 管理器的比对逻辑全部可用。
@@ -363,11 +320,10 @@ impl ProxyCore for MitmproxyCore {
     }
 
     async fn start(&self, spec: InstanceSpec) -> Result<InstanceHandle, Error> {
-        spec.validate()?;
-        self.check_options(&spec.options)?;
-
         let interpreter = self.interpreter()?;
-        let injector_path = injector::materialize(&self.config.agent_dir)?;
+        // 每个环境一个目录：注入器、`config.json` 与规则软链都在一起，
+        // 于是"注入器只认自己目录旁边的固定名"这条纪律才落得下来。
+        let injector_path = injector::materialize(&spec.agent_dir)?;
         // 顺序要紧：CA 必须在**任何实例被拉起之前**就绪。
         let ca_info = ca::ensure(
             &interpreter.path,
@@ -462,13 +418,16 @@ impl ProxyCore for MitmproxyCore {
             return Err(error);
         }
 
-        let identity = read_identity(pid).unwrap_or(ProcessIdentity {
-            pid,
-            starttime: 0,
-            cmdline: std::iter::once(self.resolved_core_bin().display().to_string())
-                .chain(args.iter().cloned())
-                .collect(),
-        });
+        let identity = read_identity(pid)
+            .unwrap_or(ProcessIdentity {
+                pid,
+                starttime: 0,
+                cmdline: std::iter::once(self.resolved_core_bin().display().to_string())
+                    .chain(args.iter().cloned())
+                    .collect(),
+            })
+            // 记录之前脱敏：账本是长期留存的产物，凭据没有理由被复制进去。
+            .redacted();
 
         let handle = InstanceHandle {
             env: spec.env.clone(),
@@ -687,11 +646,15 @@ fn read_identity(pid: i32) -> Option<ProcessIdentity> {
         })
         .unwrap_or_default();
 
-    Some(ProcessIdentity {
-        pid,
-        starttime,
-        cmdline,
-    })
+    // 记录之前脱敏：`--set proxyauth=user:password` 的值换成 `***`。
+    Some(
+        ProcessIdentity {
+            pid,
+            starttime,
+            cmdline,
+        }
+        .redacted(),
+    )
 }
 
 /// 便捷构造：从 PATH 找 `mitmdump`。
@@ -716,8 +679,6 @@ mod tests {
                 core_bin: "mitmdump".into(),
                 python: None,
                 agent_dir,
-                reload_interval_secs: 5,
-                annotate_flow: true,
                 startup_timeout_secs: 2,
             },
             Arc::new(envboard_core_api::ManualClock::new(1_000)),
@@ -725,111 +686,76 @@ mod tests {
         .unwrap()
     }
 
-    fn spec(options: &[(&str, &str)]) -> InstanceSpec {
+    fn spec() -> InstanceSpec {
         InstanceSpec {
             env: "beta".into(),
             listen: Listen::new(DEFAULT_LISTEN_HOST, 16_301),
-            rules: Some(PathBuf::from("/tmp/beta.rules")),
+            agent_dir: PathBuf::from("/tmp/agent/beta"),
             status_file: PathBuf::from("/tmp/runtime/beta.status.json"),
             shared_state_dir: PathBuf::from("/tmp/shared/confdir"),
             runtime_dir: PathBuf::from("/tmp/runtime"),
             log_dir: None,
-            options: options
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                .collect(),
-            proxy_auth: None,
+            insecure_hosts: vec!["365.kdocs.cn".into()],
+            proxy_user: None,
+            proxy_password: None,
         }
     }
 
     #[test]
-    fn args_follow_the_launch_contract() {
+    fn args_carry_only_the_launch_contract() {
         let core = core(std::env::temp_dir());
-        let args = core.build_args(
-            &spec(&[("ssl_insecure", "true")]),
-            Path::new("/tmp/agent/inj.py"),
-        );
+        let args = core.build_args(&spec(), Path::new("/tmp/agent/beta/inj.py"));
         let joined = args.join(" ");
 
         assert!(
-            joined.contains("-s /tmp/agent/inj.py"),
+            joined.contains("-s /tmp/agent/beta/inj.py"),
             "injector must be passed via -s: {joined}"
         );
         for expected in [
             "confdir=/tmp/shared/confdir",
             "listen_host=127.0.0.1",
             "listen_port=16301",
-            "envboard_rules=/tmp/beta.rules",
-            "envboard_status_file=/tmp/runtime/beta.status.json",
-            "envboard_reload_interval=5",
-            "envboard_annotate_flow=true",
-            "envboard_env_name=beta",
-            "ssl_insecure=true",
         ] {
             assert!(
                 joined.contains(expected),
                 "missing {expected:?} in: {joined}"
             );
         }
-        assert!(
-            joined.contains("envboard_expect="),
-            "the contract-echo self-check input must be passed"
-        );
+        // 配置通道换成了 config.json：这些 envboard_* 键**必须**从命令行消失，
+        // 否则就又有两个真相（命令行一份、配置文件一份）。
+        for gone in [
+            "envboard_rules",
+            "envboard_status_file",
+            "envboard_reload_interval",
+            "envboard_annotate_flow",
+            "envboard_env_name",
+            "envboard_expect",
+        ] {
+            assert!(!joined.contains(gone), "{gone} must be gone from: {joined}");
+        }
+        // 没有用户可控的 --set
+        assert!(!joined.contains("ssl_insecure"), "{joined}");
+        assert_eq!(args.iter().filter(|arg| *arg == "--set").count(), 3);
     }
 
     #[test]
-    fn proxy_auth_is_passed_and_echoed() {
+    fn proxy_auth_is_passed_as_proxyauth() {
         let core = core(std::env::temp_dir());
-        let mut s = spec(&[]);
-        s.proxy_auth = Some("alice:s3cret".into());
-        let args = core.build_args(&s, Path::new("/tmp/agent/inj.py"));
+        let mut spec = spec();
+        spec.proxy_user = Some("alice".into());
+        spec.proxy_password = Some("s3cret".into());
+        let args = core.build_args(&spec, Path::new("/tmp/agent/beta/inj.py"));
         let joined = args.join(" ");
         assert!(
             joined.contains("proxyauth=alice:s3cret"),
-            "proxyauth must be set from spec.proxy_auth: {joined}"
+            "proxyauth must be assembled from the two fields: {joined}"
         );
-        // 回显自检也要包含它：否则 mitmproxy 静默丢弃 proxyauth 时我们查不出来
-        let expect = args
-            .iter()
-            .find(|arg| arg.starts_with("envboard_expect="))
-            .expect("expect must be present");
-        assert!(
-            expect.contains(r#"proxyauth":"alice:s3cret"#),
-            "expect must include proxyauth: {expect}"
-        );
-    }
-
-    #[test]
-    fn proxyauth_in_options_is_denied() {
-        let core = core(std::env::temp_dir());
-        let error = core
-            .check_options(&BTreeMap::from([(
-                "proxyauth".to_string(),
-                "a:b".to_string(),
-            )]))
-            .expect_err("proxyauth is manager-owned and cannot be overridden");
-        assert_eq!(error.field.as_deref(), Some("instance.options.proxyauth"));
-    }
-
-    #[test]
-    fn options_denylist_rejects_topology_and_manager_keys() {
-        let core = core(std::env::temp_dir());
-        for key in [
-            "mode",
-            "scripts",
-            "upstream",
-            "web_port",
-            "listen_port",
-            "confdir",
-        ] {
-            let error = core.check_options(&BTreeMap::from([(key.to_string(), "x".to_string())]));
-            assert!(error.is_err(), "{key} must be denied");
-        }
-        // 逃生门仍然开着
-        assert!(
-            core.check_options(&BTreeMap::from([("ssl_insecure".into(), "true".into())]))
-                .is_ok()
-        );
+        // 只给一边是非法状态（domain 层已拒绝），这里不应拼出半个凭据
+        spec.proxy_password = None;
+        let joined = core
+            .build_args(&spec, Path::new("/tmp/agent/beta/inj.py"))
+            .join(" ");
+        assert!(!joined.contains("proxyauth"), "{joined}");
     }
 
     #[test]
@@ -840,6 +766,7 @@ mod tests {
             "mitmdump instances are real processes"
         );
         assert!(capabilities.reports_rules_count);
+        assert!(capabilities.per_domain_insecure);
         assert!(capabilities.rewrite_upstream);
         assert!(capabilities.shared_ca);
     }

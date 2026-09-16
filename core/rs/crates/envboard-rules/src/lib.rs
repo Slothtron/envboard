@@ -7,10 +7,15 @@
 //! 纯逻辑：不碰文件系统、不碰网络（原子落盘与 0600 权限由 `envboard-manager` 负责）。
 
 pub mod host;
+pub mod insecure;
 pub mod parse;
 pub mod render;
 
 pub use host::{normalize_host, validate_host, validate_normalized_host};
+pub use insecure::{
+    INSECURE_HOSTS_MAX, has_wildcard, matches as insecure_matches, normalize_insecure_host,
+    normalize_insecure_hosts, validate_insecure_host,
+};
 pub use parse::{HostConflict, RulesImport, SkipReason, SkippedItem, parse_hosts_text};
 pub use render::{ENTRIES_FIELD, render_rules};
 

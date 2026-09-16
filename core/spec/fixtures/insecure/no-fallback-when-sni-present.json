@@ -1,0 +1,15 @@
+{
+  "capability": "insecure.hosts",
+  "description": "SNI 存在但不在清单里**不**退回地址（退回会让命名失配变成静默放行）",
+  "input": {
+    "hosts": [
+      "10.13.34.11"
+    ],
+    "sni": "365.kdocs.cn",
+    "address": "10.13.34.11"
+  },
+  "expect": {
+    "ok": true,
+    "match": false
+  }
+}

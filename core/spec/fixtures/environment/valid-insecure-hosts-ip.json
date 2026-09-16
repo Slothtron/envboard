@@ -1,0 +1,19 @@
+{
+  "capability": "environment.validate",
+  "description": "清单允许 IP 字面量：客户端不发 SNI 时用它做命中判定（规则把域名改写到内网 IP 的常见形态）",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "insecure_hosts": [
+      "10.13.34.11"
+    ]
+  },
+  "expect": {
+    "ok": true,
+    "insecure_hosts": [
+      "10.13.34.11"
+    ]
+  }
+}

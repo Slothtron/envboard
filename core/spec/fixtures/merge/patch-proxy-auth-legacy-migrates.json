@@ -1,0 +1,23 @@
+{
+  "capability": "environment.merge",
+  "description": "老客户端整体替换凭据（patch 给旧形状 proxy_auth）：base 上的新字段先被清掉再迁移，不构成『两套形状同时给出』",
+  "input": {
+    "base": {
+      "name": "auth",
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 16600
+      },
+      "proxy_user": "alice",
+      "proxy_password": "s3cret"
+    },
+    "patch": {
+      "proxy_auth": "bob:hunter2"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "proxy_user": "bob",
+    "proxy_password": "hunter2"
+  }
+}

@@ -15,13 +15,13 @@
 | 能力 | 状态 |
 |---|---|
 | 环境 CRUD / **编辑** / 启停 / 显式重分配端口 / 规则绑定与热重载 | ✅ |
-| 每实例选项（`ssl_insecure`、`ssl_verify_upstream_trusted_ca` …）**持久化在环境上**，CLI 与工作台都能改 | ✅ |
+| **按域名放宽上游证书校验**（`insecure_hosts`：精确匹配、运行中改也**热生效**，其余域名一律严格校验） | ✅ |
 | 端口自动分配（区间内随机试绑，撞了就重试一次） | ✅ |
 | 按 host 改写上连目标（真 mitmproxy `server_connect`） | ✅ |
 | 共享 CA（所有实例一张，客户端只装一次） | ✅ |
 | 工作台（环境列表 / 启停 / 编辑 / 规则导入与载入 / 跨环境对比 / 日志 / SSE） | ✅ |
 | 工作台 URL token 鉴权（默认启用、自动生成；header 优先，`?token=` 等效） | ✅ |
-| 代理访问鉴权（环境 `proxy_auth` 字段 → mitmproxy `proxyauth`，Basic 认证） | ✅ |
+| 代理访问鉴权（环境 `proxy_user` / `proxy_password` → mitmproxy `proxyauth`，Basic 认证） | ✅ |
 | 对外服务开关（环境监听 `0.0.0.0`，默认 `127.0.0.1`） | ✅ |
 | CLI（本地 API 的瘦客户端；无常驻实例时自己驱动管理器） | ✅ |
 | 期望状态 reconcile（崩溃/重启后自动恢复） | ✅ |
@@ -60,48 +60,34 @@ envboard --state-dir ~/.envboard compare api.example.com   # 跨环境静态对�
 ### 改一个已经建好的环境
 
 建的时候没绑规则、端口想换一个、描述写错了 —— 都不必删了重建。工作台每行有「编辑」
-（同一个表单切到编辑模式，可改名字 / 端口 / 规则绑定 / 实例选项 / 描述），命令行是
-`env edit`：
+（同一个表单切到编辑模式），命令行是 `env edit`：
 
 ```bash
-envboard env edit beta --rules beta            # 补绑规则（停止状态）
-envboard env edit beta --port 16302            # 换端口
+envboard env edit beta --rules beta            # 补绑规则（停不停机都行：绑定是热的）
+envboard env edit beta --port 16302            # 换端口（需停止）
 envboard env edit beta --rename gamma          # 改名（期望状态、端口归属一起搬过去）
-envboard env edit beta --no-rules              # 解绑，回到"不覆盖"
+envboard env edit beta --no-rules              # 解绑，回到「不覆盖」
 envboard env edit beta --description "灰度 v2" # 只改描述
-envboard env edit beta --option ssl_insecure=true                 # 透传给 core 的选项
-envboard env edit beta --option ssl_insecure=true --option block_global=false
-envboard env edit beta --no-options            # 清空全部选项（整体替换，不是逐键合并）
 envboard rules show beta                        # 改规则文件前先取回原文，免得盲覆盖
 ```
 
-`--option K=V` 也可以在建环境时直接给：`envboard env add beta --option ssl_insecure=true`。
-选项**持久化在环境上**，启动与崩溃恢复（reconcile）都从它取值 —— 常驻工作台下也带得上，
-不需要"先停工作台再用直连模式启动"。
+**没有**「任意 core 选项」的开关：环境只认一等字段。按域名放宽上游证书校验
+（`insecure_hosts`）与代理凭据的入口都在工作台的「配置」表单里 —— 它们是安全控制，
+做成「随便填个键值对」的文本框会让「配置说开了、实例其实没收到」这种分叉无从排除。
 
-工作台「配置」表单里是同一份配置的两个入口（「概览」会显示当前生效值）：
+四条规则（服务端裁决，工作台与 CLI 只是同一份语义的两个面）：
 
-- **显式开关**：目前只做了 `ssl_insecure`（跳过上游证书校验）一个 —— 它是布尔选项里
-  语义最确定、最常用的一项，用勾选框比让人手写 `K=V` 更不容易错。开关是该项**唯一**的
-  编辑入口（文本框里重复写会报字段错误，避免同一份配置两个真相）；
-- **「其他实例选项」文本框**：上面开关之外的 core 选项，每行一个 `K=V`
-  （如 `ssl_verify_upstream_trusted_ca=/path/ca.pem`）。
-
-加第二个开关：`assets/index.html` 加一块控件，`assets/app.js` 的 `OPTION_SWITCHES` 加一条，
-键名两边一致即可（`formPayload` / `startEdit` / `syncEditLock` 会自动带上它）。
-
-三条规则（服务端裁决，工作台与 CLI 只是同一份语义的两个面）：
-
-- **描述随时可改**，改动不会重启实例；
-- **规则文件的内容热重载** —— 导入同名文件覆盖即可，注入器按 mtime 重读，不必重启；
-- **改名 / 换端口 / 换绑定 / 换选项必须先停止**。实例启动时才固定监听端口、规则文件路径
-  与 `--set` 选项，运行中改这几项会让"配置说绑了 A、实例还按 B 干活"，所以服务端返回
-  `conflict` 并在消息里说明原因（工作台会把这些输入框锁住，只放开描述）。
-
-选项的键由 core 侧同一张 denylist 裁决（管理器自有键如 `listen_port` / `confdir`、
-会改变进程拓扑或加载第三方代码的键如 `mode` / `scripts` / `web*`、以及 `envboard_`
-前缀）；命中时**写入即失败**，错误路径是 `environment.options.<key>`，不会留下一份
-启动时才爆炸的坏配置。
+- **描述、`insecure_hosts`、规则绑定随时可改** —— 都是热的：`insecure_hosts` 与绑定写进
+  每个环境自己的 `config.json` / 固定名软链，注入器按轮询间隔（默认 5s）重读，
+  所以运行中改**不需要重启**；
+- **规则文件的内容热重载** —— 导入同名规则覆盖即可，注入器按目标文件的
+  `(mtime, size)` 重读；
+- **改名 / 换端口 / 换代理凭据必须先停止**。实例在启动时才固定监听端口与
+  `--set proxyauth=…`，运行中改这几项会让「配置说换了、实例还按旧的干活」，
+  所以服务端返回 `conflict` 并在消息里说明原因；
+- **绑定一个不存在的规则名会被拒绝**（`environment.rules`）。在新语义下「规则缺失」不再让
+  启动失败，而是**不覆盖任何域名** —— 于是绑定一个不存在的名字会变成一次静默失效，
+  宁可在写入时就拒绝。
 
 没有 mitmproxy 的机器可以用 `--core fake` 跑通管理器与全部测试（只监听端口、不改写）。
 
@@ -117,7 +103,7 @@ envboard rules show beta                        # 改规则文件前先取回原
 | `--log-dir` | `<state_dir>/logs` | 实例日志目录。子进程的 stdout/stderr **直接写** `<env>.log`（没有管道、没有读线程），所以"没人读管道 → 管道写满 → 子进程阻塞 → 代理挂住"这条路径不存在；日志跨重启留存 |
 | `--no-log-file` | 关 | 不落盘：日志只留在内存的有界环形缓冲里（随实例结束消失）。磁盘零写入，代价是回到"必须持续把管道读走"的形态 |
 | `--max-log-bytes` | 8 MiB | 单环境日志文件上限，超过就 copytruncate 轮转（保留一份 `.1`）。`0` = 不轮转 |
-| `--reload-interval` | 5s | 注入器检查规则文件 mtime 的间隔 |
+| `--reload-interval` | 5s | 注入器轮询 `config.json` 与规则目标的间隔（写进每个环境的 `config.json`；收敛窗口也按它算） |
 | `--api` / `--token` | 自动发现 | 本地 API 地址与令牌。发现顺序：`--api` → `<state_dir>/runtime/api.json`（含工作台写下的 token）→ 默认端口，**最后这一步只在没显式给 `--state-dir` 时才走** —— 否则 `--state-dir /tmp/x` 会被另一个状态目录的常驻实例接管 |
 | `web --listen` | `127.0.0.1:8900` | 工作台监听地址 |
 | `web --token` | 自动生成 | 显式指定工作台访问令牌；不指定时**默认启用鉴权并自动生成**（128 bit 随机值）。与 `--without-token` 互斥 |
@@ -134,14 +120,17 @@ envboard rules show beta                        # 改规则文件前先取回原
   之后所有请求走 header。生成的 token 同时写入
   `<state_dir>/runtime/api.json`（0600），CLI 瘦客户端自动带上，无需手抄。
   注意 `?token=` 会出现在访问日志与浏览器历史里，API 调用请优先用 header。`/app.css` 与 `/app.js` 是内嵌静态资产（不含数据），豁免 token 检查 —— 浏览器拉取子资源时带不了凭据，不豁免开 token 必白屏。
-- **代理访问鉴权**：环境新增 `proxy_auth` 字段（`user:password`，恰好一个冒号、
-  两段非空、无空白/控制字符、总长 ≤128；`null` = 不启用）。启用后实例以
-  `--set proxyauth=<user:password>` 启动，客户端凭据才能连代理（否则 407）；
-  凭据明文存于状态目录（文件 0600），
-  视图与日志只暴露"是否启用"，不回显值本身；运行中修改要先停止实例。
+- **代理访问鉴权**：环境有两个字段 `proxy_user` / `proxy_password`，**同生共死**
+  （只有一边 → `invalid_config`，错误指向缺失的那一边）。每段非空、不含 `:`、空白或
+  控制字符（`:` 会让 mitmproxy `proxyauth` 的 `split(":")` 歧义），`proxy_user` ≤64、
+  `proxy_password` ≤128。启用后实例以 `--set proxyauth=<user>:<password>` 启动，
+  客户端凭据才能连代理（否则 407）。凭据明文只落在两处：0600 的状态文件，以及实例的
+  启动参数 —— **视图 / 日志 / SSE 只暴露「是否启用」布尔**；记录进程身份时 cmdline 里的
+  凭据值先脱敏成 `***`。运行中修改要先停止实例；工作台表单**不回显**已保存的凭据
+  （看不到 = 不覆盖，要改就填两个新的）。
 - **对外服务**：环境监听默认 `127.0.0.1`；工作台表单的「对外服务」开关把
-  `listen.host` 换成 `0.0.0.0`（也可 PATCH `listen` 显式指定）。勾选而未启用
-  `proxy_auth` 时表单会给警示 —— 代理暴露给局域网后任何能连通的机器都能借它发请求。
+  `listen.host` 换成 `0.0.0.0`（也可 PATCH `listen` 显式指定）。勾选而未填代理凭据时
+  表单会给警示 —— 代理暴露给局域网后任何能连通的机器都能借它发请求。
 
 ### HTTP 端点
 
@@ -158,7 +147,7 @@ envboard rules show beta                        # 改规则文件前先取回原
 | GET | `/api/environments` | 环境列表（工作台视图对象数组） |
 | POST | `/api/environments` | 建环境（`name` 必填；`listen.port` 缺省 = 自动分配） |
 | GET | `/api/environments/:name` | 单环境详情 |
-| PATCH | `/api/environments/:name` | 改环境（未提及字段不动；`null` 清空；运行中限描述） |
+| PATCH | `/api/environments/:name` | 改环境（未提及字段不动；`null` 清空；运行中允许描述 / `insecure_hosts` / 规则绑定） |
 | DELETE | `/api/environments/:name` | 删环境（先停止） |
 | POST | `/api/environments/:name/start` | 启动实例（期望状态置 running） |
 | POST | `/api/environments/:name/stop` | 停止实例 |
@@ -177,7 +166,7 @@ envboard rules show beta                        # 改规则文件前先取回原
 ## 架构
 
 ```
-core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、58 个 golden fixture
+core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、68 个 golden fixture
 core/rs/crates/
   envboard-core-api   ProxyCore trait、实例契约、错误码、端口（时钟/日志）  ← 根，无内部依赖
   envboard-domain     环境校验/合并、端口选择、reconcile 决策              ← 纯逻辑
@@ -187,9 +176,9 @@ core/rs/crates/
   envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
   envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
   envboard-cli        envboard 二进制
-  envboard-contract-tests  消费全部 58 个契约 fixture（只有测试目标）
+  envboard-contract-tests  消费全部 68 个契约 fixture（只有测试目标）
   envboard-policy-tests    工程门禁本身（只有测试目标，不进发布物）
-adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
+adapters/mitmproxy/   单文件注入器（只用标准库与宿主自带的依赖；被二进制 include_str! 内嵌）
 scripts/systemd/      部署工件（用户级 unit）
 ```
 
@@ -198,8 +187,21 @@ scripts/systemd/      部署工件（用户级 unit）
 （所以换 core 不必动它）。`adapters/` 只做宿主接线，不含业务逻辑。
 `envboard-policy-tests` 是例外的一类 —— 它是**开发工具**，谁都不许依赖它，也不进发布物。
 
-注入器只做三件事：读+解析规则、在 `server_connect` 里改写上连目标、回写状态文件。
-它不知道自己是哪个环境，也不碰状态目录 —— 所以随时可以丢掉。
+每个环境有自己的 agent 目录，注入器、配置与规则软链都在里面：
+
+```
+<state_dir>/agent/<env>/
+├── envboard_mitmproxy.py   注入器（构建期内嵌进二进制，启动时物化）
+├── config.json             ★ 管理器 → 注入器的唯一配置通道（含 insecure_hosts，热重载）
+└── envboard.rules          固定名软链 → <state_dir>/rules/<name>.rules（不存在 = 不覆盖）
+```
+
+注入器只做四件事：读 `config.json`、读规则软链、在 `server_connect` 里改写上连目标、
+按域名放宽上游证书校验（`tls_start_server`），外加回写状态文件。它只认**自己目录旁边的
+固定路径**，所以不需要任何「配置在哪」的参数 —— 也因此配置与绑定都能靠「换文件/换软链 +
+轮询」热生效。`config.json` 的字节是环境定义的确定性函数（不含时间戳）：管理器据此做
+「要不要重写」与「期望哈希」的判定，而实例回执的 `config_hash` 就是「这份配置到底生效了
+没有」的权威判据（不等但在收敛窗口内算收敛中，超窗才算 `config_mismatch`）。
 
 ## 验证
 
@@ -218,10 +220,10 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 |---|---|---|---|
 | `policy` | `cargo test -p envboard-policy-tests` | 见下面「工具链纪律」与「文本自包含」两节 | 只有 cargo |
 | `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测（端口分配、reconcile、锁、健康判定含僵尸判活、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑：热改 vs 必须停机**） | 只有 cargo |
-| `contract` | `cargo test -p envboard-contract-tests` | 58 个 fixture 的形状与语义都由实现消费；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 | 只有 cargo |
+| `contract` | `cargo test -p envboard-contract-tests` | 68 个 fixture 的形状与语义都由实现消费（含 `rules.parse` 与 `insecure.hosts`）；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 | 只有 cargo |
 | `artifact` | `cargo test -p envboard-cli --test artifact` | 发布工件清单齐全、v1 残留为零、二进制里真的内嵌了注入器 | 只有 cargo |
 | `adapter` | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） | 适配器宿主的解释器 |
-| `live` | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** | mitmdump + 网络 |
+| `live` | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、**按域名放宽上游校验（含运行中热改，以及名单外域名仍然 502 的对照）**、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** | mitmdump + 网络 |
 | `live` | 人工走查浏览器层（真浏览器 + `getComputedStyle` 对齐令牌） | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训）；转录是本机工作材料，不入库 | 真浏览器 |
 
 解释器缺失时默认层**响亮失败**并给出两条出路（装适配器宿主，或跑 `verify.sh rust`），
@@ -241,7 +243,7 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 |---|---|
 | 文件面 | 不许有 Python / Node / TS 的源码与清单文件（`*.py`、`pyproject.toml`、`package.json`、`node_modules/`、`*.ts`、打包器配置…）；`node_modules/` 与 `__pycache__/` 单独判存在性 |
 | 调用面 | 可执行面（`ci/*.sh`、`*.service`、CI 描述文件）不许出现 `npm` / `pip` / `mypy` / `pytest` 等命令，也不许 `<解释器> -m <工具>`；被执行的仓库内脚本只允许是适配器脚本 |
-| 反向守卫 | `adapters/` 下仍是**单文件**、纯标准库 + mitmproxy 的注入器 |
+| 反向守卫 | `adapters/` 下仍是**单文件**注入器，import 只用标准库与宿主自带依赖的白名单 |
 
 为什么这么较真：门禁必须与产品同一条工具链、同一个类型系统，否则就是"用另一套语言维护
 这个仓库的工程纪律" —— 而那套语言的类型错误没人检查，门禁自身也会漂移。
@@ -308,15 +310,21 @@ envboard env list
   被规则覆盖的域名每个请求都会新建上连（多一次 TLS 握手）。这是"只改连到哪"的代价，
   不是缺陷；正确性不受影响。
 - **指向证书不匹配的测试机 → 上游校验失败 502**：这是 hosts 语义的必然（客户端看到的
-  域名不变，所以证书也按那个域名校验）。两条解法，按安全性与代价取舍：
-  - **保留校验**：把目标机证书链上的 CA 交给 mitmproxy。工具链的信任库是自带的
-    certifi（**不是操作系统信任库**），所以 `--option ssl_verify_upstream_trusted_ca=…`
-    是唯一入口，且该选项是**替换**默认库而不是追加 —— PEM 必须是
-    `certifi 的 cacert.pem + 你的内部根 CA` 拼起来（只给内部 CA 会让所有公网域名一起 502）。
-    目标机若只发叶子证书、不发中间证书，拼接时要把中间证书一起放进去。
-  - **放弃该环境的上游校验**：`--option ssl_insecure=true`（只建议用于内网测试环境）。
-  - 判据速查：日志里 `unable to get local issuer certificate` = 根/中间不在信任库；
-    `hostname mismatch` = 那台机器根本没有该域名的证书。
+  域名不变，所以证书也按那个域名校验）。解法是**按域名放宽**：
+  - **`insecure_hosts`**：把该域名列进环境的放行清单（工作台「配置」表单，每行一个完整
+    域名）。名单内的域名在 `tls_start_server` 里用 `VERIFY_NONE` 自建上游 context；
+    **其余域名一律严格校验**，公网域名不受影响。匹配是**完全相等**：`365.kdocs.cn` 不会
+    放行 `web.kdocs.cn`，也不会放行 `kdocs.cn.evil`；写入时**拒绝通配符** ——
+    放宽校验必须逐条点名，偷偷扩大范围比不生效更危险。清单是**热**的：运行中改，
+    注入器在轮询间隔（默认 5s）内跟上，不必重启。清单为空就是全部严格校验，
+    **没有「整个环境全关」的开关**。
+  - **想保留校验**：把目标机证书链上的 CA 拼进 mitmproxy 的信任库。工具链的信任库是自带的
+    certifi（**不是操作系统信任库**），改它需要 `ssl_verify_upstream_trusted_ca` 这类选项 ——
+    而任意选项透传通道**已经删除**，所以当前版本**没有**这条路径：要么按域名放宽，
+    要么把证书换成公开 CA 能验的。这是有意的取舍（安全控制不留在「随便填个键值对」的入口上）。
+  - 判据速查：日志里的 `unable to get local issuer certificate` 表示根/中间不在信任库 →
+    该域名需要进 `insecure_hosts`；`hostname mismatch` 表示那台机器根本没有该域名的证书
+    （进名单也救不了：名单只跳过校验，不改写 SNI）。
 - **客户端要改代理配置**（换端口即换环境）。工作台给出的那行 `export https_proxy=…`
   就是为此。
 - **`sni is None` 分支未经实测**：显式代理下 curl 总会带 SNI，构造不出该分支；目前只有
@@ -337,6 +345,6 @@ envboard env list
 - `capabilities.md` —— 能力清单、领域不变量、端口分配与生命周期语义、ProxyCore 能力矩阵
 - `rules.md` —— hosts 规则语法的 **BNF**（容错规则、跳过原因码、渲染的逐字节要求）
 - `errors.md` —— 统一错误码与健康状态表
-- `fixtures/` —— 58 个 golden case
+- `fixtures/` —— 68 个 golden case
 
 改实现之前先问"契约该不该改"；该改就改契约并同步 fixture。

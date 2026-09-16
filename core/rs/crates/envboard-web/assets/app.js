@@ -309,39 +309,21 @@ function matchesSearch(env) {
     String(env.listen.port),
     env.rules || "",
     env.description || "",
-    optionPairs(env).join(" "),
+    insecureHosts(env).join(" "),
   ].some((value) => value.toLowerCase().includes(needle));
 }
 
-/// 「实例选项」在界面上的统一写法：每项一行 `K=V`（与 CLI 的 `--option K=V` 同形）。
-function optionPairs(env) {
-  return Object.entries(env.options || {}).map(([key, value]) => `${key}=${value}`);
-}
+/// 「放宽校验域名」清单：契约里一定是数组，但视图字段缺失时按空列表处理，
+/// 别让一次字段遗漏把整块渲染打断。
+const insecureHosts = (env) => (Array.isArray(env.insecure_hosts) ? env.insecure_hosts : []);
 
-/// 有显式开关的选项键 —— 开关是它**唯一**的编辑入口（文本框里不允许再写一遍，
-/// 否则同一份配置有两个真相）。加开关：这里加一条 + index.html 加一块控件。
-const OPTION_SWITCHES = [{ key: "ssl_insecure", on: "true" }];
+/// 概览里的写法：`,` 分隔的一行（`—` = 全部严格校验）。
+const insecureHostsText = (env) => insecureHosts(env).join(", ");
 
-/// 只有明确的"开"值才算打开；未知/缺失一律按关处理（`ssl_insecure` 是布尔选项）。
-const OPTION_ON_VALUES = new Set(["true", "1", "yes", "on"]);
-
-const switchKeys = () => OPTION_SWITCHES.map((item) => item.key);
-
-/// 运行中必须锁住的控件：名字 / 端口 / 规则绑定，以及**全部**选项入口
-/// （文本框 + 每一个开关）—— 选项在启动时经 `--set` 固定，运行中改服务端会拒。
-const editableOptionFields = () => ["name", "port", "rules", "options", ...switchKeys()];
-
-function optionSwitchedOn(env, key) {
-  return OPTION_ON_VALUES.has(String((env.options || {})[key] ?? "").trim().toLowerCase());
-}
-
-/// 文本框里该显示的选项：把有开关的键摘掉（它们归开关管）。
-function manualOptionPairs(env) {
-  const owned = new Set(switchKeys());
-  return Object.entries(env.options || {})
-    .filter(([key]) => !owned.has(key))
-    .map(([key, value]) => `${key}=${value}`);
-}
+/// 运行中必须锁住的控件（契约里的**停机字段**）：名字 / 监听地址（`public` 切 host）/
+/// 代理凭据（实例启动时经 `--set proxyauth=…` 固定）。`description`、`rules` 绑定与
+/// `insecure_hosts` 是**热**字段，运行中照样可改，所以不在这里。
+const STOP_REQUIRED_FIELDS = ["name", "port", "public", "proxy_user", "proxy_password", "proxy_clear"];
 
 const visibleEnvironments = () =>
   state.environments.filter((env) => matchesFilter(env) && matchesSearch(env));
@@ -351,7 +333,15 @@ let sidebarKey = "";
 function renderSidebar(force) {
   const list = visibleEnvironments();
   const key = JSON.stringify([
-    list.map((env) => [env.name, env.health, env.listen.port, env.rules, env.rules_count, env.desired]),
+    list.map((env) => [
+      env.name,
+      env.health,
+      env.listen.port,
+      env.rules,
+      env.rules_count,
+      env.rules_missing,
+      env.desired,
+    ]),
     state.selected,
     state.filter,
     state.search,
@@ -390,9 +380,16 @@ function envItem(env) {
 
   const meta = el("div", "env-meta");
   meta.appendChild(el("span", "mono", `:${env.listen.port}`));
-  meta.appendChild(
-    el("span", "env-rules mono", env.rules ? `${env.rules} (${env.rules_count})` : "不覆盖"),
+  // 绑了规则名但绑定没生效（规则缺失）= 这个环境其实**不覆盖任何域名**。
+  // 不是错误态（健康仍是 running），但绝不能静默 —— 列表行里就得看得出来。
+  const rulesText = env.rules ? `${env.rules} (${env.rules_count})` : "不覆盖";
+  const rulesNode = el(
+    "span",
+    "env-rules mono",
+    env.rules_missing ? `${rulesText} · 规则缺失（已忽略）` : rulesText,
   );
+  if (env.rules_missing) rulesNode.classList.add("is-inert");
+  meta.appendChild(rulesNode);
   main.appendChild(meta);
   item.appendChild(main);
 
@@ -703,10 +700,21 @@ function renderOverview(env) {
   // 非回环监听 = 暴露面变大，必须被一眼看见：加个 warn 类（CSP 禁内联 style，走 CSS）
   portCell.classList.toggle("is-warning", !isLoopbackHost(env.listen.host));
   document.getElementById("ov-desired").textContent = healthLabel(env.desired);
-  document.getElementById("ov-rules").textContent = env.rules || "（不覆盖）";
+  // 规则绑定：绑了名字但绑定没生效时（规则缺失）这里必须写出来 —— 那一行看着"绑了规则"，
+  // 实际该环境不覆盖任何域名，是"看起来生效其实没有"里最坏的一种。
+  const rulesCell = document.getElementById("ov-rules");
+  const rulesMissing = Boolean(env.rules) && Boolean(env.rules_missing);
+  rulesCell.textContent = rulesMissing
+    ? `${env.rules} · 规则缺失（已忽略）`
+    : env.rules || "（不覆盖）";
+  rulesCell.classList.toggle("is-inert", rulesMissing);
   document.getElementById("ov-rules-count").textContent = env.rules ? String(env.rules_count) : "—";
-  const options = optionPairs(env);
-  document.getElementById("ov-options").textContent = options.length ? options.join(" ") : "—";
+  // 放宽校验域名：整份清单直接列出来（通常只有几条）。非空 = 有域名被放宽，标成 warn 色
+  // —— 它是安全姿态的放宽，不是错误，但必须与规则/描述这类普通单元格区分开。
+  const hostsCell = document.getElementById("ov-insecure-hosts");
+  const hosts = insecureHostsText(env);
+  hostsCell.textContent = hosts || "—";
+  hostsCell.classList.toggle("is-relaxed", Boolean(hosts));
   document.getElementById("ov-desc").textContent = env.description || "—";
   document.getElementById("ov-auth").textContent = env.proxy_auth_enabled ? "已启用" : "未启用";
   const command = document.getElementById("ov-cmd");
@@ -764,7 +772,8 @@ function renderBoundRules(env) {
         el(
           "span",
           null,
-          `读不到规则文件 ${name}：${entry.error}　建议：在「规则库」重新导入同名文件，或把绑定改成（不覆盖）。`,
+          `读不到规则文件 ${name}：${entry.error}　这份绑定当前不生效（已忽略，环境不覆盖任何域名）。` +
+            `建议：在「规则库」重新导入同名文件，或把绑定改成（不覆盖）。`,
         ),
       );
       host.replaceChildren(notice);
@@ -778,6 +787,7 @@ function renderBoundRules(env) {
     tag.appendChild(tagDot);
     tag.appendChild(el("span", "mono", name));
     head.appendChild(tag);
+    if (env.rules_missing) head.appendChild(el("span", "badge warn", "规则缺失（已忽略）"));
     head.appendChild(el("span", "rule-meta", `${entry.text.split("\n").filter(Boolean).length} 行 / ${entry.text.length} 字符`));
     head.appendChild(
       button({
@@ -1105,12 +1115,16 @@ function startEdit(env) {
   field(form, "description").value = env.description || "";
   ensureRuleOption(env.rules);
   field(form, "rules").value = env.rules || "";
-  for (const item of OPTION_SWITCHES) field(form, item.key).checked = optionSwitchedOn(env, item.key);
-  field(form, "options").value = manualOptionPairs(env).join("\n");
-  // 对外服务 = listen.host 是否非回环；凭据本身不回显（只进不出的字段），
-  // 编辑时显式发 null/值 由"输入框是否为空"决定。
+  // 放宽清单可以回显（它不是凭据），一行一个域名，与文本框的输入形态一致。
+  field(form, "insecure_hosts").value = insecureHosts(env).join("\n");
+  // 对外服务 = listen.host 是否非回环。凭据本身**永不回显** —— 服务端只回
+  // `proxy_auth_enabled` 这个布尔，所以两栏一律清空：不填 = 保持原样，
+  // 想清掉只能走下面的「清除代理鉴权」。
   field(form, "public").checked = !isLoopbackHost(env.listen.host);
-  field(form, "proxy_auth").value = "";
+  field(form, "proxy_user").value = "";
+  field(form, "proxy_password").value = "";
+  field(form, "proxy_clear").checked = false;
+  document.getElementById("env-form-proxy-clear-field").classList.remove("is-hidden");
   document.getElementById("env-form-title").textContent = `编辑环境 · ${env.name}`;
   document.getElementById("env-form-submit-text").textContent = "保存";
   document.getElementById("env-form-cancel").hidden = false;
@@ -1121,24 +1135,25 @@ function startEdit(env) {
   state.moreOpen = false;
   renderDetail(true);
   syncEditLock(env);
+  syncAuthWarning();
   field(form, "name").focus();
 }
 
-/// 运行中只允许改描述：名字 / 端口 / 规则绑定 / 实例选项都会让运行中的实例与配置对不上
-/// （实例启动时就固定了规则路径、监听端口与 `--set` 选项），服务端也会拒。界面先把这条路
-/// 封住，免得用户改了再吃一个红字。状态变了要重新同步 —— 表单还开着的时候环境可能被停掉。
+/// 运行中只锁**停机字段**（名字 / 监听地址 / 代理凭据）—— 它们的改动会让运行中的实例与
+/// 配置分叉，服务端以 `conflict` 拒绝。描述、规则绑定与放宽域名清单是**热**字段，
+/// 运行中照样可改，所以这里不锁。状态变了要重新同步 —— 表单还开着的时候环境可能被停掉。
 function syncEditLock(env) {
   const form = document.getElementById("env-form");
   const locked = env.health === "running";
-  for (const name of ["name", "port", "rules", "public", "proxy_auth", ...editableOptionFields()]) {
+  for (const name of STOP_REQUIRED_FIELDS) {
     const input = field(form, name);
     input.disabled = locked;
     input.title = locked ? "运行中不能改：先点「停止」" : "";
   }
   document.getElementById("env-form-hint").textContent = locked
-    ? `编辑 ${env.name}：实例在运行，只能改描述。改名 / 换端口 / 换绑定 / 换选项 / 改鉴权要先停止。` +
-      `（规则文件的内容是热重载的 —— 去「规则库」改那份文件，实例会自己跟上。）`
-    : `编辑 ${env.name}：改完点「保存」。规则绑定与实例选项在下次启动时生效。`;
+    ? `编辑 ${env.name}：实例在运行。描述 / 规则绑定 / 放宽校验域名可以热改（保存后几秒内生效）；` +
+      `名字 / 监听地址 / 代理鉴权是停机字段，要先停止。`
+    : `编辑 ${env.name}：改完点「保存」。规则绑定、放宽校验域名与描述热生效；名字 / 监听地址 / 代理鉴权停机生效。`;
 }
 
 function ensureRuleOption(name) {
@@ -1154,13 +1169,16 @@ function cancelEdit() {
   const form = document.getElementById("env-form");
   state.editing = null;
   form.dataset.editing = "";
-  for (const name of ["name", "port", "rules", "public", "proxy_auth", ...editableOptionFields()]) {
+  for (const name of STOP_REQUIRED_FIELDS) {
     const input = field(form, name);
     input.disabled = false;
     input.title = "";
     input.removeAttribute("aria-invalid");
   }
   form.reset();
+  // 「清除代理鉴权」只在编辑模式有意义：新建时没有已保存的凭据可清。
+  field(form, "proxy_clear").checked = false;
+  document.getElementById("env-form-proxy-clear-field").classList.add("is-hidden");
   syncAuthWarning();
   document.getElementById("env-form-title").textContent = "新建环境";
   document.getElementById("env-form-submit-text").textContent = "创建";
@@ -1169,71 +1187,53 @@ function cancelEdit() {
   document.getElementById("env-form-hint").textContent = "";
 }
 
-/// 把「实例选项」文本框折成契约里的 `options` 对象。每行一个 `K=V`，空行忽略。
+/// 把「放宽校验域名」文本框折成契约里的 `insecure_hosts` 数组。
 ///
-/// 这一层只做拆分：键合不合法（denylist、空键、非 `K=V` 行）由服务端裁决 ——
-/// 判定权在 core，前端不复制一份键表，只在服务端返回字段错误时把它标到这一栏。
-function parseOptionLines(text) {
-  const options = {};
-  for (const raw of String(text || "").split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    const index = line.indexOf("=");
-    if (index <= 0) {
-      return {
-        error: {
-          field: "environment.options",
-          message: `实例选项要写成 K=V，这一行看不出键：${line}`,
-        },
-      };
-    }
-    options[line.slice(0, index).trim()] = line.slice(index + 1).trim();
-  }
-  return { options };
+/// 只做拆分与去空白：每行一个完整域名，空行忽略，顺序保持。
+/// 合法性（通配符 / 域名形状 / 条数上限）由服务端裁决 —— 判定权在 core，
+/// 前端不复制一份域名规则，只在服务端返回字段错误时把它标到这一栏。
+/// `insecure_hosts` 是整体替换，所以这份数组**总是显式**发出去。
+function parseInsecureHosts(text) {
+  return String(text || "").split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 /// 表单 → 请求体。创建与编辑共用，差别只有三处（都写在下面，避免两份字段映射漂移）：
 ///
-/// * 编辑时 `rules` / `proxy_auth` **总是显式给值**（空选 = `null` = 不启用/清除）：
-///   PATCH 里"没给这个字段"才是"不动它"，所以想解绑或清掉凭据就必须真的把 null 发出去；
-/// * 编辑时 `options` **总是显式给值**（空 = `{}` = 清空全部选项）：`options` 是整体替换，
-///   同款理由 —— 不显式给就永远删不掉一个选项；
+/// * 编辑时 `rules` **总是显式给值**（空选 = `null` = 不覆盖）：PATCH 里"没给这个字段"
+///   才是"不动它"，所以想解绑就必须真的把 null 发出去；
+/// * `insecure_hosts` **总是显式给值**（与 `rules` / 凭据同款理由：整体替换，
+///   不显式给就永远删不掉一条）；
 /// * 编辑时端口栏留空 = 保持当前端口（不写 `listen`），创建时留空 = 自动分配。
 ///
 /// `listen` 是**整体替换**（契约如此），所以 host 与 port 要么都发、要么都不发：
 /// 对外服务开关只切 host（`0.0.0.0` ↔ `127.0.0.1`），端口沿用输入框或当前值。
 /// 创建时勾了对外服务却留空端口：自动分配是管理器的职责，契约里 `listen.port`
 /// 必填，这里直接拦下并提示 —— 与其让服务端报错，不如当场说清。
-///
-/// 选项有两个来源：**开关**（`OPTION_SWITCHES`，勾上 = 写入它规定的"开"值，不勾 = 不写这个键）
-/// 与**文本框**（其余 K=V）。同一个键不允许两处都写 —— 那是同一份配置的两个真相，
-/// 所以在文本框里出现开关键时直接报字段错误。
 function formPayload(form, editing) {
   const port = field(form, "port").value.trim();
   const rules = field(form, "rules").value;
   const publicBind = field(form, "public").checked;
-  const proxyAuth = field(form, "proxy_auth").value.trim();
   const host = publicBind ? "0.0.0.0" : "127.0.0.1";
-  const parsed = parseOptionLines(field(form, "options").value);
-  if (parsed.error) throw parsed.error;
-  const duplicated = switchKeys().filter((key) =>
-    Object.prototype.hasOwnProperty.call(parsed.options, key),
-  );
-  if (duplicated.length) {
-    throw {
-      field: "environment.options",
-      message: `${duplicated.join(" / ")} 由上面的开关控制，别在文本框里重复配置。`,
-    };
+  const proxyUser = field(form, "proxy_user").value;
+  const proxyPassword = field(form, "proxy_password").value;
+  const clearCredentials = Boolean(editing) && field(form, "proxy_clear").checked;
+  const payload = {
+    name: field(form, "name").value.trim(),
+    description: field(form, "description").value,
+    // 整体替换：总是显式给数组，空数组 = 全部恢复严格校验（与 rules / 凭据同款）。
+    insecure_hosts: parseInsecureHosts(field(form, "insecure_hosts").value),
+  };
+  if (clearCredentials) {
+    payload.proxy_user = null;
+    payload.proxy_password = null;
+  } else {
+    // 只发操作员真的填了的键：凭据不回显，没填 = 保持原样。只填一边时照样发出去，
+    // 让服务端按"同生共死"报缺失的那一边 —— 前端不复制这条校验。
+    if (proxyUser) payload.proxy_user = proxyUser;
+    if (proxyPassword) payload.proxy_password = proxyPassword;
   }
-  const options = parsed.options;
-  for (const item of OPTION_SWITCHES) {
-    if (field(form, item.key).checked) options[item.key] = item.on;
-  }
-  const payload = { name: field(form, "name").value.trim(), description: field(form, "description").value };
   if (editing) {
     payload.rules = rules || null;
-    payload.proxy_auth = proxyAuth || null;
-    payload.options = options;
     // host 没变且端口留空 → 不发 listen（免得"看起来改了其实只是原样重发"）
     const current = state.environments.find((env) => env.name === state.editing);
     const hostChanged = !current || current.listen.host !== host;
@@ -1244,8 +1244,6 @@ function formPayload(form, editing) {
     }
   } else {
     if (rules) payload.rules = rules;
-    if (Object.keys(options).length) payload.options = options;
-    if (proxyAuth) payload.proxy_auth = proxyAuth;
     if (publicBind && !port) {
       const portInput = field(form, "port");
       portInput.setAttribute("aria-invalid", "true");
@@ -1276,8 +1274,20 @@ function syncAuthWarning() {
   const form = document.getElementById("env-form");
   if (!form) return;
   const exposed = field(form, "public").checked;
-  const authed = field(form, "proxy_auth").value.trim() !== "";
-  document.getElementById("env-form-auth-warning").classList.toggle("is-hidden", !exposed || authed);
+  document
+    .getElementById("env-form-auth-warning")
+    .classList.toggle("is-hidden", !exposed || credentialsInForm());
+}
+
+/// 表单里此刻是否"有凭据"。凭据**永不回显**，所以只能这样推断：
+/// 两栏填了任意一栏 = 有；否则编辑模式下已保存的凭据仍然生效（除非勾了「清除」）。
+function credentialsInForm() {
+  const form = document.getElementById("env-form");
+  if (!form) return false;
+  if (field(form, "proxy_user").value || field(form, "proxy_password").value) return true;
+  if (field(form, "proxy_clear").checked) return false;
+  const current = state.environments.find((env) => env.name === state.editing);
+  return Boolean(current && current.proxy_auth_enabled);
 }
 
 /// 字段级错误：把出错的输入框标出来并聚焦。只丢一条 toast 的话，用户还得自己
@@ -1290,10 +1300,32 @@ function clearInvalid(form) {
   for (const node of form.querySelectorAll("[aria-invalid]")) node.removeAttribute("aria-invalid");
 }
 
+/// 服务端错误字段路径 → 表单控件名。路径一律以 `environment.` 开头。
+///
+/// * 列表项错误（`…insecure_hosts.3`）往上退一层，落到整块 textarea 上；
+/// * 表里值为 `null` 的字段**已经没有控件**（已删除的 options 透传）：返回 null，
+///   由 markInvalid 退成表单级错误 —— 静默丢弃会让提交看起来"什么也没发生"。
+const FIELD_ALIASES = { "environment.options": null };
+
+/// `environment.insecure_hosts.3` → `insecure_hosts`；`environment.proxy_user` → `proxy_user`。
+function fieldNameForPath(path) {
+  const text = String(path || "");
+  if (Object.prototype.hasOwnProperty.call(FIELD_ALIASES, text)) return FIELD_ALIASES[text];
+  const parts = text.split(".");
+  if (parts.length && /^\d+$/.test(parts[parts.length - 1])) parts.pop();
+  return parts[parts.length - 1] || null;
+}
+
 function markInvalid(form, path, message) {
-  const name = String(path).split(".").pop();
-  const input = field(form, name);
-  if (!input) return;
+  const name = fieldNameForPath(path);
+  const input = name ? field(form, name) : null;
+  if (!input) {
+    // 没有对应控件（例如服务端仍在拒绝的非空 options）：退成表单级错误。
+    const stale = form.querySelector(".form-error");
+    if (stale) stale.remove();
+    form.appendChild(el("p", "field-error form-error", message || "这一项不符合要求。"));
+    return;
+  }
   input.setAttribute("aria-invalid", "true");
   const previous = input.parentElement.querySelector(".field-error");
   if (previous) previous.remove();
@@ -1748,8 +1780,13 @@ function wire() {
     renderDetail(true);
   });
 
-  // 对外服务 × 访问鉴权的联动警示：任一变化都要重估暴露面提示。
-  for (const id of ["env-form-public", "env-form-proxy-auth"]) {
+  // 对外服务 × 代理鉴权的联动警示：任一变化都要重估暴露面提示。
+  for (const id of [
+    "env-form-public",
+    "env-form-proxy-user",
+    "env-form-proxy-password",
+    "env-form-proxy-clear",
+  ]) {
     document.getElementById(id).addEventListener("change", syncAuthWarning);
     document.getElementById(id).addEventListener("input", syncAuthWarning);
   }

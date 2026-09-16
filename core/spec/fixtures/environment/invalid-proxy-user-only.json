@@ -1,0 +1,16 @@
+{
+  "capability": "environment.validate",
+  "description": "凭据同生共死：只给用户名时错误指向**缺失**的那一边",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "proxy_user": "alice"
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.proxy_password"
+  }
+}

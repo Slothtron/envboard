@@ -1,0 +1,28 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 给 insecure_hosts = 整体替换（列表没有无歧义的『元素级合并』语义）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 16600
+      },
+      "insecure_hosts": [
+        "a.example.com",
+        "b.example.com"
+      ]
+    },
+    "patch": {
+      "insecure_hosts": [
+        "c.example.com"
+      ]
+    }
+  },
+  "expect": {
+    "ok": true,
+    "insecure_hosts": [
+      "c.example.com"
+    ]
+  }
+}
