@@ -187,6 +187,7 @@ dependencies = [
  "envboard-domain",
  "envboard-manager",
  "envboard-web",
+ "libc",
  "serde_json",
  "tokio",
 ]

@@ -18,7 +18,7 @@
 #   bash ci/verify.sh            # 默认层：policy + rust + contract + artifact + adapter
 #   bash ci/verify.sh rust       # 纯 Rust 子集（policy + rust；迁移期仍需要解释器）
 #   bash ci/verify.sh live       # 实机层（需要宿主）
-#   PYTHON=... bash ci/verify.sh # 指定适配器宿主的解释器
+#   PYTHON=... bash ci/verify.sh # 指定适配器宿主的解释器（转发为 ENVBOARD_PYTHON）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -125,7 +125,9 @@ step_artifact() {
 # 它需要解释器，而且解释器缺失时要**响亮失败**，不静默跳过。
 # --------------------------------------------------------------------------- #
 
-step_dual() { cargo test -p envboard-rules --test dual_impl "${LOCKED[@]}" -- --ignored; }
+# 把本脚本探测到的解释器**转发**给对拍测试（`ENVBOARD_PYTHON` 是那个测试认的开关），
+# 这样 `PYTHON=<路径> bash ci/verify.sh` 一个旋钮就同时管住探测与测试。
+step_dual() { ENVBOARD_PYTHON="$PYTHON" cargo test -p envboard-rules --test dual_impl "${LOCKED[@]}" -- --ignored; }
 
 step_adapter() {
   require_interpreter || return 0
@@ -136,17 +138,14 @@ step_adapter() {
 # live 层：真宿主（真 mitmdump + 真网络）。默认**不进 all**。
 # --------------------------------------------------------------------------- #
 
-step_live_manager() { cargo test "${LOCKED[@]}" -p envboard-core-mitmproxy --test live_manager -- --nocapture; }
-step_live_thin()    { cargo test "${LOCKED[@]}" -p envboard-cli --test thin_client -- --nocapture; }
-step_spike()        { "$PYTHON" scripts/spike_m0_5.py; }
-step_live_v2()      { "$PYTHON" scripts/verify_live_v2.py; }
+step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-cli --test live_workbench -- --ignored --nocapture; }
+step_live_manager()   { cargo test "${LOCKED[@]}" -p envboard-core-mitmproxy --test live_manager -- --nocapture; }
+step_live_thin()      { cargo test "${LOCKED[@]}" -p envboard-cli --test thin_client -- --nocapture; }
 
 step_live() {
-  require_interpreter || return 0
-  run "live/spike"       step_spike
+  run "live/workbench"   step_live_workbench
   run "live/manager"     step_live_manager
   run "live/thin-client" step_live_thin
-  run "live/workbench"   step_live_v2
 }
 
 case "$STEP" in
@@ -169,8 +168,6 @@ case "$STEP" in
   rust-build)    step_rust_build ;;
   rust-test)     step_rust_test ;;
   rust-live)     step_live_manager ;;
-  live-v2)       step_live_v2 ;;
-  spike)         step_spike ;;
   live)          step_live ;;
   *)
     echo "unknown step: $STEP" >&2

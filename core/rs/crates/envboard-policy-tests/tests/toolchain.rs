@@ -18,8 +18,11 @@ mod common;
 
 use common::{find_dirs, has_word, read_text, report, walk_relative, workspace_root};
 
-/// 迁移白名单：待退场的旧工具链文件。每迁完一条就删掉一行；**清空 = 收敛完成**。
-const PENDING: &[&str] = &["scripts/spike_m0_5.py", "scripts/verify_live_v2.py"];
+/// 迁移白名单：待退场的旧工具链文件。**已清空 —— 收敛完成**。
+///
+/// 这张表本身留着：将来若又要搬一条旧门禁，它同时是进度表与降级开关
+/// （判断逻辑见 `the_migration_whitelist_has_no_stale_entries`：条目失效同样失败）。
+const PENDING: &[&str] = &[];
 
 /// 唯一允许的非 Rust 角落：宿主适配器。这种脚本是**产品代码**，由宿主解释器加载。
 const ADAPTER_PREFIX: &str = "adapters/";

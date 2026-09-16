@@ -214,8 +214,7 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 | 契约 | `cargo test -p envboard-contract-tests` | 58 个 fixture 的形状与语义都由实现消费；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 |
 | 跨语言对拍 | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
 | 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
-| 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
-| M0.5 spike | `scripts/spike_m0_5.py` | 共享 CA 配对、HTTPS 改写与 SNI、连接复用、PDEATHSIG |
+| 实机 | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
 | 浏览器 | 人工走查（真浏览器 + `getComputedStyle` 对齐令牌；转录是本机工作材料，不入库） | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训） |
 
 实机与验收的**转录**是本机工作材料，不入库；可重跑的断言在 `bash ci/verify.sh live` 那一层。
