@@ -191,7 +191,7 @@ core/rs/crates/
 adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
 ```
 
-依赖方向由 `scripts/rust_dependency_lint.py` 强制：core-api 是根；domain / rules / core-api
+依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：core-api 是根；domain / rules / core-api
 是**纯逻辑**（不得依赖 tokio / libc）；web 只认识管理器的公开 API，不认识具体 core
 （所以换 core 不必动它）。`adapters/` 只做宿主接线，不含业务逻辑。
 
@@ -210,7 +210,7 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 
 | 层 | 手段 | 关键断言 |
 |---|---|---|
-| 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**入库文本不得引用不在仓库里的本地文档**（见下） |
+| 文本纪律 | `cargo test -p envboard-policy-tests`（`naming` / `doc_scope` / `toolchain`） | 代码身份零命中发包标识；**入库文本不得引用不在仓库里的本地文档**（见下） |
 | 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 58 个 fixture 由实现消费；`rules.parse` 两侧一致 |
 | 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
 | 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
@@ -226,7 +226,8 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 ### 文本自包含（`doc-scope-lint`）
 
 **入库的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`
-与代码注释都不例外。判据有三条，由 `scripts/doc_scope_lint.py` 机械执行：
+与代码注释都不例外。判据有三条，由 `cargo test -p envboard-policy-tests --test doc_scope`
+机械执行：
 
 1. **零命中不在仓库里的文档的指称**：不给路径、不给链接、不给章节号、不点名字。
    设计文档、开发计划、实机验收转录、工作区规范文件同在此列 —— 它们在本机 `.agents/`

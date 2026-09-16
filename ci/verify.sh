@@ -73,21 +73,14 @@ require_interpreter() {
 # --------------------------------------------------------------------------- #
 
 step_policy() {
-  run "policy/toolchain" cargo test -p envboard-policy-tests "${LOCKED[@]}"
-  # ↓↓↓ 迁移期：以下四条是**待退场**的 Python 门禁，各自被移植成 Rust 测试后
-  #     就从这里删掉，并从 envboard-policy-tests 的 PENDING 白名单里删掉对应条目。
+  run "policy/gates" cargo test -p envboard-policy-tests "${LOCKED[@]}"
+  # ↓↓↓ 迁移期：编译检查还是 Python 脚本；`dual` 落地后它也被 Rust 侧取代
+  #     （见 envboard-policy-tests 的 PENDING 白名单）。
   require_interpreter || return 0
-  run "policy/naming"    step_naming
-  run "policy/doc-scope" step_doc_scope
-  run "policy/deps"      step_rust_dep
-  run "policy/compile"   step_compile
+  run "policy/compile" step_compile
 }
 
-step_naming()    { "$PYTHON" scripts/naming_lint.py; }
-# 入库文本自包含：不得引用不在仓库里的本地文档（见 README.md 的「验证」一节）
-step_doc_scope() { "$PYTHON" scripts/doc_scope_lint.py; }
 step_compile()   { "$PYTHON" scripts/compile_check.py; }
-step_rust_dep()  { "$PYTHON" scripts/rust_dependency_lint.py; }
 
 # --------------------------------------------------------------------------- #
 # rust 层：格式 / lint / 编译 / 单测
@@ -209,10 +202,7 @@ case "$STEP" in
   adapter)       step_adapter ;;
   smoke)         step_smoke ;;
   dual)          step_dual ;;
-  naming)        step_naming ;;
-  doc-scope)     step_doc_scope ;;
   compile)       step_compile ;;
-  rust-dep)      step_rust_dep ;;
   rust-fmt)      step_rust_fmt ;;
   rust-clippy)   step_rust_clippy ;;
   rust-check)    step_rust_check ;;

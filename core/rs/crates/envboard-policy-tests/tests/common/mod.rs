@@ -1,6 +1,10 @@
 //! 门禁共用的仓库遍历与输出。被各 `tests/<gate>.rs` 以 `mod common;` 引入。
 //!
 //! 只做只读的文件分析：门禁不改仓库里的任何东西，因此可以任意重复执行。
+//!
+//! `dead_code` 必须允许：每个测试目标都会**各自编译一份**这个模块，于是只被某一个
+//! 门禁用到的助手，在别的门禁眼里就是死代码 —— 而 `clippy -D warnings` 会把它当错误。
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -75,6 +79,39 @@ pub fn walk(root: &Path) -> Vec<PathBuf> {
 /// [`walk`] 的相对路径版本。
 pub fn walk_relative(root: &Path) -> Vec<String> {
     walk(root).iter().map(|path| relative(root, path)).collect()
+}
+
+/// 递归收集**文件与目录**的相对路径（同样跳过 [`SKIP_DIRS`]）。
+///
+/// 按路径成分判定的门禁（如"任何目录名 / 文件名都不得含发包标识"）需要看到目录本身，
+/// 只看文件会漏掉空目录。
+pub fn walk_all_relative(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                if SKIP_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()) {
+                    continue;
+                }
+                found.push(relative(root, &path));
+                stack.push(path);
+            } else if file_type.is_file() {
+                found.push(relative(root, &path));
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// 找指定名字的**目录**（找到即记录、不再下钻：存在性才是证据，内容不是）。
