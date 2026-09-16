@@ -41,6 +41,8 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 # 成员可以再追加 features（见 envboard-core-mitmproxy 的 `process`）
 clap = { version = "4.6.6", features = ["derive"] }
+# 只被工程门禁用来解析各 crate 的 Cargo.toml（依赖方向、发布标识）；产品代码不用它。
+toml = "1.1.4"
 
 [profile.release]
 # 单机工具，体积与启动速度优先于极致优化

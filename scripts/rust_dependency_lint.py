@@ -48,6 +48,8 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "envboard-web": {"envboard-core-api", "envboard-domain", "envboard-manager"},
     "envboard-core-mitmproxy": {"envboard-core-api"},
     "envboard-contract-tests": {"envboard-core-api", "envboard-domain", "envboard-rules"},
+    # 工程门禁：不依赖任何内部 crate（判据必须是文本事实，不该被产品类型牵着走）
+    "envboard-policy-tests": set(),
 }
 
 #: 只允许出现在 `dev-dependencies` 里的额外边。
