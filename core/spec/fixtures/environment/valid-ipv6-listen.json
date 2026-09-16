@@ -1,0 +1,12 @@
+{
+  "capability": "environment.validate",
+  "description": "监听地址接受 IPv6 字面量（带方括号），归一化为不带方括号的形式",
+  "input": { "name": "six", "listen": { "host": "[::1]", "port": 16601 } },
+  "expect": {
+    "ok": true,
+    "name": "six",
+    "listen": { "host": "::1", "port": 16601 },
+    "rules": null,
+    "description": ""
+  }
+}

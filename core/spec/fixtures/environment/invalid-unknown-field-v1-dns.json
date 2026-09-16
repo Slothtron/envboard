@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "v1 的已删除字段现在会响亮失败（而不是被当成无用字段默默收下）——dns_servers 是最典型的遗留",
+  "input": { "name": "prod", "listen": { "port": 16600 }, "dns_servers": ["10.0.0.53"] },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers" }
+}

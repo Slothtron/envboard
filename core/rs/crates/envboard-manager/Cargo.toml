@@ -1,0 +1,21 @@
+[package]
+name = "envboard-manager"
+description = "envboard 环境管理器：环境 CRUD、端口分配、进程编排、状态持久化、健康检查"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+envboard-core-api.workspace = true
+envboard-domain.workspace = true
+envboard-rules.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+# 测试用的 core：让管理器测试不必安装 mitmproxy。
+envboard-core-fake.workspace = true
+async-trait.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "envboard-cli"
+description = "envboard 命令行（M0：直接驱动管理器；M3 起改为本地 HTTP API 的瘦客户端）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "envboard"
+path = "src/main.rs"
+
+[dependencies]
+envboard-core-api.workspace = true
+envboard-core-fake.workspace = true
+envboard-domain.workspace = true
+envboard-manager.workspace = true
+envboard-core-mitmproxy.workspace = true
+envboard-web.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

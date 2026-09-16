@@ -1,0 +1,13 @@
+[package]
+name = "envboard-core-api"
+description = "envboard 的 proxy core 抽象：ProxyCore trait、实例契约、错误码"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

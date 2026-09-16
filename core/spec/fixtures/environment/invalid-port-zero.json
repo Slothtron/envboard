@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "端口 0 非法（端口必须显式给定；随机分配是 port.allocate 的职责，不是「0 = 自动」）",
+  "input": { "name": "prod", "listen": { "port": 0 } },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.port" }
+}

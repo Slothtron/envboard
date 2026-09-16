@@ -1,0 +1,24 @@
+{
+  "capability": "instance.reconcile",
+  "description": "期望 stopped 但实际在跑 → 停止；PID + 启动时刻 + cmdline 三者都匹配才认定是自己的孤儿",
+  "input": {
+    "instances": [
+      {
+        "env": "alpha",
+        "desired": "stopped",
+        "record": {
+          "pid": 111,
+          "starttime": 900,
+          "cmdline": ["mitmdump", "-s", "/home/u/.envboard/agent/envboard_mitmproxy.py", "--set", "listen_port=16301"]
+        },
+        "live": {
+          "pid": 111,
+          "starttime": 900,
+          "cmdline": ["mitmdump", "-s", "/home/u/.envboard/agent/envboard_mitmproxy.py", "--set", "listen_port=16301"]
+        }
+      }
+    ],
+    "occupied_by_others": []
+  },
+  "expect": { "ok": true, "actions": [["alpha", "stop"]], "warnings": [] }
+}

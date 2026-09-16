@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TARGETS = ["src", "addons", "scripts", "tests", "core"]
+TARGETS = ["adapters", "scripts", "core"]
 
 
 def main() -> int:

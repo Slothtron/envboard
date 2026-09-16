@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "重复的 DNS 服务器必须被拒绝",
-  "input": { "name": "prod", "dns_servers": ["10.0.0.53", "10.0.0.53"] },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers[1]" }
-}

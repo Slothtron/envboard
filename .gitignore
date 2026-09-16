@@ -8,8 +8,12 @@ dist/
 .venv/
 venv/
 
-# Node（本包是 Python 包，根 package.json 只是 npm run verify 的入口壳；
-# 仍然覆盖，避免 npm 产生的任何本地状态被误入库）
+# Rust（核心实现）。`target/` 永不提交（构建产物一律由构建生成）；
+# 而 `Cargo.lock` 必须入库 —— 它是可复现构建（`cargo build --locked`）的前提。
+target/
+
+# Node（根 package.json 只是 `npm run verify` 的入口壳；仍然覆盖，
+# 避免 npm 产生的任何本地状态被误入库）
 node_modules/
 npm-debug.log*
 

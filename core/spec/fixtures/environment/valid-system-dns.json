@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "dns_servers 为空 = 跟随操作系统 DNS，且允许裸 IPv6",
-  "input": { "name": "local", "dns_servers": [] },
-  "expect": { "ok": true, "name": "local", "dns_servers": [] }
-}

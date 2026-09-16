@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "规则名必须匹配 ^[a-z][a-z0-9_-]{0,31}$（含空格与大写都不合法）",
+  "input": { "name": "prod", "listen": { "port": 16600 }, "rules": "Bad Name" },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.rules" }
+}

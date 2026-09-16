@@ -1,0 +1,12 @@
+[package]
+name = "envboard-rules"
+description = "envboard 的 hosts 规则解析与确定性渲染（契约：core/spec/rules.md）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+envboard-core-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true

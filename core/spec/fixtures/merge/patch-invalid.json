@@ -1,9 +1,9 @@
 {
   "capability": "environment.merge",
-  "description": "patch 引入非法值时必须失败",
+  "description": "patch 引入非法值时必须失败，且合并后要重新校验",
   "input": {
-    "base": { "name": "gray", "dns_servers": ["10.1.0.53"] },
-    "patch": { "dns_servers": ["10.1.0.53:53"] }
+    "base": { "name": "gray", "listen": { "port": 16600 } },
+    "patch": { "listen": { "host": "api.example.com", "port": 16600 } }
   },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers[0]" }
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.host" }
 }

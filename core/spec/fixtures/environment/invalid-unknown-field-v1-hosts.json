@@ -1,0 +1,10 @@
+{
+  "capability": "environment.validate",
+  "description": "v1 的 hosts 内联覆盖已删除（与规则文件功能重叠，会形成两套真相）",
+  "input": {
+    "name": "prod",
+    "listen": { "port": 16600 },
+    "hosts": { "api.example.com": "10.0.0.11" }
+  },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.hosts" }
+}

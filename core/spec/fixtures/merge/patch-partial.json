@@ -1,20 +1,20 @@
 {
   "capability": "environment.merge",
-  "description": "patch 只改 dns_servers，其它字段保持不变",
+  "description": "patch 只改 rules，其余字段保持不变（含 description）",
   "input": {
     "base": {
       "name": "gray",
-      "dns_servers": ["10.1.0.53"],
-      "domain_suffix": "gray.example.com",
-      "hosts": { "api.example.com": "10.1.0.11" }
+      "listen": { "host": "127.0.0.1", "port": 16600 },
+      "rules": "alpha",
+      "description": "保持不动"
     },
-    "patch": { "dns_servers": ["10.2.0.53", "10.2.0.54"] }
+    "patch": { "rules": "beta" }
   },
   "expect": {
     "ok": true,
     "name": "gray",
-    "dns_servers": ["10.2.0.53", "10.2.0.54"],
-    "domain_suffix": "gray.example.com",
-    "hosts": { "api.example.com": "10.1.0.11" }
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "rules": "beta",
+    "description": "保持不动"
   }
 }

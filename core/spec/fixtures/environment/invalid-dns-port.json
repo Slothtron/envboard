@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "mitmproxy_rs.dns.DnsResolver 只接受裸 IP：ip:port 必须响亮失败",
-  "input": { "name": "prod", "dns_servers": ["10.0.0.53:53"] },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.dns_servers[0]" }
-}

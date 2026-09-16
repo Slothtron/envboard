@@ -1,0 +1,9 @@
+{
+  "capability": "environment.merge",
+  "description": "以已被删除的 v1 字段打 patch 也必须响亮失败（迁移期的老客户端会踩这个）",
+  "input": {
+    "base": { "name": "gray", "listen": { "port": 16600 } },
+    "patch": { "domain_suffix": "gray.example.com" }
+  },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.domain_suffix" }
+}

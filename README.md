@@ -1,233 +1,223 @@
 # envboard
 
-mitmproxy 多环境 DNS 工作台：**按环境指定 DNS 服务器**，把同一个域名解析成
-**各环境各自真实的 IP**，在自定义 Dashboard 里**管理 / 切换 / 编辑环境**（beta / gray / prod …）。
+多环境代理管理器：**一个环境 = 一个独立代理实例 + 一个端口**。客户端把代理指到
+`127.0.0.1:<环境端口>` 就是在用那个环境，所以多个环境可以**同时活着**、直接对比。
 
-> 范围：**只做正向解析（host → ip）**，不做 ip → host 反查。
+规则是 hosts 风格的静态覆盖表，在**建连时改写上连目标** —— 客户端看到的一切
+（Host 头、SNI 基准）都不变，只有"出网连到哪"变了。
 
-> 自研插件包。上游 `opensource/mitmproxy/` 仅作参考，**从未修改**。
+> 上游参考 `opensource/mitmproxy/` 仅作参考，**从未修改**。
 
-## 命名模型
+---
 
-**`slothtron` 是发包标识，只出现在 manifest 里，不出现在任何目录名或文件名。**
+## 现在能用什么
 
-| 层 | 值 | 出现 `slothtron`？ |
+| 能力 | 状态 |
+|---|---|
+| 环境 CRUD / **编辑** / 启停 / 显式重分配端口 / 规则绑定与热重载 | ✅ |
+| 端口自动分配（区间内随机试绑，撞了就重试一次） | ✅ |
+| 按 host 改写上连目标（真 mitmproxy `server_connect`） | ✅ |
+| 共享 CA（所有实例一张，客户端只装一次） | ✅ |
+| 工作台（环境列表 / 启停 / 编辑 / 规则导入与载入 / 跨环境对比 / 日志 / SSE） | ✅ |
+| CLI（本地 API 的瘦客户端；无常驻实例时自己驱动管理器） | ✅ |
+| 期望状态 reconcile（崩溃/重启后自动恢复） | ✅ |
+| 单实例锁、状态原子写 + 0600 | ✅ |
+| PAC / 透明代理 / SOCKS | ❌ 未做（属 core 的可选能力） |
+
+## 构建与快速开始
+
+```bash
+cargo build --release --locked --offline      # 产物：target/release/envboard
+export PATH="$PWD/target/release:$PATH"
+
+# 1) 导入一份 hosts 风格规则（会被解析成确定性的规范文件）
+envboard --state-dir ~/.envboard rules import beta --file examples/hosts.sample.txt
+
+# 2) 建环境（不给 --port 就在 16000–16999 里随机分配一个空闲端口）
+envboard --state-dir ~/.envboard env add beta --rules beta
+
+# 3) 起工作台（管理器 + HTTP API + 内嵌前端，同一个二进制）
+envboard --state-dir ~/.envboard web --listen 127.0.0.1:8900
+#    打开 http://127.0.0.1:8900
+
+# 4) 客户端按端口选环境（工作台每行都有可复制的那一行）
+export https_proxy=http://127.0.0.1:16301 http_proxy=http://127.0.0.1:16301
+curl https://api.example.com/
+```
+
+CLI 在工作台跑着的时候会**自动走本地 HTTP API**（不再抢状态锁），所以两种用法不冲突：
+
+```bash
+envboard --state-dir ~/.envboard env list                  # 有常驻实例 → thin client
+envboard --state-dir ~/.envboard env logs beta             # 实例日志尾部
+envboard --state-dir ~/.envboard compare api.example.com   # 跨环境静态对比（不发请求）
+```
+
+### 改一个已经建好的环境
+
+建的时候没绑规则、端口想换一个、描述写错了 —— 都不必删了重建。工作台每行有「编辑」
+（同一个表单切到编辑模式，可改名字 / 端口 / 规则绑定 / 描述），命令行是 `env edit`：
+
+```bash
+envboard env edit beta --rules beta            # 补绑规则（停止状态）
+envboard env edit beta --port 16302            # 换端口
+envboard env edit beta --rename gamma          # 改名（期望状态、端口归属一起搬过去）
+envboard env edit beta --no-rules              # 解绑，回到"不覆盖"
+envboard env edit beta --description "灰度 v2" # 只改描述
+envboard rules show beta                        # 改规则文件前先取回原文，免得盲覆盖
+```
+
+三条规则（服务端裁决，工作台与 CLI 只是同一份语义的两个面）：
+
+- **描述随时可改**，改动不会重启实例；
+- **规则文件的内容热重载** —— 导入同名文件覆盖即可，注入器按 mtime 重读，不必重启；
+- **改名 / 换端口 / 换绑定必须先停止**。实例启动时才固定监听端口与规则文件路径，
+  运行中改这几项会让"配置说绑了 A、实例还按 B 干活"，所以服务端返回 `conflict`
+  并在消息里说明原因（工作台会把这三个输入框锁住，只放开描述）。
+
+没有 mitmproxy 的机器可以用 `--core fake` 跑通管理器与全部测试（只监听端口、不改写）。
+
+## 配置
+
+| 键（CLI 参数） | 默认 | 说明 |
 |---|---|---|
-| PyPI 分发名 | `slothtron-envboard` | ✅ **仅此一处**（`pyproject.toml` 的 `name`） |
-| 导入包名 / 目录 | `envboard`（`src/envboard/`） | ❌ |
-| 项目目录 | `envboard/` | ❌ |
-| addon 名 | `envboard` | ❌ |
-| 选项前缀 | `envboard_*` | ❌ |
-| 命令前缀 | `envboard.*` | ❌ |
-| Dashboard 路由 | `/envboard` | ❌ |
-| npm 私有根（不发布） | `envboard` | ❌ |
+| `--state-dir` | `~/.envboard` | 环境账本、运行时、规则库、物化产物、共享 CA 都在它下面 |
+| `--port-range` | `16000-16999` | 随机分配区间（避开常见服务端口与系统临时端口段） |
+| `--core` | `mitmproxy` | `fake` = 只监听端口，用于没有 mitmproxy 的环境 |
+| `--core-bin` | `mitmdump`（PATH） | core 可执行文件 |
+| `--core-python` | 从 `core.bin` 推导 | CA 预物化用解释器。**默认不用环境里的 `python3`**：本机实测默认 python3 没装 mitmproxy，所以走"shebang → uv-tool 布局 → 真跑一次 import 自检"的探测，并要求版本与 `core.bin` 一致 |
+| `--log-dir` | `<state_dir>/logs` | 实例日志目录。子进程的 stdout/stderr **直接写** `<env>.log`（没有管道、没有读线程），所以"没人读管道 → 管道写满 → 子进程阻塞 → 代理挂住"这条路径不存在；日志跨重启留存 |
+| `--no-log-file` | 关 | 不落盘：日志只留在内存的有界环形缓冲里（随实例结束消失）。磁盘零写入，代价是回到"必须持续把管道读走"的形态 |
+| `--max-log-bytes` | 8 MiB | 单环境日志文件上限，超过就 copytruncate 轮转（保留一份 `.1`）。`0` = 不轮转 |
+| `--reload-interval` | 5s | 注入器检查规则文件 mtime 的间隔 |
+| `--api` / `--token` | 自动发现 | 本地 API 地址与令牌（`--token` 仅在非回环监听时需要）。发现顺序：`--api` → `<state_dir>/runtime/api.json` → 默认端口，**最后这一步只在没显式给 `--state-dir` 时才走** —— 否则 `--state-dir /tmp/x` 会被另一个状态目录的常驻实例接管 |
+| `web --listen` | `127.0.0.1:8900` | 工作台监听地址；**非回环必须给 `--token`** |
 
-分发名与导入名不同是标准做法（`beautifulsoup4` / `bs4`、`pillow` / `PIL`）：
-**发布身份属于 manifest，代码身份属于代码。** 安装时用的是分发名，导入时用的是
-导入名，两者互不影响：
+非法配置**加载即失败**并给出字段路径（如 `environment.listen.port`）。
+
+## 架构
+
+```
+core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、40 个 golden fixture
+core/rs/crates/
+  envboard-core-api   ProxyCore trait、实例契约、错误码、端口（时钟/日志）  ← 根，无内部依赖
+  envboard-domain     环境校验/合并、端口选择、reconcile 决策              ← 纯逻辑
+  envboard-rules      hosts 解析 + 确定性渲染                              ← 纯逻辑
+  envboard-core-fake  只监听端口的测试替身 core
+  envboard-core-mitmproxy  ProxyCore 的 mitmproxy 实现（spawn / CA / 监督 / 探活）
+  envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
+  envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
+  envboard-cli        envboard 二进制
+  envboard-contract-tests  消费全部 40 个契约 fixture
+adapters/mitmproxy/   单文件、纯标准库的注入器（被二进制 include_str! 内嵌）
+```
+
+依赖方向由 `scripts/rust_dependency_lint.py` 强制：core-api 是根；domain / rules / core-api
+是**纯逻辑**（不得依赖 tokio / libc）；web 只认识管理器的公开 API，不认识具体 core
+（所以换 core 不必动它）。`adapters/` 只做宿主接线，不含业务逻辑。
+
+注入器只做三件事：读+解析规则、在 `server_connect` 里改写上连目标、回写状态文件。
+它不知道自己是哪个环境，也不碰状态目录 —— 所以随时可以丢掉。
+
+## 验证
+
+单一入口（托管方无关，CI 直接调它即可）：
 
 ```bash
-pip install slothtron-envboard     # 分发名
-python -c "import envboard"        # 导入名
+bash ci/verify.sh            # 默认层：编译/命名/文本自包含/依赖方向/格式/clippy/单测/契约对拍/产物校验/冒烟
+bash ci/verify.sh rust       # 只跑 Rust 相关
+bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理器（需要宿主）
 ```
 
-## 目录结构
+| 层 | 手段 | 关键断言 |
+|---|---|---|
+| 文本纪律 | `scripts/naming_lint.py` + `scripts/doc_scope_lint.py` | 代码身份零命中发包标识；**包内文本不得引用本仓之外的本地文档**（见下） |
+| 契约 | `cargo test -p envboard-contract-tests` + `scripts/verify_contract.py` | 40 个 fixture 由实现消费；`rules.parse` 两侧一致 |
+| 跨语言对拍 | `scripts/verify_dual_impl.py` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） |
+| 单元 / 集成 | `cargo test` | 端口分配、reconcile、锁、健康判定（含僵尸判活）、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑（热改 vs 必须停机）** |
+| 实机 | `scripts/verify_live_v2.py` | 两个环境**同时**可用且结果不同、规则热重载、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** |
+| M0.5 spike | `scripts/spike_m0_5.py` | 共享 CA 配对、HTTPS 改写与 SNI、连接复用、PDEATHSIG |
+| 浏览器 | `docs/acceptance/m3-workbench.md` | JS 真的跑了 + 样式真的生效 + 无 CSP 报错（v1 的 CSP 教训） |
 
-本包是**纯 Python 包**，用 **src 布局**：导入包放在 `src/` 下，与仓库根其余部分分开。
+实机证据在 `docs/acceptance/`：`m0.5-spike.md`、`m3-workbench.md`、`log-channel.md`、
+`edit-environment.md`（`v0.1.0.md` 是 v1 的历史证据，v1 代码已在本版移除）。
 
-```
-envboard/
-├── core/spec/            # ★ 语言中立契约：能力清单、错误码、13 个 golden fixture
-├── src/
-│   └── envboard/         # ★ 导入包（wheel 的 packages 就声明 "src/envboard"）
-│       ├── core/         #   纯逻辑层，仅标准库：model/registry/mapping/resolver/ports/errors
-│       ├── infra/        #   端口的具体实现：DNS（mitmproxy_rs）、状态文件、时钟
-│       ├── adapter/      #   宿主接线：mitmproxy addon + mitmweb tornado 路由
-│       └── web/          #   Dashboard 资产（零构建、零依赖）
-│           ├── index.html
-│           └── app.js    #   ← 必须是外部同源文件，不能内联（见下）
-├── addons/envboard.py    # mitmproxy `-s` 加载入口（把仓库 src/ 加入 sys.path）
-├── tests/                # 单元测试
-├── scripts/              # 各项门禁脚本（compile / dependency / naming / contract / pack）
-├── ci/verify.sh          # 单一验证入口，也被 `npm run verify` 调用
-├── docs/acceptance/      # 非设计类：实机验收证据
-├── examples/             # hosts 输入示例（真实的 hosts.txt 已 gitignore）
-└── pyproject.toml  package.json  README.md  CHANGELOG.md  LICENSE  .gitignore
-```
+### 文本自包含（`doc-scope-lint`）
 
-三条结构性约束，都由门禁脚本强制（不靠人工检查）：
+**本仓内的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`、
+`docs/**` 与代码注释都不例外。判据有三条，由 `scripts/doc_scope_lint.py` 机械执行：
 
-- **Dashboard 的 JS 不许内联**：mitmweb 对 Web 界面下发的 CSP 是
-  `default-src 'self'; connect-src 'self' ws:; img-src 'self' data:; style-src 'self' 'unsafe-inline'`
-  —— 没给 `script-src` 单独开口，于是回落到 `'self'`，**内联 `<script>` 会被浏览器直接拒绝执行**。
-  故障现象极具欺骗性：HTML 照常 200、页面照常渲染，只是一行 JS 都不跑（`active: —`、
-  环境列表空白）。`curl` 查不出来，只有真浏览器会暴露。所以 JS 放外部同源文件
-  `web/app.js`，由 `AssetHandler` 提供；内联 `<style>` 不受影响（CSP 显式放行了
-  `style-src 'unsafe-inline'`）。这条**由 `pack_check.py` + `verify_live.sh` 双重把关**。
-- **依赖单向**：`core` 只依赖标准库；`infra` 可用第三方运行时库（`mitmproxy_rs`）；
-  `adapter` 才允许碰宿主（`mitmproxy` / `tornado`）。反向 import 一律失败
-  （`scripts/dependency_lint.py`）。`infra` 这一层的存在，正是为了让 `core` 保持纯标准库。
-- **包位置**：导入包必须声明为 `src/<name>`，且只能有一个（`scripts/naming_lint.py`）。
-- **`src/envboard/` 里的 `envboard` 不是冗余，是导入包名本体，删不得。**
-  各层用的是跨层相对 import（`from ..core.errors import X`），这要求 `core` / `infra` /
-  `adapter` 有**共同父包**——那个父包只能是 `envboard`。若把各层直接摊在 `src/` 下，
-  它们在源码树里会变成互不相干的顶层包，`..core` 立刻 `ImportError: attempted relative
-  import beyond top-level package`（已实测）。收益看起来是少一层，代价是源码树不可导入：
-  `-s addons/envboard.py`、`ci/verify.sh`、单测、`pip install -e .` 全部失效，代码只能从
-  装好的 wheel 跑。
+1. **零命中本仓之外本地文档的指称**：不给路径、不给链接、不给章节号、不点名字。
+   设计文档、开发计划、流程规范、工作区规范文件同在此列 —— 它们在包仓库之外，
+   对 clone 本仓的人不可解析；
+2. **指向本仓的路径必须真实存在**（写错的、或写完没建的一律失败）；
+3. **`§` 引用必须带本仓锚点**：写明是哪份本仓文件（`core/spec/rules.md` §3.1），
+   引用本文件自己的章节则写"本文件"。
 
-## 能力清单
+该写什么：把结论**直接写在这里**，或指向本仓内**真实存在**的文件与标题。
+**不在禁列**的是可复核的外部事实坐标 —— 宿主源码位置（`mitmproxy/addons/tlsconfig.py:291`）、
+实测命令与输出、版本号、协议编号、外部 URL；它们是证据，不是"另一份只在本机存在的文档"。
+仅 `CHANGELOG.md` 的历史条目与 `docs/acceptance/v0.1.0.md`（v1 验收转录）豁免第 2 条：
+它们记录的是当时存在、如今已删的文件。
 
-| 能力 | 说明 |
-|---|---|
-| 多环境注册表 | 环境 = 名称 + DNS 服务器列表 + 域名后缀 + 静态 hosts 覆盖 + 颜色/说明；CRUD 与激活切换，落盘到 `<confdir>/envboard.json`（0600） |
-| 动态读取 DNS 服务器 | 三级来源：① 环境自身的 `dns_servers` ② 运行时经 Dashboard 编辑 ③ `mitmproxy_rs.dns.get_system_dns_servers()` 读操作系统配置 |
-| 正向解析 (host→ip) | 复用 `mitmproxy_rs.dns.DnsResolver`（Rust / hickory），**每环境一个解析器** |
-| 多环境对比解析 | 一次请求把同一批域名分别向**每套环境**的 DNS 各查一次，直接看差异 |
-| 被动采集 | `--mode dns` 时从 `dns_response` 钩子直接读取客户端真实解析结果 |
-| 映射索引 | 按环境分片（`env + host` → `{ip}`），带 TTL、来源标记与优先级 |
-| flow 注解 | 命中映射的请求自动打标：`flow.comment`（mitmweb 可见）和/或 `flow.metadata` |
-| Dashboard | 挂载在 mitmweb 上（默认 `/envboard`），继承其鉴权与 XSRF，无独立端口 |
-| 规则文件 | 把杂乱的 hosts 风格文件（`ip host…` 或 `host… ip`，多 host 共用 ip，非法行忽略）规范化成确定性规则文件；**按环境绑定**，切环境即切规则文件 |
-| CLI/控制台命令 | 16 条 `envboard.*` 命令，与 Dashboard 能力对等 |
+## 运维（systemd）
 
-## 支持矩阵
-
-| 宿主 | Dashboard | 命令 | hook | 状态 |
-|---|---|---|---|---|
-| `mitmweb` | ✅ 挂载在 `/envboard` | ✅ | ✅ | 主路径 |
-| `mitmdump` | ❌（无 tornado 应用） | ✅ | ✅ | 支持；`--mode dns` 时被动采集生效 |
-| `mitmproxy`（console） | ❌ | ✅ | ✅ | 支持 |
-
-> Dashboard 是**加速器不是前提**：没有它，`envboard.*` 命令仍能完成全部操作。
-
-## 安装
-
-本插件是 mitmproxy addon，**不需要单独安装**即可用 `-s` 加载：
+`scripts/systemd/envboard.service` 是**用户级** unit（agent 只监听回环、状态目录在 `$HOME`
+下、实例是当前用户的 mitmdump 子进程 —— 没有一处需要 root）：
 
 ```bash
-git clone <this-repo> && cd envboard
-
-# 方式一：直接用 -s（自动把仓库 src/ 加入 sys.path）
-mitmweb  -s addons/envboard.py
-mitmdump -s addons/envboard.py --mode dns
-
-# 方式二：安装后按模块名加载
-pip install -e .
-mitmweb -s "$(python -c 'import envboard,os;print(os.path.dirname(envboard.__file__))')/adapter/addon.py"
+install -Dm755 target/release/envboard ~/.local/bin/envboard
+install -Dm644 scripts/systemd/envboard.service ~/.config/systemd/user/envboard.service
+systemctl --user daemon-reload
+systemctl --user enable --now envboard
+systemctl --user status envboard
+export ENVBOARD_STATE_DIR=$HOME/.local/state/envboard   # 命令行操作同一批环境
+envboard env list
 ```
 
-打开 mitmweb 控制台打印的地址，追加 `/envboard/`：
+四条关键取舍（unit 文件里都有逐条注释）：
 
-```
-Web server listening at http://127.0.0.1:8081/?token=...
-Dashboard:                          http://127.0.0.1:8081/envboard/
-```
+- **状态目录交给 systemd 建**：`StateDirectory=envboard` → `~/.local/state/envboard`（0700）。
+  不用 `ReadWritePaths=` 是因为它要求路径在**挂载命名空间建立时**已存在，首次安装必失败
+  （实测 `status=226/NAMESPACE`）。
+- **`ExecStart` 全用绝对路径**：systemd 的 PATH 不含 `~/.local/bin`；给 `--core-bin` 绝对
+  路径还有个附带好处 —— 管理器能从它的 shebang 推出 `core.python`。
+- **`Restart=always` 是安全的**：期望状态（`desired=running`）已持久化，重启后 reconcile
+  会把环境重新拉起来；主动 `stop` 不会被当成失败再拉起。
+- **`KillMode=mixed`**：主进程退出时实例靠 `PR_SET_PDEATHSIG` 一起走，漏网的由 systemd
+  对整个 cgroup 补 SIGKILL。用 `KillMode=process` 会留下孤儿实例继续占端口。
 
-## 配置项与默认值
+只要"环境常驻"不要 UI，把 `ExecStart` 换成 `run` 变体（unit 文件末尾有现成的两行）。
+想在没有登录会话时也活着：`loginctl enable-linger $USER`（本机已是 `yes`）。
+改配置别动这个文件，用 `systemctl --user edit envboard` 写 drop-in。
 
-| 选项 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `envboard_enabled` | bool | `true` | 总开关 |
-| `envboard_config` | str | `""` | 状态文件路径；空 = `<confdir>/envboard.json` |
-| `envboard_web_prefix` | str | `/envboard` | Dashboard 挂载前缀（仅 mitmweb） |
-| `envboard_annotate_flow` | bool | `true` | 是否给命中的 flow 打环境标签 |
-| `envboard_annotate_field` | str | `comment` | `comment` \| `metadata` \| `both` |
-| `envboard_passive_capture` | bool | `true` | 是否从 DNS 流量被动采集映射 |
-| `envboard_dns_timeout` | int | `5` | DNS 查询超时（秒） |
-| `envboard_cache_ttl` | int | `300` | 映射默认 TTL（秒） |
-| `envboard_max_mappings` | int | `50000` | 映射条目上限，超出淘汰最旧 |
-| `envboard_watch_hosts` | str[] | `[]` | 随激活环境自动解析的域名清单 |
-| `envboard_refresh_interval` | int | `0` | 自动刷新间隔（秒），`0` = 关闭 |
-| `envboard_rules_dir` | str | `""` | 规则文件目录；空 = `<confdir>/rules` |
+## 已知限制
 
-所有选项都是 mitmproxy 原生类型（`bool` / `int` / `str` / `Sequence[str]`）。
-**注意**：mitmproxy 的选项解析器不支持 `float`，因此所有数值选项都是 `int`。
+- **上游连接复用会丧失**：改写后的地址与请求 host 不再相等，连接池匹配不上 ——
+  被规则覆盖的域名每个请求都会新建上连（多一次 TLS 握手）。这是"只改连到哪"的代价，
+  不是缺陷；正确性不受影响。
+- **指向证书不匹配的测试机 → 上游校验失败 502**：这是 hosts 语义的必然（客户端看到的
+  域名不变，所以证书也按那个域名校验）。需要放行时透传 `ssl_insecure=true`。
+- **客户端要改代理配置**（换端口即换环境）。工作台给出的那行 `export https_proxy=…`
+  就是为此。
+- **`sni is None` 分支未经实测**：显式代理下 curl 总会带 SNI，构造不出该分支；目前只有
+  源码核读结论（见 `docs/acceptance/m0.5-spike.md` 的「2. HTTPS 改写」一节）。
+- **实例日志默认落盘**：日志写在 `<state_dir>/logs/`，单文件上限 8 MiB（保留一份 `.1`）。
+  默认详细度下日志里有请求的连接/流向信息（不含请求体，除非你把 `flow_detail` 调大）；
+  不想让它落盘就用 `--no-log-file`，代价是回到"管道必须被持续读走"的形态。
+- **Windows/Hyper-V 保留端口段未核实**：本机 WSL2 的 interop 被禁用，查不到 `netsh` 的
+  保留段。已证实的是 Windows 侧浏览器能直接访问 WSL2 内绑定的 `127.0.0.1:<port>`；
+  端口真起不来时环境会被标成 `port_conflict`，而不是静默换端口。
+- **改名不会搬日志文件**：日志按环境名落盘，`beta` 改名 `gamma` 之后新日志写
+  `<state_dir>/logs/gamma.log`，旧的 `beta.log` 留在原处（历史不丢，但不自动合并）。
 
-## 快速验证
+## 契约
 
-```bash
-# 全量门禁：语法 + 依赖方向 + 单测 + 契约 golden + 类型 + 打包白名单 + 冒烟
-bash ci/verify.sh          # 或 npm run verify
+`core/spec/` 是语言中立契约，也是两份 hosts 解析实现的共同仲裁：
 
-# 单独跑
-bash ci/verify.sh unit
-bash ci/verify.sh contract
-```
+- `capabilities.md` —— 能力清单、领域不变量、端口分配与生命周期语义、ProxyCore 能力矩阵
+- `rules.md` —— hosts 规则语法的 **BNF**（容错规则、跳过原因码、渲染的逐字节要求）
+- `errors.md` —— 统一错误码与健康状态表
+- `fixtures/` —— 40 个 golden case
 
-端到端（需要 mitmproxy 与网络）：
-
-```bash
-mitmweb -s addons/envboard.py --set web_open_browser=false &
-curl -s 'http://127.0.0.1:8081/envboard/api/environments?token='"$(cat ~/.mitmproxy/envboard.token 2>/dev/null)"''
-```
-
-## 规则文件：从 hosts 文件到可切换的静态规则
-
-一份手写的 hosts 风格文件 → 规范化规则文件 → **按环境绑定**生效。
-
-```bash
-# 命令行导入（非法行自动忽略，会回报 accepted/skipped/conflicts）
-mitmproxy 里执行： envboard.rules.import /path/to/hosts.txt [规则名]
-# 绑定到环境（切环境即切规则文件；留空解绑）
-                   envboard.rules.bind prod hosts
-                   envboard.rules.list / envboard.rules.show hosts / envboard.rules.remove hosts
-```
-
-Dashboard 的「规则文件」面板可以做同样的事：粘贴文本或填服务器上的文件路径导入，
-下拉框绑定到当前环境，导入报告会把**被忽略的行**和**冲突**逐条列出来。
-
-### 输入有多宽容
-
-| 写法 | 处理 |
-|---|---|
-| `10.0.0.1 api.example.com auth.example.com` | 多个 host 共用同一个 ip |
-| `beta.example.com 10.0.0.2` | 反序写法，与上面等价 |
-| 空行 / `#` 注释（整行或行尾）/ BOM / CRLF / 行首缩进 | 忽略 |
-| 一行里没有合法 IP，或只有一个 token | 整行忽略，记 `no-ip-literal` / `too-few-tokens` |
-| 某个 host 不合法 | **只丢那一项**，同一行其余 host 保留 |
-| 同一 host 映射到不同 ip | **后出现者胜**，并记进 `conflicts` |
-
-非法内容**永远不会让整次导入失败** —— hosts 文件是人手写的，一个笔误不该让其余几百条
-一起报废；但每一处忽略都会带行号和原因报出来，不静默吞掉。
-
-### 输出是确定的
-
-同一份输入 + 同一 source 渲染出的字节完全相同（ip 数值序、host 字典序、每个 ip 一行），
-因此重新导入同一份文件不产生 diff，规则文件本身可以进版本管理。
-
-```bash
-$ envboard.rules.import examples/hosts.sample.txt demo
-imported rules 'demo' from examples/hosts.sample.txt
-  accepted=7 host(s) over 5 ip | skipped=5 | conflicts=1
-  written to ~/.mitmproxy/rules/demo.rules
-```
-
-### 生效优先级
-
-```
-环境 inline hosts   >   绑定到该环境的规则文件   >   DNS 解析
-      └─────────── 两者都是 static 源：优先于 DNS，且永不过期 ───────────┘
-```
-
-环境里的条目是"这个环境特有的例外"，比共用的规则文件更具体，所以它赢。
-解析结果里的 `static_from` 会标明每条到底来自 `environment` 还是 `rules:<名字>`。
-
-**被环境绑定的规则文件禁止删除**（返回 `conflict`），否则那个环境会静默失去覆盖 ——
-必须先 `envboard.rules.bind <env> ""` 解绑。
-
-## 环境切换到底切什么
-
-MVP 只实现 **L1 观测**：切换环境改变的是「如何解读流量」（用哪套 DNS 解析、
-flow 归属哪个环境），**不改写任何流量**。请求重定向（L2）需要预热缓存配合
-`server_connect` 这个 blocking hook，风险更高，本版明确不做。
-
-## 文档
-
-- 契约（裁定依据）：`core/spec/capabilities.md`、`core/spec/errors.md`、`core/spec/fixtures/`
-- 实机验收证据：`docs/acceptance/`
-- 变更记录：`CHANGELOG.md`
-
-## 许可
-
-MIT。`opensource/mitmproxy/` 为第三方项目，遵循其自身许可，未做任何修改。
+改实现之前先问"契约该不该改"；该改就改契约并同步 fixture。

@@ -1,0 +1,439 @@
+//! HTTP 面：静态资产 + REST API + SSE。
+//!
+//! 资产用 `include_str!` 内嵌（标准库宏，零依赖）：管理器/工作台因此没有任何运行时
+//! 依赖，也不需要前端构建链。**前端资产必须是外置文件** —— 内联 `<style>`/`<script>`
+//! 会被我们自己下发的严格 CSP 拒绝，而那种故障在 curl 断言里看不出来（v1 踩过）。
+
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use envboard_core_api::{Error, ErrorCode};
+use envboard_manager::Manager;
+use futures_util::stream::Stream;
+use serde_json::{Value, json};
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::IntervalStream;
+
+use crate::config::{CONTENT_SECURITY_POLICY, REQUEST_HEADER, TOKEN_HEADER, WebConfig};
+
+const INDEX_HTML: &str = include_str!("../assets/index.html");
+const APP_CSS: &str = include_str!("../assets/app.css");
+const APP_JS: &str = include_str!("../assets/app.js");
+
+#[derive(Clone)]
+pub struct AppState {
+    pub manager: Arc<Manager>,
+    pub config: WebConfig,
+}
+
+/// 日志体积的照看间隔：全进程**只起一个**照看者（挂在 SSE 里就会每个客户端各干一遍）。
+const LOG_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 起 HTTP 服务并常驻（先 reconcile，再监听）。
+pub async fn serve(manager: Arc<Manager>, config: WebConfig) -> Result<(), Error> {
+    let report = manager.reconcile().await?;
+    for (env, action) in &report.actions {
+        println!("reconcile: {action:<14} {env}");
+    }
+    manager.maintain_logs();
+
+    // 每次只是给每个环境做一次 `stat`，只有超上限才真正轮转（copytruncate）。
+    {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(LOG_MAINTENANCE_INTERVAL).await;
+                manager.maintain_logs();
+            }
+        });
+    }
+
+    let state = AppState {
+        manager,
+        config: config.clone(),
+    };
+    let app = router(state);
+
+    let listener = tokio::net::TcpListener::bind(config.listen)
+        .await
+        .map_err(|error| {
+            Error::invalid_config(
+                "web.listen",
+                format!("cannot bind {}: {error}", config.listen),
+            )
+        })?;
+    println!("envboard workbench: http://{}", config.listen);
+    println!(
+        "  (assets are embedded; CSP has no 'unsafe-inline' — see core/spec/ and src/config.rs)"
+    );
+
+    axum::serve(listener, app)
+        .await
+        .map_err(|error| Error::internal_error(format!("web server failed: {error}")))
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/app.css", get(css))
+        .route("/app.js", get(js))
+        .route("/api/status", get(api_status))
+        .route("/api/environments", get(api_list).post(api_create))
+        .route(
+            "/api/environments/:name",
+            get(api_get).patch(api_update).delete(api_remove),
+        )
+        .route("/api/environments/:name/start", post(api_start))
+        .route("/api/environments/:name/stop", post(api_stop))
+        .route("/api/environments/:name/restart", post(api_restart))
+        .route("/api/environments/:name/reallocate", post(api_reallocate))
+        .route("/api/environments/:name/logs", get(api_logs))
+        .route("/api/rules", get(api_rules_list).post(api_rules_import))
+        .route(
+            "/api/rules/:name",
+            get(api_rules_read).delete(api_rules_delete),
+        )
+        .route("/api/compare", get(api_compare))
+        .route("/api/events", get(api_events))
+        // API 的 404 也要是 JSON：前端按 {error:{code,message}} 解析，
+        // 让它面对 axum 的纯文本 404 只能报"响应不是 JSON"，排查体验很差。
+        .fallback(api_not_found)
+        .layer(axum::middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state)
+}
+
+// --------------------------------------------------------------------------- #
+// 安全中间件：Host 校验 + token + 变更类路由的自定义头
+// --------------------------------------------------------------------------- #
+
+async fn guard(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let headers = request.headers();
+
+    // ① Host 头必须是配置的监听地址（防 DNS rebinding）
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !state
+        .config
+        .allowed_hosts()
+        .iter()
+        .any(|allowed| allowed == host)
+    {
+        return failure(
+            StatusCode::FORBIDDEN,
+            ErrorCode::InvalidConfig,
+            format!(
+                "Host header {host:?} is not one of the configured listen addresses {:?} \
+                 (DNS rebinding protection)",
+                state.config.allowed_hosts()
+            ),
+        );
+    }
+
+    // ② 配了 token 就必须带对
+    if let Some(expected) = state.config.token.as_deref() {
+        let provided = headers
+            .get(TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok());
+        if provided != Some(expected) {
+            return failure(
+                StatusCode::UNAUTHORIZED,
+                ErrorCode::InvalidConfig,
+                format!("missing or wrong {TOKEN_HEADER} header"),
+            );
+        }
+    }
+
+    // ③ 变更类路由必须带自定义头 —— 跨站简单请求带不了它，这就挡住了 CSRF
+    let mutating = !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
+    if mutating {
+        let present = headers
+            .get(REQUEST_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "1");
+        if !present {
+            return failure(
+                StatusCode::FORBIDDEN,
+                ErrorCode::InvalidConfig,
+                format!(
+                    "mutating requests must carry `{REQUEST_HEADER}: 1` — a cross-site form or \
+                     simple request cannot set custom headers, which is what blocks CSRF here"
+                ),
+            );
+        }
+    }
+
+    next.run(request).await
+}
+
+async fn api_not_found(uri: axum::http::Uri) -> Response {
+    failure(
+        StatusCode::NOT_FOUND,
+        ErrorCode::NotFound,
+        format!(
+            "no route for {} (see /api/status for the API surface)",
+            uri.path()
+        ),
+    )
+}
+
+fn failure(status: StatusCode, code: ErrorCode, message: String) -> Response {
+    (
+        status,
+        Json(json!({"error": {"code": code.as_str(), "message": message}})),
+    )
+        .into_response()
+}
+
+fn error_response(error: Error) -> Response {
+    let status =
+        StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut body = json!({"error": {"code": error.code.as_str(), "message": error.message}});
+    if let Some(field) = &error.field {
+        body["error"]["field"] = Value::String(field.clone());
+    }
+    (status, Json(body)).into_response()
+}
+
+// --------------------------------------------------------------------------- #
+// 静态资产
+// --------------------------------------------------------------------------- #
+
+fn asset(body: &'static str, content_type: &'static str) -> Response {
+    let mut response = (StatusCode::OK, body).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn index() -> Response {
+    asset(INDEX_HTML, "text/html; charset=utf-8")
+}
+
+async fn css() -> Response {
+    asset(APP_CSS, "text/css; charset=utf-8")
+}
+
+async fn js() -> Response {
+    asset(APP_JS, "application/javascript; charset=utf-8")
+}
+
+// --------------------------------------------------------------------------- #
+// API
+// --------------------------------------------------------------------------- #
+
+async fn api_status(State(state): State<AppState>) -> Response {
+    let manager = &state.manager;
+    let core = manager.core_info();
+    let capabilities = manager.capabilities();
+    match manager.list() {
+        Ok(views) => Json(json!({
+            "core": {"name": core.name, "version": core.version},
+            "capabilities": {
+                "listen": capabilities.listen,
+                "dynamic_certs": capabilities.dynamic_certs,
+                "rewrite_upstream": capabilities.rewrite_upstream,
+                "external_processes": capabilities.external_processes,
+            },
+            "config": {
+                "state_dir": manager.config().state_dir.display().to_string(),
+                "port_range": format!("{}-{}", manager.config().port_range.0, manager.config().port_range.1),
+            },
+            "environments": views.len(),
+            "running": views.iter().filter(|view| view.health.as_str() == "running").count(),
+        }))
+        .into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_list(State(state): State<AppState>) -> Response {
+    match state.manager.list() {
+        Ok(views) => Json(Value::Array(
+            views.iter().map(|view| view.to_json()).collect(),
+        ))
+        .into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_get(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.get(&name) {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_create(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    match state.manager.create(&body) {
+        Ok(view) => (StatusCode::CREATED, Json(view.to_json())).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_update(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    match state.manager.update(&name, &body) {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_remove(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.remove(&name) {
+        Ok(()) => Json(json!({"removed": name})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_start(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.start(&name).await {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_stop(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.stop(&name).await {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_restart(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.restart(&name).await {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_reallocate(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.reallocate_port(&name) {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    #[serde(default = "default_lines")]
+    lines: usize,
+}
+
+fn default_lines() -> usize {
+    200
+}
+
+async fn api_logs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    match state.manager.logs_tail(&name, query.lines) {
+        Ok(lines) => Json(json!({"env": name, "lines": lines})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_rules_list(State(state): State<AppState>) -> Response {
+    match state.manager.rules_list() {
+        Ok(names) => Json(json!({"rules": names})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RulesImport {
+    name: String,
+    #[serde(default)]
+    text: String,
+}
+
+async fn api_rules_import(
+    State(state): State<AppState>,
+    Json(body): Json<RulesImport>,
+) -> Response {
+    // 导入挂在**集合**上（`POST /api/rules`），不用 `/api/rules/import` ——
+    // `import` 是合法资源名，会与 `{name}` 路由撞车（v1 踩过 405）。
+    match state.manager.import_rules(&body.name, &body.text) {
+        Ok(path) => (
+            StatusCode::CREATED,
+            Json(json!({"name": body.name, "path": path.display().to_string()})),
+        )
+            .into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_rules_read(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.rules_read(&name) {
+        Ok(text) => Json(json!({"name": name, "text": text})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_rules_delete(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.rules_delete(&name) {
+        Ok(()) => Json(json!({"removed": name})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CompareQuery {
+    host: String,
+}
+
+async fn api_compare(State(state): State<AppState>, Query(query): Query<CompareQuery>) -> Response {
+    match state.manager.compare(&query.host) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// SSE：把"当前全部环境"作为事件推给前端。
+///
+/// 刻意用"每秒推一次快照"而不是事件溯源：快照不需要前端维护增量状态，也不会因为
+/// 丢一条事件就长期显示错误（单机工具的规模下，简单比精巧更可靠）。
+async fn api_events(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let interval = tokio::time::interval(Duration::from_millis(1_000));
+    let stream = IntervalStream::new(interval).map(move |_| {
+        let payload = match state.manager.list() {
+            Ok(views) => json!({
+                "ok": true,
+                "environments": views.iter().map(|view| view.to_json()).collect::<Vec<_>>(),
+            }),
+            Err(error) => json!({"ok": false, "error": {"code": error.code.as_str(), "message": error.message}}),
+        };
+        Ok(Event::default().event("snapshot").data(payload.to_string()))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
