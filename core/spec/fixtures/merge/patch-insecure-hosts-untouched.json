@@ -1,0 +1,27 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 没提到 insecure_hosts 时它保持不变（与『显式 null 清空』是两件事）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 16600
+      },
+      "description": "keep",
+      "insecure_hosts": [
+        "a.example.com"
+      ]
+    },
+    "patch": {
+      "description": "changed"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "description": "changed",
+    "insecure_hosts": [
+      "a.example.com"
+    ]
+  }
+}

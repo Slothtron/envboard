@@ -16,40 +16,87 @@
 
 from __future__ import annotations
 
-#: spike 用的最小注入器：只在 server_connect 里改写上连地址，并把事件写成 JSONL。
+#: spike 用的最小注入器：配置与规则都从"自己旁边"读（`config.json` + 固定名软链），
+#: 行为只有两条 —— `server_connect` 改写上连地址、`tls_start_server` 按域名放宽上游校验。
+#: 它**不注册任何 mitmproxy 选项**：所有值都走配置文件，和产品注入器同款通道。
 INJECTOR_SOURCE = r'''
-"""M0.5 spike 用的最小注入器 —— 只做一件事：在 server_connect 里改写上连地址。
+"""M0.5 spike 用的最小注入器 —— 配置与规则都在自己旁边，行为只有两条。
 
-刻意最小：不引任何第三方包、不做热重载、不写状态文件。spike 要回答的是
-"机制成不成立"，不是"产品做完了没有"。
+* `<本文件目录>/config.json`：唯一配置通道（强 schema，未知键即非法）；
+* `<本文件目录>/envboard.rules`：固定名软链，指向真正生效的规则文件；
+* `server_connect`：只改"往哪连"，不动请求内容、不动 Host、不动 SNI 基准；
+* `tls_start_server`：`insecure_hosts` 里的域名用 `VERIFY_NONE` 自建上游 context，
+  名单外的一律走 mitmproxy 自己的严格校验。
+
+刻意最小：不做热重载（那是产品注入器的事）、不引任何第三方包。spike 要回答的是
+"机制成不成立"，不是"产品做完了没有"。观测事件写成 JSONL 到 `<本文件目录>/events.jsonl`。
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import time
 
 from mitmproxy import ctx
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(HERE, "config.json")
+RULES_LINK = os.path.join(HERE, "envboard.rules")
+EVENTS_PATH = os.path.join(HERE, "events.jsonl")
 
-def _log(path: str, event: str, **fields) -> None:
+#: 与产品注入器逐键一致的严格 schema（多一个键就是写错了，必须响亮失败）。
+CONFIG_KEYS = frozenset({
+    "version", "env", "status_file", "rules",
+    "insecure_hosts", "launch_expected", "reload_interval_secs", "annotate",
+})
+
+POLICY = {"env": "", "rules": {}, "insecure_hosts": frozenset(), "annotate": False}
+
+
+def _log(event: str, **fields) -> None:
     record = {"t": round(time.time(), 3), "event": event, **fields}
-    with open(path, "a", encoding="utf-8") as handle:
+    with open(EVENTS_PATH, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-RULES: dict[str, str] = {}
+def _normalize(host) -> str:
+    return str(host).strip().lower().rstrip(".")
 
 
-def load(loader) -> None:
-    loader.add_option("spike_rules", str, "", "path to a hosts-style rules file")
-    loader.add_option("spike_log", str, "", "path to the JSONL event log")
+def _parse_config() -> dict:
+    with open(CONFIG_PATH, "rb") as handle:
+        doc = json.loads(handle.read().decode("utf-8"))
+    unknown = sorted(set(doc) - CONFIG_KEYS)
+    if unknown:
+        raise RuntimeError(f"config.json has unknown keys: {unknown}")
+    if doc.get("version") != 1:
+        raise RuntimeError(f"unsupported config.json version {doc.get('version')!r}")
+    return doc
 
 
-def _reload(path: str) -> None:
-    RULES.clear()
+def _resolve_rules(name) -> str | None:
+    """固定名软链 → 规则文件路径。
+
+    链不存在 / 悬空 = 该实例不覆盖任何域名（不是错误）；链指向的名字与
+    `config.rules` 不一致则响亮报错，**不猜**用哪一个。
+    """
+    if not os.path.lexists(RULES_LINK):
+        return None
+    target = os.path.basename(os.readlink(RULES_LINK))
+    if name is None or target != f"{name}.rules":
+        raise RuntimeError(
+            f"envboard.rules points at {target!r} but config.rules binds {name!r}; "
+            "refusing to guess which one is in effect"
+        )
+    return RULES_LINK if os.path.exists(RULES_LINK) else None
+
+
+def _read_rules(path) -> dict:
+    rules: dict[str, str] = {}
     if not path:
-        return
+        return rules
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             body = line.split("#", 1)[0].strip()
@@ -58,21 +105,93 @@ def _reload(path: str) -> None:
             tokens = body.split()
             if len(tokens) < 2:
                 continue
-            ip, hosts = tokens[0], tokens[1:]
-            for host in hosts:
-                RULES[host.lower().rstrip(".")] = ip
+            for host in tokens[1:]:
+                rules[_normalize(host)] = tokens[0]
+    return rules
+
+
+def _write_status(config: dict, rules_path, rules_count: int) -> None:
+    """回执一次状态文件，证明 `config.json` 确实被读进去了（产品侧是周期回写）。"""
+    path = config.get("status_file")
+    if not path:
+        return
+    payload = {
+        "env_name": config.get("env"),
+        "pid": os.getpid(),
+        "rules_path": rules_path,
+        "rules_count": rules_count,
+        "insecure_hosts_count": len(POLICY["insecure_hosts"]),
+        "updated_at": int(time.time()),
+        "config_error": None,
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+
+
+def _unverified_context(tls_start, server, host: str):
+    """名单内域名专供：自建 `VERIFY_NONE` 的上游 context。
+
+    除 `verify` 外逐项抄 mitmproxy 自己的 `tlsconfig.tls_start_server`（ALPN、TLS 版本、
+    ECDH 曲线、`legacy_server_connect`），且**必须显式设置 `server.sni`** —— 否则测试机
+    按 SNI 选不到 vhost。
+    """
+    from OpenSSL import SSL
+    from mitmproxy.net import tls as net_tls
+
+    client = tls_start.context.client
+    if not server.alpn_offers:
+        server.alpn_offers = (
+            tuple(client.alpn_offers)
+            if ctx.options.http2
+            else tuple(item for item in client.alpn_offers if item != b"h2")
+        )
+    ssl_ctx = net_tls.create_proxy_server_context(
+        method=net_tls.Method.TLS_CLIENT_METHOD,
+        min_version=net_tls.Version[ctx.options.tls_version_server_min],
+        max_version=net_tls.Version[ctx.options.tls_version_server_max],
+        cipher_list=None,
+        ecdh_curve=net_tls.get_curve(ctx.options.tls_ecdh_curve_server),
+        verify=net_tls.Verify.VERIFY_NONE,
+        ca_path=None,
+        ca_pemfile=None,
+        client_cert=None,
+        legacy_server_connect=True,
+    )
+    conn = SSL.Connection(ssl_ctx)
+    server.sni = host
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        conn.set_tlsext_host_name(host.encode("idna"))
+    if server.alpn_offers:
+        conn.set_alpn_protos(list(server.alpn_offers))
+    conn.set_connect_state()
+    return conn
 
 
 class Injector:
     def running(self) -> None:
-        _reload(ctx.options.spike_rules)
-        _log(ctx.options.spike_log, "loaded", rules=dict(RULES), pid=__import__("os").getpid())
+        config = _parse_config()
+        rules_path = _resolve_rules(config.get("rules"))
+        POLICY["env"] = config.get("env") or ""
+        POLICY["annotate"] = bool(config.get("annotate"))
+        POLICY["insecure_hosts"] = frozenset(
+            _normalize(item) for item in config.get("insecure_hosts") or []
+        )
+        POLICY["rules"] = _read_rules(rules_path)
+        _write_status(config, rules_path, len(POLICY["rules"]))
+        _log(
+            "loaded",
+            env=POLICY["env"],
+            rules=dict(POLICY["rules"]),
+            insecure_hosts=sorted(POLICY["insecure_hosts"]),
+            pid=os.getpid(),
+        )
 
     def server_connect(self, data) -> None:
         host, port = data.server.address
-        target = RULES.get(host.lower().rstrip("."))
+        target = POLICY["rules"].get(_normalize(host))
         _log(
-            ctx.options.spike_log,
             "server_connect",
             host=host,
             port=port,
@@ -81,6 +200,21 @@ class Injector:
         )
         if target:
             data.server.address = (target, port)
+
+    def tls_start_server(self, tls_start) -> None:
+        hosts = POLICY["insecure_hosts"]
+        if not hosts or tls_start.ssl_conn is not None:
+            return
+        server = tls_start.conn
+        if not getattr(server, "address", None):
+            return
+        sni = tls_start.context.client.sni
+        host = _normalize(sni) if sni else _normalize(server.address[0])
+        _log("tls_start_server", host=host, insecure=host in hosts)
+        if host not in hosts:
+            return
+        # 只在最后一步赋值：中途出错就什么都不改，让 mitmproxy 走**严格**校验。
+        tls_start.ssl_conn = _unverified_context(tls_start, server, host)
 
 
 addons = [Injector()]
@@ -166,6 +300,11 @@ HTTP_PORT = 27_098
 HTTPS_PORT = 27_099
 REQUESTS = 4
 
+#: 注入器旁边那三个固定名字：注入器自身、配置通道、规则软链（外加观测用的事件流）。
+AGENT_INJECTOR = "envboard_mitmproxy.py"
+RULES_LINK = "envboard.rules"
+EVENTS_NAME = "events.jsonl"
+
 RESULTS: list[tuple[str, bool, str]] = []
 
 
@@ -201,25 +340,66 @@ def read_log(path: pathlib.Path) -> list[dict]:
     return records
 
 
-def start_proxy(port: int, confdir: pathlib.Path, rules: pathlib.Path, log: pathlib.Path,
-                extra: list[str] | None = None) -> subprocess.Popen:
+def materialize_agent(name: str, rules: pathlib.Path, insecure_hosts: list[str]) -> pathlib.Path:
+    """物化一个"注入器目录"：注入器 + `config.json` + 固定名规则软链。
+
+    这就是产品契约里的配置下发方式（见 core/spec 的「配置下发与热重载」）：
+    配置与规则都在注入器**旁边**，所以注入器不需要任何 `--set` 路径参数，
+    也不需要知道自己是谁。spike 只是把它缩到最小。
+    """
+    agent = WORK / name
+    agent.mkdir(parents=True, exist_ok=True)
+    (agent / AGENT_INJECTOR).write_text(INJECTOR_SOURCE, encoding="utf-8")
+    link = agent / RULES_LINK
+    if os.path.lexists(link):
+        link.unlink()
+    link.symlink_to(rules)
+    (agent / "config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "env": name,
+                "status_file": str(agent / "status.json"),
+                # 规则名（不是路径）：软链必须指向 `<rules>.rules`，注入器会核对
+                "rules": rules.stem,
+                "insecure_hosts": list(insecure_hosts),
+                "launch_expected": {},
+                "reload_interval_secs": 1,
+                "annotate": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    return agent
+
+
+def start_proxy(port: int, confdir: pathlib.Path, agent: pathlib.Path,
+                wait: bool = True) -> subprocess.Popen:
+    """拉起一个代理实例：`-s <agent>/envboard_mitmproxy.py` + core 自己的选项。
+
+    刻意**没有任何 envboard_* 的 `--set`** —— 那些值全在 `<agent>/config.json` 里。
+    `wait=False` 让调用方能先全部拉起再一起等（第 1 步的并发首启要这个顺序）。
+    """
     command = [
         MITMDUMP,
-        "-s", str(WORK / "injector.py"),
+        "-s", str(agent / AGENT_INJECTOR),
         "--set", f"confdir={confdir}",
         "--set", "listen_host=127.0.0.1",
         "--set", f"listen_port={port}",
-        "--set", f"spike_rules={rules}",
-        "--set", f"spike_log={log}",
         "--set", "termlog_verbosity=warn",
         "--set", "flow_detail=0",
     ]
-    for item in extra or []:
-        command += ["--set", item]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    if not wait_port(port):
+    if wait and not wait_port(port):
         raise RuntimeError(f"proxy on {port} did not start: {process.stderr.read()[:400]!r}")
     return process
+
+
+def agent_events(agent: pathlib.Path) -> list[dict]:
+    """取回注入器写在**自己旁边**的观测事件流（JSONL）。"""
+    return read_log(agent / EVENTS_NAME)
 
 
 def leaf_certificate(proxy_port: int, host: str, port: int) -> str | None:
@@ -310,7 +490,7 @@ def main() -> int:
     if WORK.exists():
         shutil.rmtree(WORK)
     WORK.mkdir(parents=True)
-    (WORK / "injector.py").write_text(INJECTOR_SOURCE, encoding="utf-8")
+    # 注入器不再物化在 WORK 根上：每个实例有自己的"注入器目录"（见 materialize_agent）
     (WORK / "server.py").write_text(SERVER_SOURCE, encoding="utf-8")
 
     print(f"mitmdump: {run([MITMDUMP, '--version']).stdout.splitlines()[0]}")
@@ -335,9 +515,13 @@ def main() -> int:
     wait_port(HTTPS_PORT)
     wait_port(HTTP_PORT)
 
-    rules = WORK / "rules.txt"
+    # 规则名 `spike` + 物化文件 `spike.rules`：注入器会核对软链指向的名字
+    # 与 config.json 里的 `rules` 是否一致（不一致就响亮报错，不猜）。
+    # other.test 也改写到同一个本地服务，但它**不**在 insecure_hosts 里 ——
+    # 第 2e 步用它证明"放宽是按域名精确命中"，不是"整个环境关校验"。
+    rules = WORK / "spike.rules"
     rules.write_text(
-        f"127.0.0.1 spike.test\n127.0.0.1 reuse.test\n",
+        f"127.0.0.1 spike.test\n127.0.0.1 reuse.test\n127.0.0.1 other.test\n",
         encoding="utf-8",
     )
 
@@ -354,15 +538,8 @@ def main() -> int:
         # 那条原始竞态在第 1e 步单独**测量**，不作为 PASS/FAIL 判据。
         prematerialize_ca(confdir)
         for port in ports:  # 并发启动：先全部拉起，再一起等
-            proxies.append(subprocess.Popen([
-                MITMDUMP, "-s", str(WORK / "injector.py"),
-                "--set", f"confdir={confdir}",
-                "--set", "listen_host=127.0.0.1",
-                "--set", f"listen_port={port}",
-                "--set", f"spike_rules={rules}",
-                "--set", f"spike_log={WORK / f'proxy{port}.log'}",
-                "--set", "termlog_verbosity=warn", "--set", "flow_detail=0",
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            agent = materialize_agent(f"agent-ca-{port}", rules, [])
+            proxies.append(start_proxy(port, confdir, agent, wait=False))
         started = [port for port in ports if wait_port(port)]
         ca_cert = confdir / "mitmproxy-ca-cert.pem"
         ca_key = confdir / "mitmproxy-ca.pem"
@@ -431,14 +608,12 @@ def main() -> int:
             round_ports = [PROXY_BASE + 20 + round_index * 4 + offset for offset in range(4)]
             # 带上 spike 注入器：叶子要走同一套改写才取得到（与第 1 步的实例一致）
             processes = [
-                subprocess.Popen([
-                    MITMDUMP, "-s", str(WORK / "injector.py"),
-                    "--set", f"confdir={round_conf}",
-                    "--set", "listen_host=127.0.0.1", "--set", f"listen_port={port}",
-                    "--set", f"spike_rules={rules}",
-                    "--set", f"spike_log={WORK / f'round{round_index}-{port}.log'}",
-                    "--set", "termlog_verbosity=warn", "--set", "flow_detail=0",
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                start_proxy(
+                    port,
+                    round_conf,
+                    materialize_agent(f"agent-round{round_index}-{port}", rules, []),
+                    wait=False,
+                )
                 for port in round_ports
             ]
             for port in round_ports:
@@ -471,12 +646,13 @@ def main() -> int:
         )
 
         # ================================================================== #
-        # 2. HTTPS 改写：SNI / Host / 上游校验
+        # 2. HTTPS 改写：SNI / Host / 上游校验（按域名放宽）
         # ================================================================== #
-        print("\n=== 2. HTTPS 改写（CONNECT + server_connect）===")
+        print("\n=== 2. HTTPS 改写（CONNECT + server_connect + 按域名放宽校验）===")
         proxy_port = PROXY_BASE + 10
-        proxy_log = WORK / "https-proxy.log"
-        proxies.append(start_proxy(proxy_port, confdir, rules, proxy_log))
+        # 严格实例：insecure_hosts 为空 = 全部走 mitmproxy 自己的严格校验
+        strict_agent = materialize_agent("agent-strict", rules, [])
+        proxies.append(start_proxy(proxy_port, confdir, strict_agent))
         trusted = [f"--cacert={ca_cert}"]
 
         strict = run([
@@ -485,17 +661,17 @@ def main() -> int:
             *trusted, f"https://spike.test:{HTTPS_PORT}/strict",
         ], timeout=25)
         check(
-            "2a 上游自签证书 + 默认 ssl_insecure=false → 502（hosts 语义的必然代价）",
+            "2a spike.test 不在 insecure_hosts → 严格校验 → 上游自签证书被拒 → 502",
             strict.stdout.strip() == "502",
-            f"http_code={strict.stdout.strip()!r} stderr={strict.stderr.strip()[:120]!r}",
+            f"http_code={strict.stdout.strip()!r} stderr={strict.stderr.strip()[:120]!r}"
+            "（改写本身生效，502 是上游链路校验失败的必然代价）",
         )
 
-        # 用第二个实例开启 ssl_insecure 更干净：避免复用同一实例的配置
+        # 用第二个实例只放行 spike.test 更干净：避免复用同一实例的配置。
+        # 这也是"按域名放宽"的核心对照 —— 它只对 spike.test 放宽，不是全局关校验。
         insecure_port = PROXY_BASE + 11
-        proxies.append(start_proxy(
-            insecure_port, confdir, rules, WORK / "https-proxy-insecure.log",
-            extra=["ssl_insecure=true"],
-        ))
+        relaxed_agent = materialize_agent("agent-relaxed", rules, ["spike.test"])
+        proxies.append(start_proxy(insecure_port, confdir, relaxed_agent))
         relaxed = run([
             "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
             "-x", f"http://127.0.0.1:{insecure_port}",
@@ -507,7 +683,7 @@ def main() -> int:
             (r for r in server_records if r["path"] == "/relaxed"), None
         )
         check(
-            "2b ssl_insecure=true → 200，且改写生效（请求真的到了本地服务）",
+            "2b insecure_hosts=[\"spike.test\"] → 放宽上游校验 → 200，且改写生效（请求真的到了本地服务）",
             relaxed.stdout.strip() == "200" and relaxed_record is not None,
             f"http_code={relaxed.stdout.strip()!r} server={relaxed_record}",
         )
@@ -522,23 +698,27 @@ def main() -> int:
             f"host_header={relaxed_record.get('host_header') if relaxed_record else None!r}",
         )
 
+        # 粒度对照：**同一个**放宽实例里，other.test 也被规则改写到同一个本地服务，
+        # 但它不在 insecure_hosts 里 —— 必须仍然严格校验、仍然失败。
         control = run([
             "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
             "-x", f"http://127.0.0.1:{insecure_port}",
             *trusted, f"https://other.test:{HTTPS_PORT}/control",
         ], timeout=25)
         rewrites = [
-            record for record in read_log(WORK / "https-proxy-insecure.log")
+            record for record in agent_events(relaxed_agent)
             if record["event"] == "server_connect" and record["host"] == "other.test"
         ]
+        control_records = [r for r in read_log(server_log) if r["path"] == "/control"]
         check(
-            "2e 对照组：不在规则里的域名不被改写、也不会成功",
-            control.stdout.strip() != "200" and rewrites and rewrites[0]["rewrite"] is None,
-            f"http_code={control.stdout.strip()!r} rewrite="
-            f"{rewrites[0]['rewrite'] if rewrites else 'no hook'} "
-            f"stderr={control.stderr.strip()[:80]!r} —— 实测：mitmproxy 对 CONNECT 回的是 502"
-            "（curl 显示 'CONNECT tunnel failed, response 502'），但 %{http_code} 是 000："
-            "隧道没建成，根本没有目标请求的响应码。写文档时要按这个区分，否则会误导排查",
+            "2e 粒度：other.test 同样被改写、但不在名单里 → 仍严格校验 → 502（本地服务没收到请求）",
+            control.stdout.strip() == "502"
+            and bool(rewrites) and rewrites[0]["rewrite"] == "127.0.0.1"
+            and not control_records,
+            f"http_code={control.stdout.strip()!r} "
+            f"rewrite={rewrites[0]['rewrite'] if rewrites else 'no hook'} "
+            f"local_hits={len(control_records)} stderr={control.stderr.strip()[:80]!r} —— "
+            "同一个实例里 spike.test 200 / other.test 502，证明放宽是「按域名精确命中」",
         )
 
         # ================================================================== #
@@ -546,15 +726,15 @@ def main() -> int:
         # ================================================================== #
         print("\n=== 3. 上游连接复用===")
         reuse_port = PROXY_BASE + 12
-        reuse_log = WORK / "reuse-proxy.log"
-        proxies.append(start_proxy(reuse_port, confdir, rules, reuse_log))
+        reuse_agent = materialize_agent("agent-reuse", rules, [])
+        proxies.append(start_proxy(reuse_port, confdir, reuse_agent))
         urls_plain = [f"http://localhost:{HTTP_PORT}/{index}" for index in range(REQUESTS)]
         urls_rewritten = [f"http://reuse.test:{HTTP_PORT}/{index}" for index in range(REQUESTS)]
 
         run(["curl", "-sS", "-o", "/dev/null", "-x", f"http://127.0.0.1:{reuse_port}", *urls_plain], timeout=25)
         run(["curl", "-sS", "-o", "/dev/null", "-x", f"http://127.0.0.1:{reuse_port}", *urls_rewritten], timeout=25)
 
-        events = [r for r in read_log(reuse_log) if r["event"] == "server_connect"]
+        events = [r for r in agent_events(reuse_agent) if r["event"] == "server_connect"]
         plain_conns = [r for r in events if r["host"] == "localhost"]
         rewritten_conns = [r for r in events if r["host"] == "reuse.test"]
         check(

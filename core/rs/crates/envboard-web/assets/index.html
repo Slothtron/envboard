@@ -205,7 +205,7 @@
               <div class="info-cell"><span class="info-label">期望状态</span><span class="info-value mono" id="ov-desired">—</span></div>
               <div class="info-cell"><span class="info-label">规则绑定</span><span class="info-value mono" id="ov-rules">—</span></div>
               <div class="info-cell"><span class="info-label">规则条数</span><span class="info-value mono" id="ov-rules-count">—</span></div>
-              <div class="info-cell"><span class="info-label">实例选项</span><span class="info-value mono" id="ov-options">—</span></div>
+              <div class="info-cell"><span class="info-label">放宽校验域名</span><span class="info-value mono" id="ov-insecure-hosts">—</span></div>
               <div class="info-cell"><span class="info-label">描述</span><span class="info-value" id="ov-desc">—</span></div>
             </div>
 
@@ -244,34 +244,40 @@
               <label class="field">
                 <span class="field-label">规则</span>
                 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select>
-                <span class="field-hint">绑定在下次启动时生效；规则文件内容是热重载的</span>
+                <span class="field-hint">热生效：换绑定后运行中的实例按新规则改写，不必重启；规则文件内容本身也是按 mtime 热重载的</span>
               </label>
-              <!-- 选项开关：当前只做 ssl_insecure（语义确定、最常用的一项）。加第二个开关时，
-                   这里加一块，并在 app.js 的 startEdit / formPayload / syncEditLock 里接上
-                   同一个键名。其余 core 选项仍走下面的 K=V 文本框。 -->
-              <label class="field field-check">
-                <input type="checkbox" name="ssl_insecure">
-                <span class="field-check-text">
-                  <span class="field-label">跳过上游证书校验（ssl_insecure）</span>
-                  <span class="field-hint">上游用自签 / 私有 CA 证书时打开；会关掉该环境对所有上游的证书校验，只建议内网测试环境</span>
-                </span>
-              </label>
+              <!-- 按域名放宽上游证书校验：全局放宽开关已随契约一并删除，这里是唯一的
+                   放宽入口，所以必须写清"逐条点名、精确匹配、运行中热生效"。 -->
               <label class="field">
-                <span class="field-label">其他实例选项</span>
-                <textarea name="options" rows="3" placeholder="ssl_verify_upstream_trusted_ca=/path/ca.pem" spellcheck="false"></textarea>
-                <span class="field-hint">上面开关之外的 core 选项，每行一个 K=V（留空 = 不透传）；启动时固定，改动要先停止</span>
+                <span class="field-label">按域名放宽上游证书校验（insecure_hosts）</span>
+                <textarea name="insecure_hosts" id="env-form-insecure-hosts" rows="4" placeholder="365.kdocs.cn" spellcheck="false"></textarea>
+                <span class="field-hint">每行一个<b>完整域名</b>，只做精确匹配：列出的域名才跳过上游证书校验，子域不继承、后缀不匹配，通配符（<code class="mono">*</code> / <code class="mono">?</code>）会被服务端拒绝。没列出的域名仍然严格校验。改动<b>热生效</b> —— 运行中保存后几秒内跟上，不必重启。</span>
               </label>
               <label class="field field-check">
                 <input type="checkbox" name="public" id="env-form-public">
                 <span class="field-label">对外服务（绑定 0.0.0.0）</span>
                 <span class="field-hint">默认只监听 127.0.0.1；勾选后局域网内可直接连此代理</span>
               </label>
-              <label class="field">
-                <span class="field-label">访问鉴权</span>
-                <input type="password" name="proxy_auth" id="env-form-proxy-auth" placeholder="user:password" autocomplete="new-password">
-                <span class="field-hint">留空 = 不启用。代理访问需要此凭据（Basic 认证）；勾选「对外服务」时强烈建议启用</span>
+              <div class="field">
+                <span class="field-label">代理访问鉴权（用户名 / 密码）</span>
+                <div class="field-pair">
+                  <label class="field">
+                    <input name="proxy_user" id="env-form-proxy-user" placeholder="user" autocomplete="off" aria-label="代理用户名">
+                  </label>
+                  <label class="field">
+                    <input type="password" name="proxy_password" id="env-form-proxy-password" placeholder="留空则保持不变" autocomplete="new-password" aria-label="代理密码">
+                  </label>
+                </div>
+                <span class="field-hint">用户名与密码必须<b>同时</b>填写；两者都不能含「<code class="mono">:</code>」或空白字符。凭据只进不出 —— 服务端<b>永不回显</b>已保存的密码，留空 = 保持原样。凭据是<b>停机生效</b>的：运行中保存会被拒，先停止再改。</span>
+              </div>
+              <!-- 编辑专属：勾上 = 显式清空凭据（发两个 null）。新建时没有"已保存的凭据"可清，
+                   所以这块默认隐藏（见 app.js 的 startEdit / cancelEdit）。 -->
+              <label class="field field-check is-hidden" id="env-form-proxy-clear-field">
+                <input type="checkbox" name="proxy_clear" id="env-form-proxy-clear">
+                <span class="field-label">清除代理鉴权</span>
+                <span class="field-hint">勾选后保存会同时发 <code class="mono">null</code> 清掉用户名与密码（上面两栏内容被忽略）；不勾且两栏都留空 = 保持已保存的凭据不变。</span>
               </label>
-              <p class="hint is-hidden" id="env-form-auth-warning">代理将暴露给局域网且未启用访问鉴权 —— 任何能连通的机器都能借它发请求，建议填写上面的「访问鉴权」。</p>
+              <p class="hint is-hidden" id="env-form-auth-warning">代理将暴露给局域网且未启用访问鉴权 —— 任何能连通的机器都能借它发请求，建议填写上面的「代理访问鉴权」。</p>
               <label class="field">
                 <span class="field-label">描述</span>
                 <input name="description" placeholder="灰度环境" autocomplete="off">

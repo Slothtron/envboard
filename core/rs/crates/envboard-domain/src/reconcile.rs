@@ -7,6 +7,8 @@
 //!    无关进程；只比 PID + cmdline 也不够 —— 同一份配置的实例 cmdline **完全相同**，
 //!    PID 复用后照样撞上。任一项不匹配就**不动那个进程**，只记告警。
 //! 2. **顺序固定**：先清理孤儿，再拉起期望 running 的环境。
+//! 3. **上一代实例要重启**：在跑但状态文件里没有配置哈希回执的实例，跑的是旧通道下的
+//!    配置，`Keep` 会让分叉一直留着 —— 它走 `Restart`，不参与"没坏就不动"。
 
 use std::collections::BTreeSet;
 
@@ -31,6 +33,11 @@ pub struct InstanceRecord {
     pub live: Option<ProcessIdentity>,
     /// 该环境的持久化端口。只有 `desired = running` 且没在跑时才用得上。
     pub listen_port: Option<u16>,
+    /// 在跑的实例是**上一代二进制**拉起来的（状态文件里没有配置哈希回执）。
+    ///
+    /// 那一代实例拿不到"配置文件 + 固定名软链"这套通道，因此它跑的配置与账本必然
+    /// 分叉；`Keep` 会让分叉一直留着，所以这里要**重启一次**把它拉齐。
+    pub legacy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +48,8 @@ pub enum Action {
     Keep,
     /// 端口被别的程序占走：标记 `port_conflict`，**不换端口**。
     MarkConflict,
+    /// 在跑，但那是上一代二进制拉起来的实例：停掉再按当前配置拉起一次。
+    Restart,
 }
 
 impl Action {
@@ -50,6 +59,7 @@ impl Action {
             Action::Stop => "stop",
             Action::Keep => "keep",
             Action::MarkConflict => "mark_conflict",
+            Action::Restart => "restart",
         }
     }
 }
@@ -111,6 +121,9 @@ pub fn plan_reconcile(
         if record.same_process(live) {
             if instance.desired == Desired::Stopped {
                 plan.actions.push((instance.env.clone(), Action::Stop));
+            } else if instance.legacy {
+                // 上一代实例配置必然与账本分叉：重启一次把它拉齐。
+                plan.actions.push((instance.env.clone(), Action::Restart));
             } else {
                 plan.actions.push((instance.env.clone(), Action::Keep));
             }
@@ -169,6 +182,7 @@ mod tests {
                 record: Some(identity(111, 900, 16_301)),
                 live: Some(identity(111, 1200, 16_301)),
                 listen_port: Some(16_301),
+                legacy: false,
             }],
             &BTreeSet::new(),
         );
@@ -186,6 +200,7 @@ mod tests {
                     record: None,
                     live: None,
                     listen_port: Some(16_302),
+                    legacy: false,
                 },
                 InstanceRecord {
                     env: "alpha".into(),
@@ -193,6 +208,7 @@ mod tests {
                     record: Some(identity(111, 900, 16_301)),
                     live: Some(identity(111, 900, 16_301)),
                     listen_port: Some(16_301),
+                    legacy: false,
                 },
             ],
             &BTreeSet::new(),
@@ -216,6 +232,7 @@ mod tests {
                 record: None,
                 live: None,
                 listen_port: Some(16_301),
+                legacy: false,
             }],
             &occupied,
         );
@@ -223,5 +240,24 @@ mod tests {
             plan.actions,
             vec![("beta".to_string(), Action::MarkConflict)]
         );
+    }
+
+    #[test]
+    fn runs_from_the_previous_generation_are_restarted_not_kept() {
+        // 上一代实例拿不到"配置文件 + 固定名软链"通道，配置必然与账本分叉：
+        // 期望 running 时它不是 Keep 而是 Restart。
+        let plan = plan_reconcile(
+            &[InstanceRecord {
+                env: "beta".into(),
+                desired: Desired::Running,
+                record: Some(identity(111, 900, 16_301)),
+                live: Some(identity(111, 900, 16_301)),
+                listen_port: Some(16_301),
+                legacy: true,
+            }],
+            &BTreeSet::new(),
+        );
+        assert_eq!(plan.actions, vec![("beta".to_string(), Action::Restart)]);
+        assert!(plan.warnings.is_empty());
     }
 }

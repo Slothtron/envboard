@@ -15,8 +15,11 @@ v1 立下的规矩是"断言必须可重跑"，而 M2/M3 之前的实机结论�
 8. **实例崩溃可见且不留僵尸**：SIGKILL 掉实例后工作台不再报 running、子进程被回收、
    日志仍可读、能重新拉起；
 9. **v2.1 安全增强**：dashboard `?token=` 与 header 等效（含启动日志打印可点链接）、
-   `proxy_auth` 下发为 mitmproxy `proxyauth`（407/200 对照）、对外服务开关
-   （listen.host 0.0.0.0）真的按新地址重启。
+   `proxy_user`/`proxy_password` 下发为 mitmproxy `proxyauth`（407/200 对照）、
+   对外服务开关（listen.host 0.0.0.0）真的按新地址重启；
+10. **按域名放宽上游证书校验（`insecure_hosts`）**：自签上游在名单外必然 502，
+    运行中把它加进名单即热生效（不重启、健康保持 running），
+    同一实例里另一个被改写但未列出的域名仍旧 502。
 
 做法上有一个关键点：规则只改**连到哪个 IP**、不改端口，所以"命中哪个上游"由客户端
 请求里的端口决定。于是"同一个域名 + 两个环境各覆盖不同域名"就能构造出判别性对照。
@@ -35,6 +38,7 @@ import re
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -73,9 +77,13 @@ def wait_port(port: int, timeout: float = 30.0) -> bool:
 
 
 class Upstream:
-    """只回自己名字的极小 HTTP 服务 —— 用来判断"请求被改写到了谁那里"。"""
+    """只回自己名字的极小 HTTP 服务 —— 用来判断"请求被改写到了谁那里"。
 
-    def __init__(self, name: str) -> None:
+    给出 `tls_cert`（cert, key 两个路径）时在同一端口上做 HTTPS，并出示那张**自签**证书：
+    这正是 `insecure_hosts` 要处理的可复现现场（上游证书不在信任库里）。
+    """
+
+    def __init__(self, name: str, tls_cert: tuple[str, str] | None = None) -> None:
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -94,8 +102,33 @@ class Upstream:
 
         self.name = name
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if tls_cert is not None:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(tls_cert[0], tls_cert[1])
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
+def self_signed_cert(work: pathlib.Path, host: str) -> tuple[str, str] | None:
+    """现造一张自签证书（证书里带上 `host` 的 SAN）—— "信任库不认识它"的现场。
+
+    只借 openssl 命令行生成文件，脚本本身仍是标准库；openssl 不可用时返回 None，
+    调用方把那条用例如实记为跳过，而不是拿一个空分支冒充绿。
+    """
+    if shutil.which("openssl") is None:
+        return None
+    cert = work / f"{host}.crt"
+    key = work / f"{host}.key"
+    result = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key), "-out", str(cert), "-days", "1",
+         "-subj", f"/CN={host}", "-addext", f"subjectAltName=DNS:{host}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not (cert.exists() and key.exists()):
+        return None
+    return str(cert), str(key)
 
 
 def api(port: int, path: str, method: str = "GET", body: dict | None = None,
@@ -153,6 +186,20 @@ def curl_status(proxy_port: int, url: str, auth: str | None = None) -> str:
         capture_output=True, text=True,
     )
     return result.stdout.strip() or result.stderr.strip()[:40]
+
+
+def curl_https(proxy_port: int, url: str) -> tuple[str, str]:
+    """经代理请求 HTTPS，返回 (状态码, stderr)。
+
+    客户端侧用 `-k`：这条用例要判的是**上游**握手（放宽前后），不是 mitmproxy
+    出示给客户端的证书；让客户端侧也失败会把两种失败混在一起，读不出结论。
+    """
+    result = subprocess.run(
+        ["curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code}", "-x",
+         f"http://127.0.0.1:{proxy_port}", "--noproxy", "", "--max-time", "15", url],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip(), result.stderr.strip()
 
 
 def sse_status(port: int, path: str) -> int:
@@ -424,12 +471,20 @@ def main() -> int:
         api(web_port, "/api/environments/edited/start", "POST")
         gamma_before = curl_body(created["listen"]["port"], f"http://gamma.test:{alpha.port}/")
 
-        # 运行中换绑定：服务端必须拒绝（实例在启动时才固定规则路径，热改绑定只会造成
-        # "配置说绑了、实例没按它干"的不一致）。描述则允许热改。
+        # 运行中换绑定是**热**的：绑定由固定名软链承载（管理器原子换链 + 重写
+        # config.json），运行中的注入器按轮询间隔跟上，实例不必重启。描述同样允许热改。
         status_bind_running, _ = api(web_port, "/api/environments/edited", "PATCH",
                                      {"rules": "edited"})
         status_desc_running, _ = api(web_port, "/api/environments/edited", "PATCH",
                                      {"description": "运行中改的描述"})
+        # 不重启就等新绑定生效 —— 这一条才是"热"的可证伪形式
+        deadline = time.time() + 15
+        gamma_hot = ""
+        while time.time() < deadline:
+            gamma_hot = curl_body(created["listen"]["port"], f"http://gamma.test:{alpha.port}/")
+            if gamma_hot == "alpha-upstream":
+                break
+            time.sleep(0.5)
 
         api(web_port, "/api/environments/edited/stop", "POST")
         status_edit, edited = api(web_port, "/api/environments/edited", "PATCH",
@@ -439,18 +494,19 @@ def main() -> int:
         gamma_after = curl_body(edited["listen"]["port"], f"http://gamma.test:{alpha.port}/")
         old_status, _ = api(web_port, "/api/environments/edited")
         check(
-            "10 编辑：运行中换绑定被拒、停止后可补绑规则并改名换端口、新配置真的生效",
+            "10 编辑：运行中补绑规则热生效（不重启）、停止后可改名换端口、新配置真的生效",
             not_covered(gamma_before)
-            and status_bind_running == 409
+            and status_bind_running == 200
             and status_desc_running == 200
+            and gamma_hot == "alpha-upstream"
             and status_edit == 200
             and edited["rules"] == "edited" and edited["name"] == "renamed"
             and status_start == 200
             and gamma_after == "alpha-upstream"
             and old_status == 404,
             f"before={gamma_before!r} bind_running={status_bind_running} "
-            f"desc_running={status_desc_running} edit={status_edit} after={gamma_after!r} "
-            f"old_name={old_status} port={edited['listen']['port']}",
+            f"hot={gamma_hot!r} desc_running={status_desc_running} edit={status_edit} "
+            f"after={gamma_after!r} old_name={old_status} port={edited['listen']['port']}",
         )
 
         # ---- 11 dashboard URL token 鉴权 ----
@@ -594,14 +650,14 @@ def main() -> int:
                 token_work.wait(timeout=10)
 
 
-        # ---- 12 代理访问鉴权（proxy_auth → mitmproxy proxyauth）----
-        # 承接测试 10：edited 已改名 renamed 且在跑。proxy_auth 是启动时读取的字段：
-        # 运行中改被拒（409），停止后改、重启才生效。
+        # ---- 12 代理访问鉴权（proxy_user / proxy_password → mitmproxy proxyauth）----
+        # 承接测试 10：edited 已改名 renamed 且在跑。两个凭据字段是启动时读取的：
+        # 运行中改被拒（409），停止后改、重启才生效；视图只回一个布尔，永不回显取值。
         status_auth_running_early, _ = api(web_port, "/api/environments/renamed", "PATCH",
-                                           {"proxy_auth": "alice:live-pass"})
+                                           {"proxy_user": "alice", "proxy_password": "live-pass"})
         api(web_port, "/api/environments/renamed/stop", "POST")
         status_auth_patch, authed = api(web_port, "/api/environments/renamed", "PATCH",
-                                        {"proxy_auth": "alice:live-pass"})
+                                        {"proxy_user": "alice", "proxy_password": "live-pass"})
         status_auth_start, _ = api(web_port, "/api/environments/renamed/start", "POST")
         auth_port = authed["listen"]["port"]
         auth_url = f"http://gamma.test:{alpha.port}/"
@@ -614,12 +670,16 @@ def main() -> int:
             time.sleep(0.5)
         granted = curl_status(auth_port, auth_url, auth="alice:live-pass")
         status_auth_running, _ = api(web_port, "/api/environments/renamed", "PATCH",
-                                     {"proxy_auth": "bob:other"})
+                                     {"proxy_user": "bob", "proxy_password": "other"})
+        authed_json = json.dumps(authed)
         check(
-            "12 代理鉴权：无凭据 407、带凭据 200、运行中改 proxy_auth 被拒、视图不回显凭据",
+            "12 代理鉴权：无凭据 407、带凭据 200、运行中改 proxy_user/proxy_password 被拒、"
+            "视图不回显凭据",
             status_auth_running_early == 409
             and status_auth_patch == 200 and authed["proxy_auth_enabled"] is True
-            and "alice:live-pass" not in json.dumps(authed)
+            # 只断言**取值**不回显：`proxy_auth_enabled` 本身就含 `proxy_auth` 子串，
+            # 拿键名当判据会误报。
+            and "live-pass" not in authed_json and "alice" not in authed_json
             and denied == "407" and granted == "200" and status_auth_running == 409,
             f"early={status_auth_running_early} patch={status_auth_patch} denied={denied} "
             f"granted={granted} running_patch={status_auth_running} "
@@ -654,6 +714,59 @@ def main() -> int:
             f"host={wild_view['listen']['host']} health={wild_view['health']} "
             f"loopback={loopback_ok}",
         )
+
+        # ---- 14 insecure_hosts：按域名放宽上游证书校验（运行中热生效）----
+        # 端到端判别性对照：规则把两个域名都改写到同一个**自签** HTTPS 上游，
+        # 只有列进 insecure_hosts 的那个能通，另一个必须仍然 502。
+        tls_cert = self_signed_cert(work, "relaxed.test")
+        if tls_cert is None:
+            print("SKIP 14 insecure_hosts: openssl is not available "
+                  "(cannot stand up a self-signed upstream)")
+        else:
+            tls_upstream = Upstream("tls-upstream", tls_cert=tls_cert)
+            servers.append(tls_upstream)
+            api(web_port, "/api/rules", "POST",
+                {"name": "tlsdemo",
+                 "text": "127.0.0.1 relaxed.test\n127.0.0.1 strict.test\n"})
+            status_tls_create, created_tls = api(web_port, "/api/environments", "POST",
+                                                 {"name": "tlsdemo", "rules": "tlsdemo"})
+            status_tls_start, _ = api(web_port, "/api/environments/tlsdemo/start", "POST")
+            tls_proxy_port = created_tls["listen"]["port"]
+            relaxed_url = f"https://relaxed.test:{tls_upstream.port}/"
+            strict_url = f"https://strict.test:{tls_upstream.port}/"
+
+            # 1) 名单为空：改写生效，但上游证书不在信任库里 → 严格校验 → 502
+            before, _ = curl_https(tls_proxy_port, relaxed_url)
+            health_before = api(web_port, "/api/environments/tlsdemo")[1]["health"]
+
+            # 2) **运行中**把域名加进名单：不重启、不 stop/start，等注入器轮询到新配置
+            status_hot, listed = api(web_port, "/api/environments/tlsdemo", "PATCH",
+                                     {"insecure_hosts": ["relaxed.test"]})
+            deadline = time.time() + 20
+            after = ""
+            while time.time() < deadline:
+                after, _ = curl_https(tls_proxy_port, relaxed_url)
+                if after == "200":
+                    break
+                time.sleep(0.5)
+            health_after = api(web_port, "/api/environments/tlsdemo")[1]["health"]
+
+            # 3) 同一个实例：同样被改写、但**没**列进名单的域名仍然严格 → 502
+            control_tls, _ = curl_https(tls_proxy_port, strict_url)
+            check(
+                "14 insecure_hosts 端到端：名单外严格校验 502 → 运行中加名单热生效 200"
+                "（健康始终 running）→ 同实例未列出的域名仍 502",
+                status_tls_create == 201 and status_tls_start == 200
+                and before == "502"
+                and status_hot == 200 and listed["insecure_hosts"] == ["relaxed.test"]
+                and health_before == "running" and health_after == "running"
+                and after == "200" and control_tls == "502",
+                f"create={status_tls_create} start={status_tls_start} before={before!r} "
+                f"hot_patch={status_hot} listed={listed['insecure_hosts']} "
+                f"health={health_before}→{health_after} after={after!r} "
+                f"control={control_tls!r} port={tls_proxy_port} "
+                f"upstream={tls_upstream.name}:{tls_upstream.port}",
+            )
     finally:
         if workbench is not None:
             workbench.kill()

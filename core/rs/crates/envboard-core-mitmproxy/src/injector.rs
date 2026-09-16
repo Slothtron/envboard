@@ -85,7 +85,14 @@ mod tests {
     fn injector_stays_single_file_and_dependency_free() {
         // 这条断言是"可随时丢掉"的技术保障：单文件 + 只用标准库（外加 mitmproxy 本身）。
         assert!(source_contains("def server_connect"));
-        assert!(source_contains("envboard_status_file"));
+        // 配置通道是"自己目录旁边的固定路径"，不再是 `--set` 选项
+        assert!(source_contains("CONFIG_FILE_NAME"));
+        assert!(source_contains("RULES_LINK_NAME"));
+        assert!(source_contains("def tls_start_server"));
+        assert!(source_contains("VERIFY_NONE"));
+        // 被删掉的选项族不许回来：它们就是"用户可控 --set"的入口
+        assert!(!source_contains("add_option"));
+        assert!(!source_contains("envboard_expect"));
         // 不该出现对 v1 那些模块的依赖
         assert!(!source_contains("from envboard."));
         assert!(!source_contains("import mitmproxy_rs"));

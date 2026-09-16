@@ -10,8 +10,9 @@ pub mod ports;
 pub mod reconcile;
 
 pub use environment::{
-    DESCRIPTION_MAX_CHARS, Environment, KNOWN_FIELDS, NAME_MAX_LEN, PATH, normalize_name,
-    normalize_rules, parse_ip_literal, validate_name, validate_rules_name,
+    DESCRIPTION_MAX_CHARS, Environment, KNOWN_FIELDS, NAME_MAX_LEN, PATH, PROXY_PASSWORD_MAX_LEN,
+    PROXY_USER_MAX_LEN, TOMBSTONE_FIELDS, normalize_name, normalize_rules, parse_ip_literal,
+    validate_name, validate_rules_name,
 };
 pub use ports::{
     DEFAULT_MAX_ATTEMPTS, DEFAULT_PORT_RANGE, PORT_FIELD, PortDecision, PortRequest, Warning,

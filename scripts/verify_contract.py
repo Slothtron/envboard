@@ -80,10 +80,17 @@ def _runner_rules(text: str, _case: dict | None = None):
     return _load_injector().parse_hosts_text(text)
 
 
+def _runner_insecure(case: dict | None = None):
+    """`insecure.hosts` 的 Python 参考实现也在注入器里（运行时用的就是它）。"""
+    assert case is not None
+    return _load_injector().insecure_match(case["input"])
+
+
 CAPABILITIES: dict[str, tuple[str, Callable[..., Any] | None]] = {
     "environment.validate": ("environment", None),
     "environment.merge": ("merge", None),
     "rules.parse": ("rules", _runner_rules),
+    "insecure.hosts": ("insecure", _runner_insecure),
     "port.allocate": ("ports", None),
     "instance.reconcile": ("lifecycle", None),
 }
@@ -95,8 +102,15 @@ def view_of(capability: str, result: Any) -> dict[str, Any]:
     规则解析的 ``skipped`` 里有行号等噪声，直接全量比对会让 fixture 又长又脆；
     这里换成稳定的形状（原因码、detail、``[host, dropped, kept]``）。
     """
-    if capability != "rules.parse":
-        return result.to_json()
+    if capability == "rules.parse":
+        return _rules_view(result)
+    if capability == "insecure.hosts":
+        # 注入器的参考实现直接返回一个朴素 dict（它就是判定本身，没有别的形状）。
+        return result
+    return result.to_json()
+
+
+def _rules_view(result: Any) -> dict[str, Any]:
     return {
         "entries": dict(result.entries),
         "accepted": result.accepted,

@@ -16,6 +16,7 @@
 | `environment.validate` | 环境定义合法性；归一化与默认值；错误码与 `field` 路径 | `fixtures/environment/` |
 | `environment.merge` | patch 语义（部分更新；未提及字段保持不变；**显式 `null` = 清空**；合并后重新校验） | `fixtures/merge/` |
 | `rules.parse` | hosts 风格输入 → 规范化规则；非法内容忽略；冲突后出现者胜；确定性渲染 | `fixtures/rules/` |
+| `insecure.hosts` | 按域名放宽上游证书校验：`insecure_hosts` 的归一化/校验与**精确相等**命中判定 | `fixtures/insecure/` |
 | `port.allocate` | 端口选择语义（候选序列 → 选中的端口）；显式指定；冲突；重试耗尽；区间外已分配端口保留 | `fixtures/ports/` |
 | `instance.reconcile` | 期望状态与实际状态对齐：reconcile 顺序、孤儿清理判定、端口冲突标记 | `fixtures/lifecycle/` |
 
@@ -27,6 +28,7 @@
 
 ```
 environment.validate  ←  environment.merge
+                      ←  insecure.hosts        （`insecure_hosts` 的语义由它裁定）
                       ←  port.allocate
                       ←  instance.reconcile   （经 port.allocate 取端口）
                       ←  rules.parse          （经 environment.rules 绑定）
@@ -41,16 +43,18 @@ environment.validate  ←  environment.merge
 
 ### 环境（`Environment`）
 
-v1 有 8 个字段，v2 收成 5 个，v2.1 增加第 6 个 `proxy_auth`：
+v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**当前模型是 7 个字段**：
+任意的 `options` 透传**已删除**、`proxy_auth` **已拆成两个字段**、新增 `insecure_hosts`。
 
-| 字段 | JSON 形状 | 约束 |
-|---|---|---|
-| `name` | `string` | 见下（唯一标识，也是持久化主键） |
-| `listen` | `{host, port}` | `host` 是 IP 字面量（默认 `127.0.0.1`，可为 `0.0.0.0` 对外服务）；`port` 见下 |
-| `rules` | `string \| null` | 规则名（**不是路径**，见本文件「规则文件（rules）语义」） |
-| `options` | `{string: string}` | 透传给 core 的每实例选项（默认 `{}`）；受 denylist 约束，见下 |
-| `description` | `string` | 可空；最长 200 字符 |
-| `proxy_auth` | `string \| null` | 代理访问鉴权，`user:password` 形态；`null` = 不启用（默认）。见下 |
+| 字段 | JSON 形状 | 约束 | 生效 |
+|---|---|---|---|
+| `name` | `string` | 见下（唯一标识，也是持久化主键） | 停机 |
+| `listen` | `{host, port}` | `host` 是 IP 字面量（默认 `127.0.0.1`，可为 `0.0.0.0` 对外服务）；`port` 见下 | 停机 |
+| `rules` | `string \| null` | 规则名（**不是路径**，见本文件「规则库账本与固定名软链」） | **热**（换软链） |
+| `insecure_hosts` | `string[]` | 完整域名（也接受 IP 字面量）；拒绝 `*` / `?`；≤200 条；归一化 + 去重 + 排序；默认 `[]` | **热** |
+| `description` | `string` | 可空；最长 200 字符 | 热 |
+| `proxy_user` | `string \| null` | 与 `proxy_password` **同生共死**；非空时不含 `:`、空白或控制字符；≤64 字符 | 停机 |
+| `proxy_password` | `string \| null` | 同上；≤128 字符；**任何错误信息不回显取值** | 停机 |
 
 1. **`name`**：先 `trim`，再整体小写化，然后必须匹配 `^[a-z][a-z0-9_-]{0,31}$`。
    归一化后仍不合规即失败，`field = environment.name`。
@@ -72,67 +76,182 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加第 6 个 `proxy_auth`：
      **禁止**接受调用方给出的路径片段、`..`、绝对路径或带分隔符的名字。
 5. **`description`**：可空字符串；`trim` 后按字符计最长 200，超长失败
    `field = environment.description`。
-6. **`proxy_auth`**：`null`/缺省 = 不启用代理鉴权；非空时必须是 `user:password`：
-   恰好一个 `:`（密码里含 `:` 会与 mitmproxy `proxyauth` 的切分歧义，从源头拒绝）、
-   两段非空、不含空白与控制字符（Basic 认证的编码形态不允许）、`trim` 后总长 ≤128。
-   失败 `field = environment.proxy_auth`，**错误信息不回显输入值**（这是凭据）。
-   - 凭据的唯一出口是实例启动参数（`--set proxyauth=<user:password>`，core 下发）；
-     `options` 里的 `proxyauth` 键被 denylist 拒绝 —— 两个真相必然分叉，只有一个入口。
-   - 这是**敏感数据**：状态存储文件权限必须收紧；视图/日志只暴露"是否启用"布尔，
-     禁止回显凭据本身。
-   - 运行中实例改它必须先停止（与 `rules` 绑定同类：实例启动时读取，运行中换不上）。
-7. **未知字段必须失败**，禁止静默忽略（`field` 指出该字段的点分路径）。
-   这条在 v2 里多了一层意义：v1 的 `dns_servers`、`hosts`、`color`、`domain_suffix`
-   **现在会响亮报错**，而不是被当成"没用的字段"默默收下（有 fixture 钉住这一点）。
-7. **`options`**：`core` 特有配置进入实例的**唯一通道**（`InstanceSpec.options`）在
-   环境上的持久化来源。形状是 `{key: value}`，**键与值都是字符串**（`--set key=value`
-   的语义），省略时取默认 `{}`。约束：
-   - 键必须非空，且不含空白与 `=`（否则无法拼成 `--set`）；
-   - 每个键都要过 `validate_options` 的 denylist（管理器自有键、会改变进程拓扑或加载
-     第三方代码的键、`envboard_` 前缀）—— 命中即 `invalid_config`；
-   - 失败时 `field = environment.options`（`options` 不是对象，或键为空字符串）或
-     `environment.options.<key>`（键含空白/`=` / 值不是字符串 / 命中 denylist）。
-   - **值不由本能力解释**：core 才认识 `ssl_insecure` 这类键，环境层只负责"存下来、
-     原样下发、并保证同一份配置在每次启动（含 reconcile）都一致"。
+6. **`insecure_hosts`**：按域名放宽上游证书校验的完整域名清单，语义见本文件
+   「insecure_hosts（按域名放宽上游证书校验）」。写入时约束：
+   - 必须是**数组**（不接受单个字符串的"方便写法"）；缺省/`null` = `[]`；
+   - 每条 `trim` → 小写 → 去掉尾部根点，然后必须通过 host 校验（label 白名单、总长 ≤253）；
+     **含 `*` 或 `?` 一律 `invalid_config`** —— 这里**不**做规则文件那套"剥掉 `*.` 前缀"
+     的处理（那会让"没生效"变成"生效范围比你以为的大"）；
+   - 条数 ≤200；失败 `field = environment.insecure_hosts`（不是数组 / 超限）或
+     `environment.insecure_hosts.<index>`（某一项非法 / 值不是字符串）；
+   - 持久化前**去重 + 按字典序排序**：同一份输入永远得到同一份列表，diff 才稳定。
+7. **`proxy_user` / `proxy_password`**：两个字段，**同生共死**。
+   - 都 `null`/缺省 = 不启用代理鉴权；**只有一边** → `invalid_config`，
+     `field` 指向**缺失**的那一边（`environment.proxy_password` / `environment.proxy_user`）；
+   - 每段非空，且不含 `:`、空白与控制字符。`:` 的禁用与 mitmproxy `proxyauth` 的
+     `split(":")` 切分有关：那里要求**恰好一个**冒号，含 `:` 的段会让两侧语义分叉；
+   - 长度上限：`proxy_user` ≤64、`proxy_password` ≤128（按字符计）；
+   - **任何错误信息都不回显取值**；视图 / 日志 / SSE 只暴露 `proxy_auth_enabled` 布尔；
+   - 明文**只**落在两处：0600 的状态存储文件，以及实例的启动参数
+     （`--set proxyauth=<user>:<password>`，由 core 拼装）。记录进程身份时
+     cmdline 里的凭据值必须先脱敏成 `***`，比对存活进程时两侧都脱敏后再比。
+   - 运行中实例改它必须先停止（实例只在启动时读取凭据）。
+8. **未知字段必须失败**，禁止静默忽略（`field` 指出该字段的点分路径）。
+   v1 的 `dns_servers`、`hosts`、`color`、`domain_suffix` 会响亮报错，
+   而不是被当成"没用的字段"默默收下（有 fixture 钉住这一点）。
+9. **两条迁移 shim**（只读不写，读到旧形状就转换，写出永不含旧字段）：
+   - `options`：`{}` 或 `null` **接受并忽略**（旧版每个环境都写 `options: {}`，
+     一律拒绝会让升级卡死）；**非空** → `invalid_config`，`field = environment.options`，
+     报错信息要指出唯一可行的替代（把受影响的域名列进 `insecure_hosts`）——
+     非空就意味着这份配置**确实依赖**过那条通道，静默忽略会让用户以为设置还在生效；
+   - `proxy_auth`（旧的一整串 `user:password`）：读时**无损拆分**成两个新字段
+     （整体 `trim` 后按第一个 `:` 切开），写时不再输出。与两个新字段**同时给出**
+     （都非空）则 `invalid_config`，`field = environment.proxy_auth`——那是真的歧义，
+     不该猜。PATCH 语义下旧形状是"整体替换凭据"，所以 base 上的旧值先被清掉再迁移。
 
 ### 归一化与默认值：只有一个来源
 
-默认值（`listen.host = 127.0.0.1`、`rules = null`、`options = {}`、`description = ""`、
-`proxy_auth = null`）在 core 里定义**一次**。宿主配置只做映射，适配器**禁止**再写一份默认值。
+默认值（`listen.host = 127.0.0.1`、`rules = null`、`insecure_hosts = []`、`description = ""`、
+`proxy_user = null`、`proxy_password = null`）在 core 里定义**一次**。宿主配置只做映射，
+适配器**禁止**再写一份默认值。
 `environment.validate` 的输出即"归一化后的完整记录"，可直接持久化。
 
 ### 编辑已有环境（PATCH 语义）
 
 环境是**可改的**，不必删了重建。请求体是"要改的字段"的集合，没出现的字段一律不动
-（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 6 个，未知字段照样失败。
+（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 7 个，未知字段照样失败。
 
 `rules: null` 与"没给 `rules`"是**两件事**：前者是"解绑，回到不覆盖"，后者是"别动绑定"。
-工作台与 CLI 都必须显式表达解绑（工作台的下拉里「不覆盖」会发出 `null`）。
+`insecure_hosts: null` 与"没给"同理（前者 = 清空回 `[]`，回到全部严格校验）。
 
-`options` 与 `listen` 同款：**整体替换**，不是深合并 —— 给出来的对象就是新值，
-`null` 即清空回 `{}`。键删除靠"给出不含该键的新对象"，不靠深合并里缺省即删除
-（后者会让"漏写一个键"静默变成"删掉一个选项"）。
+`insecure_hosts` 与 `listen` 同款：**整体替换**，不是元素级合并 —— 列表的"部分修改"
+没有无歧义的语义，所以给出来的数组就是新值。凭据两个字段是逐字段的（合并后**重新校验**
+"同生共死"）。
 
 哪些改动**要求环境处于停止状态**，由"运行中的实例会不会因此与配置分叉"裁决：
 
 | 改动 | 运行中 | 理由 |
 |---|---|---|
-| `description` | ✅ 允许 | 纯展示字段，实例不读它 |
-| `rules` **绑定** | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set envboard_rules=<path>` 固定规则**路径**；换绑定它看不见，于是"配置说绑了 A、实例仍按 B 干活" |
-| `options` | ❌ 拒绝（`conflict`） | 选项同样在启动时经 `--set` 固定；运行中改它，实例仍按旧值工作，而配置已经说新值了 |
+| `description` | ✅ 允许（热） | 纯展示字段，实例不读它 |
+| `insecure_hosts` | ✅ 允许（热） | 注入器轮询 `config.json`，一变就整份重读（见下节） |
+| `rules` **绑定** | ✅ 允许（热） | 绑定由**固定名软链**承载：管理器原子换链 + 重写 `config.json`，注入器下一次轮询跟上；实例不必重启 |
+| 规则文件的**内容** | ✅ 允许（热） | 注入器按目标文件的 `(mtime, size)` 重读；绑定没变也不必重启 |
 | `name` / `listen` | ❌ 拒绝（`conflict`） | 它们是环境的身份：客户端代理配置、状态文件、进程记录会同时失效 |
-| `proxy_auth` | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set proxyauth=…` 拿到凭据，运行中换不上 |
-| 规则文件的**内容** | ✅ 热重载 | 注入器按 mtime 重读**已绑定的那个路径**（间隔 `--reload-interval`），绑定没变就不必重启 |
+| `proxy_user` / `proxy_password` | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set proxyauth=…` 拿到凭据，运行中换不上 |
 
-拒绝时的 `message` **必须**说清"先停止"与"描述可以改"，否则调用方只能猜。
+拒绝时的 `message` **必须**说清"先停止"，并列出哪些字段是热的，否则调用方只能猜。
 
 改名是一次**搬迁**，不是"删一个建一个"：期望状态、端口归属（是否自动分配）、异常标记、
 进程记录都跟着搬到新名字下，旧名字在账本里消失。改名**不搬日志文件** —— 日志按名字落盘，
 新名字从新文件开始（见 `instance.logs`）。
 
-改了 `listen`、`rules` 绑定、`options` 或 `proxy_auth` 即作废**旧的失败标记**
-（`port_conflict` / `config_mismatch`）：那两个标记陈述的是"上一个配置失败了"，留着它
-会让界面拿**新**配置报旧冲突（`config_mismatch` 尤其可能正是由某个选项或凭据引起的）。
+改了 `listen`、`rules` 绑定、`insecure_hosts` 或凭据即作废**旧的失败标记**
+（`port_conflict` / `config_mismatch`）并**重置收敛基准**：那两个标记陈述的是
+"上一个配置失败了"，留着它会让界面拿**新**配置报旧冲突（`config_mismatch` 尤其可能
+正是由某个凭据或放行清单引起的）；收敛基准不重置的话，新配置会继承旧窗口，
+刚写完就被判成 `config_mismatch`。
+
+## insecure_hosts（按域名放宽上游证书校验）
+
+**问题**：规则把某域名改写到内网测试机，而那台机器的证书由私有 CA 签发（中间证书也不下发），
+上游链路校验必然失败。这类"只是 issuer 不受信"的场景需要一个**按域名**的例外，
+而不是全局关掉校验。
+
+**定义**：`insecure_hosts` 是完整域名（或 IP 字面量）集合；被放行 ⟺ 归一化后的 SNI
+与集合里某个元素**完全相等**。无通配符、无子域继承、无后缀匹配。
+
+命中判定（`insecure.hosts`）：
+
+| 清单 | 宿主 | 结果 | 钉住的语义 |
+|---|---|---|---|
+| `["365.kdocs.cn"]` | `365.kdocs.cn` | ✅ | 精确命中 |
+| `["365.kdocs.cn"]` | `365.KDocs.CN.` | ✅ | 两侧都归一化 |
+| `["kdocs.cn"]` | `365.kdocs.cn` | ❌ | 不做子域继承 |
+| `["kdocs.cn"]` | `kdocs.cn.evil` | ❌ | 不做后缀匹配 |
+| `[]` | 任意 | ❌ | 空 = 不放行 |
+| `["10.13.34.11"]` | 无 SNI，上连地址 = 该 IP | ✅ | 无 SNI 时才退回地址 |
+| `["10.13.34.11"]` | SNI = `365.kdocs.cn`，地址 = 该 IP | ❌ | SNI 存在就不退回地址 |
+
+- **SNI 缺失才退回上连地址**：规则改写会让"请求的域名"与"连的地址"分叉，客户端不发 SNI
+  时只能按地址判。SNI 存在但不在清单里**不**退回 —— 退回会让一次命名失配变成一次静默放行。
+- **命中后做的是"只放宽校验"**：自建上游 TLS context 时把 `verify` 设为 `VERIFY_NONE`，
+  其余（ALPN、cipher、TLS 版本、ECDH 曲线、SNI 设置）与不改写时逐项一致。
+  名单外的域名一律严格校验，行为与今天完全相同。
+- **只在 `tls_start_server` 这一步生效**：`-s` 脚本的这个钩子**先于** core 自己的
+  tlsconfig 执行，所以注入器提供了 `ssl_conn` 之后 core 会直接返回；
+  `server.sni` 必须**显式**设置，否则内网测试机按 SNI 选不到 vhost。
+- **禁止静默扩大范围**：写入时拒绝通配符（见「领域不变量」第 6 条）；匹配是纯函数；
+  清单为空就是全部严格校验。**没有"整个环境全关"的开关**（`ssl_insecure` 这类全局选项
+  随 `options` 一起删除）。
+- 判定失败时**倾向严格**：注入器构造 context 出错只记一条 warn，不设置 `ssl_conn`，
+  于是 core 走它自己的严格路径 —— 宁可连不上，也不能在出错时把校验静默关掉。
+
+## 配置下发与热重载（`config.json`）
+
+管理器与注入器之间的配置**不在命令行上**，而在每个环境自己的目录里：
+
+```
+<state_dir>/agent/<env>/
+├── envboard_mitmproxy.py   注入器（构建期内嵌进二进制，启动时物化）
+├── config.json             ★ 唯一的配置通道（管理器唯一写者，原子 rename，0600）
+└── envboard.rules          固定名软链 → <rules_dir>/<name>.rules
+```
+
+`config.json`（v1，强 schema，**未知键即非法**）：
+
+| 键 | 含义 |
+|---|---|
+| `version` | 格式版本（当前 `1`）；不认识的高版本拒绝 |
+| `env` | 环境名（展示 + 注解用） |
+| `status_file` | 状态文件绝对路径（由管理器指定，注入器不拼环境名） |
+| `rules` | 绑定的规则**名**或 `null`；只用于日志、回执与**链接完整性校验** |
+| `insecure_hosts` | 放行域名清单（已归一化 + 去重 + 排序） |
+| `launch_expected` | 管理器下发、且**必须被宿主接受**的 `--set` 键值（当前只有 `proxyauth`） |
+| `reload_interval_secs` | 注入器轮询间隔；收敛窗口也按它算 |
+| `annotate` | 是否给流加注解 |
+
+- **内容确定性**：`config.json` 的字节是环境定义的确定性函数（不含时间戳）。
+  于是"要不要重写"可以按字节比较、"期望哈希"任何时候都能重算，也不会因为每轮
+  reconcile 都写一次而让运行中的实例反复热重载。
+- **注入器只认"自己目录旁边的固定路径"**：配置文件与规则软链都在它旁边，所以它不需要
+  任何"路径参数"，也不需要知道自己是哪个环境。
+- 剩余命令行参数只有 core 自己的选项：`-s`、`--set confdir`、`--set listen_host`、
+  `--set listen_port`，以及启用鉴权时的 `--set proxyauth=<user>:<password>`。
+  **没有用户可控的 `--set`。**
+- **收敛窗口**：管理器写下期望配置哈希与写入时刻；实例回执的 `config_hash` 相等 = 已生效；
+  不等但 `now - written_at <= reload_interval + 3s` = 收敛中（仍算 `running`）；超窗仍不等 =
+  `config_mismatch`。实例上一轮热重载失败会写 `config_error`，那一路是 `unhealthy`
+  （实例保留上一份快照继续代理，不中断流量，但这份配置确实没生效）。
+- **上一代实例**：状态文件里没有 `config_hash`（空串）= 那次启动用的还是旧通道，
+  配置必然与账本分叉 —— reconcile 对它执行 `restart`，而不是"没坏就不动"。
+
+## 规则库账本与固定名软链
+
+**账本是唯一真相**：`state.json` 里的 `rules[]` 记录每条规则的
+`{name, source, rendered, entries, skipped, conflicts, imported_at}`，
+其中 `rendered` 是**规范化渲染后的完整正文**。`<rules_dir>/<name>.rules` 只是它的一份
+**可再生物化产物**。
+
+- **导入**：解析 → 渲染 → 更新账本 → 原子写物化文件（0600）→ 保存账本。同名再次导入
+  就是覆盖（内容热生效）。
+- **对账（启动与常驻循环各一次，幂等）**：
+  1. 物化目录里有、账本里没有的 `*.rules` → **回填**账本（读文件重新 parse 得统计）——
+     这是升级迁移，保证旧规则库不丢；
+  2. 账本里有、物化文件缺失或被改坏 → 按 `rendered` 逐字节重建；
+  3. 每个环境的固定名软链与它的绑定对齐。
+- **读取**：清单与正文都从账本读，所以物化文件被删也答得出来；健康判定用的"期望条数"
+  同样来自账本 —— "期望什么"不该依赖物化文件的瞬时状态。
+- **删除**：仍拒绝删除"被任何环境绑定"的规则；删除 = 账本移除 + 物化文件删除。
+- **每环境软链**：`<state_dir>/agent/<env>/envboard.rules`（固定名）→ `<rules_dir>/<name>.rules`。
+  维护时机：创建 / 改名 / 改绑定 / 启动前 / 对账。替换是**原子**的（同目录建临时链再 `rename`）。
+  解绑（`rules: null`）→ 删链。
+- **链接不存在或悬空 ⇒ 该环境不覆盖任何域名**，`start` **不失败**；视图给出
+  `rules_missing` 提示，并在可能时自愈（账本里有该名字 → 重建物化文件 + 修链）。
+  这是相对早期实现的**有意语义变更**：以前"规则文件缺失"会让启动响亮失败。
+- **链接指向与 `config.rules` 不一致**（例如有人手工改过链）→ 注入器报 `config_error`，
+  **不猜**用哪一个 —— 那是"账本说的"与"实际生效的"分叉，正好是最难查的一类故障。
+- 绑定一个**不存在**的规则名在写入时就被拒绝（`field = environment.rules`）：
+  在新语义下那会变成一次静默失效，宁可不接受。
 
 ## 端口分配（`port.allocate`）
 
@@ -186,7 +305,7 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加第 6 个 `proxy_auth`：
 - **健康判据的次序**（两条判定路径必须给出同一个结论）：
   1. **进程存活**：有记录身份时按 PID + starttime 比对；进程已不在（含僵尸）→
      `failed`（带退出原因：状态码或信号）或 `stopped`；
-  2. **状态文件**（含生效配置回显、规则条数、最后错误、`updated_at` 时效）**为主**，
+  2. **状态文件**（含配置哈希回执、规则条数、最后错误、`updated_at` 时效）**为主**，
      TCP 探活为辅 —— 代理的 listener 先起、注入器随后才加载规则，所以"TCP 能连上"
      并不等于"规则已生效"；
   3. 两者都过才算 `running`。
@@ -194,9 +313,18 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加第 6 个 `proxy_auth`：
     是错的：实例进程崩溃后工作台会一直显示在跑（实测 60 秒后仍然如此，直到状态文件过期）。
   - 进程**由本管理器拉起**、又没人要求它停，而进程没了 → 报 `failed` 而不是 `stopped`：
     "它自己死了"与"我停的"是两件事，否则崩溃现场会被说成一次正常停止。
-  - 契约渲染出的每个选项，都要有"生效后回显与期望一致"的断言；不一致 → `config_mismatch`。
+  - **生效配置回执**要逐项断言，不一致 → `config_mismatch`：
+    1. `config_hash`（管理器写下的字节的 sha256）——这是"账本里那份配置到底有没有生效"的
+       权威判据；
+    2. 规则条数（补充断言）；
+    3. `options_echo`：管理器下发的每个 `--set` 是否真被宿主接受。
     这条是必需的，因为 **mitmdump 对未知/拼错的 `--set` 选项是静默忽略的**
-    （不会报错），命令成功不能当作配置生效。
+    （不会报错），命令成功不能当作配置生效。`proxyauth` 是安全控制，被忽略等于裸奔。
+  - **两个时间窗口**：hash / 条数这两条都比对**都要受收敛窗口保护**
+    （见「配置下发与热重载」）——刚写完配置的那几秒，实例还没轮到轮询，报"配置不对"
+    是假警报。反之，超窗仍不一致就必须报出来。
+  - 链接不在效（`rules_missing`）时**跳过**规则条数比对：那种情况已由 `rules_missing`
+    明确表达，再叠一个 `config_mismatch` 只会让用户看到两个症状、一个原因。
 
 ## 实例日志（`instance.logs`）
 
@@ -236,20 +364,19 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加第 6 个 `proxy_auth`：
 | 监听某端口做 HTTP/HTTPS 代理 | `--set listen_port` | ✔ |
 | 动态签发证书（HTTPS 中间人） | 内置 CA + 按需签发 | ✔（**最难的一块**） |
 | 按 host 改写上连目标 | `server_connect` 钩子改写地址 | ✔（核心需求） |
-| 每实例选项覆盖（如 `ssl_insecure`） | `--set` 原样透传（受 denylist 约束） | ✔ |
+| 按域名放宽上游证书校验（`insecure_hosts`） | `tls_start_server` 里按 SNI 精确命中，命中则用 `VERIFY_NONE` 自建上游 context | ✔ |
 | 共享 CA、客户端只装一次 | `confdir` | ✔ |
 | 给 flow 打标记（观测） | `flow.comment` | 可选 |
 | PAC / 透明代理 / SOCKS | 内置 | 可选 |
 
-抽象收在"启动参数 + 状态回传"这个粒度即可。**`InstanceSpec.options` 是唯一允许
-core 特有配置进入实例的通道，但它必须有 denylist**（管理器自有键如 `listen_port` /
-`confdir`，以及会改变进程拓扑或加载第三方代码的键如 `mode` / `scripts`），
-命中即 `invalid_config`。
+抽象收在"启动参数 + 状态回传"这个粒度即可。实例的配置**只有一等字段这一条路**
+（监听地址、注入器目录、放行域名清单、代理凭据）—— 曾经存在过一个任意 `options`
+透传通道，它让"放宽上游证书校验"这种安全控制可以绕过契约，**已删除**：
+不再有 `InstanceSpec.options`，也不再有 denylist（没有可透传的东西，就不需要守门）。
 
-**选项的来源只有一个：环境上的 `options` 字段**（已持久化）。启动与 reconcile 都从它
-取值，**没有"本次启动临时覆盖"的第二条通道** —— 那会让手动启动的实例与账本里的配置
-分叉，而 reconcile 之后又按账本把实例拉回另一套值。改选项走 `environment.merge`，
-且要求环境已停止（理由与换规则绑定相同：选项在启动时经 `--set` 固定）。
+**配置的来源只有一个：环境上持久化的字段**。启动与 reconcile 都从它取值，
+**没有"本次启动临时覆盖"的第二条通道** —— 那会让手动启动的实例与账本里的配置分叉，
+而 reconcile 之后又按账本把实例拉回另一套值。
 
 **改写上连地址的已知代价**（写进契约以免被当成实现缺陷）：
 上游连接池按地址匹配，改写后地址与请求 host 不再相等 → **该 host 的上游连接不复用**，
@@ -257,7 +384,8 @@ core 特有配置进入实例的通道，但它必须有 denylist**（管理器�
 
 ## 规则文件（rules）语义
 
-**规则文件是"已规范化"的静态覆盖**，由一份手写的 hosts 风格输入生成：
+**规则文件是"已规范化"的静态覆盖**，由一份手写的 hosts 风格输入生成
+（账本与物化文件的关系见本文件「规则库账本与固定名软链」）：
 
 ```
 输入（容忍）                         输出（确定性）
@@ -297,6 +425,8 @@ b.example.com 10.0.0.2        →      10.0.0.2 b.example.com
 
 | 删除项 | v1 用途 | 删除理由 |
 |---|---|---|
+| `Environment.options`（透传任意 core 选项） | 临时调参、`ssl_insecure` 这类全局开关 | 它是一条绕过契约的任意通道：安全控制可以不经一等字段被打开；且"配置说开了、实例没收到"这类分叉无法从契约上排除。替代：受影响的域名进 `insecure_hosts`，其它 core 选项**没有**替代 |
+| `Environment.proxy_auth`（一整串 `user:password`） | 代理访问鉴权 | 拆成 `proxy_user` + `proxy_password`：字段级校验与字段级错误路径，且落库后仍只以布尔出现在视图/日志里 |
 | `Environment.hosts` | 环境内联静态覆盖 | 与规则文件功能重叠，两套真相 |
 | `Environment.dns_servers` | 指定该环境用哪台 DNS | v2 不再有解析层编排（差异由规则直接给出结果） |
 | `Environment.domain_suffix` | 展示辅助 | 从未参与解析，纯装饰 |

@@ -1,0 +1,22 @@
+{
+  "capability": "environment.validate",
+  "description": "放行域名清单：trim + 小写 + 去尾部根点，然后去重并按字典序持久化（同一份输入永远同一份列表）",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "insecure_hosts": [
+      " Web.WPS.cn. ",
+      "365.kdocs.cn",
+      "365.KDocs.CN"
+    ]
+  },
+  "expect": {
+    "ok": true,
+    "insecure_hosts": [
+      "365.kdocs.cn",
+      "web.wps.cn"
+    ]
+  }
+}

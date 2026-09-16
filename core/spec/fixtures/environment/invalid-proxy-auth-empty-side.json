@@ -1,6 +1,0 @@
-{
-  "capability": "environment.validate",
-  "description": "proxy_auth 两侧任一为空都失败（:pass / user: / 空串）",
-  "input": { "name": "auth", "listen": { "port": 16301 }, "proxy_auth": ":pass" },
-  "expect": { "ok": false, "code": "invalid_config", "field": "environment.proxy_auth" }
-}

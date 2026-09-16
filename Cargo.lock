@@ -241,6 +241,7 @@ name = "envboard-domain"
 version = "0.1.0"
 dependencies = [
  "envboard-core-api",
+ "envboard-rules",
  "serde",
  "serde_json",
 ]
