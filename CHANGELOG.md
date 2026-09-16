@@ -248,6 +248,35 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   Host/CSRF 防护、CSP 形态、日志落盘、崩溃恢复 —— 补上了 v1 立下的
   "断言必须可重跑"这条规矩在 v2 上的缺口。
 
+### Changed（工作台 UI 升级：明亮主题三视图）
+
+- 前端三资产（`core/rs/crates/envboard-web/assets/` 下的 `index.html` / `app.css` /
+  `app.js`）整体重写：从"单表格 + 深色"升级为明亮主题的三视图工作台 —— 环境 /
+  规则库 / 跨环境对比三个视图、统计卡、环境详情（概览 / 配置 / 规则三页签）、
+  可折叠日志栏（按事件类型过滤 + 搜索 + 跟随开关）。**REST API、SSE 与 CSP 形态
+  零改动**，这是纯前端层的重写。
+- 设计令牌收进 `app.css` 第 ① 区：表面三级、边框两级、文本四级灰阶（带对 `--panel`
+  的实测对比度）、语义色「原色 + bg(10%) + border(30%)」三件套、4px 间距基数、五档
+  圆角。组件层不写十六进制色值，主题切换只改令牌区。规范与理由见 `docs/ui-spec.md`。
+- 破坏性操作（删除环境）改为**就地二次确认**（后果说明 + 确认/取消），不再用原生
+  `confirm()` —— 与"无内联脚本"的 CSP 约束一致，且样式可控。
+- 图标改用同文档 SVG `<symbol>` 精灵 + `<use>`：不引字体、不发请求，
+  `stroke: currentColor` 使同一份图标随语境变色。
+- 可访问性：`prefers-reduced-motion` 降级；`[hidden]` 加 `display:none!important` 修正
+  （作者样式会盖过 UA 默认值）；文本四级灰阶全部达到可读对比度。
+- 日志栏过滤维度是**事件类型**（请求/响应/连接/运行/异常）而不是日志级别：实测日志行
+  不带 INFO/WARN 前缀，按级别过滤会是个假功能。
+
+### Fixed（工作台 UI 升级）
+
+- **引导链隔离**：`renderLogs` 排在 `connectEvents()` / `refreshAll()` 之前且无保护，
+  一个写错的容器 id（`log-filters` 改名只落在 CSS/JS 两侧，HTML 未跟上）就能让
+  `renderLogFilters` 抛空指针，进而中断整条引导链 —— 数据请求根本不发、页面停在空壳、
+  `envboardReady` 永远停在 `"pending"`。现在每个引导步骤过 `step()` 壳：坏掉的步骤记进
+  `dataset.envboardError`、ready 明确置 `"no"`，数据加载照常继续。
+- `index.html` 注释里写出的脚本标签字面量会命中 `scripts/verify_live_v2.py` 的
+  「页面源码里无内联脚本」断言（实机层 4a FAIL）—— 注释改写为不出现该字面量。
+
 ## [0.1.0] - 2026-09-15
 
 ### Added

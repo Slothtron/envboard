@@ -3,6 +3,12 @@
 > 记录时间：2026-09-15 / 16。被测二进制：`target/debug/envboard`（`--core fake` 与
 > `--core mitmproxy 12.2.3` 两种），浏览器：用户真实 Edge 153（`bsk` Agent Window）。
 > 起因是一个真实使用反馈：**建环境时没绑规则，事后改不出来**。
+>
+> **2026-09-16 更新**：界面升级为明亮主题后，本页「打开工作台」一行的计算样式断言已
+> 随令牌更新（`--bg` 从深色 `#0f1115` 改为明亮 `#f4f6fa`），并在真实实例上用无头 Edge
+> 153（CDP）复验：`envboardReady === "yes"`、控制台零 CSP 报错与零异常。下方逐步编辑
+> 流程的原始记录保留；其服务端对应行为由 `scripts/verify_live_v2.py` 的第 10 组断言
+> 在每次实机层运行时重验。
 
 ---
 
@@ -29,7 +35,7 @@ CLI 也只有 `add`。用户那份 `rules/beta.rules` 已经导入（10844 字�
 
 | 步骤 | 断言 | 结果 |
 |---|---|---|
-| 打开工作台 | `documentElement.dataset.envboardReady === "yes"`（JS 真的跑了）；`getComputedStyle(body).backgroundColor === rgb(15, 17, 21)`（样式真的生效）；控制台无 CSP 报错 | PASS |
+| 打开工作台 | `documentElement.dataset.envboardReady === "yes"`（JS 真的跑了）；`getComputedStyle(body).backgroundColor === rgb(244, 246, 250)`（样式真的生效，明亮令牌 `--bg`）；控制台无 CSP 报错 | PASS |
 | 点行内「编辑」 | 面板切到「编辑环境」、按钮变「保存」、出现「取消编辑」、顶部出现 `beta` 徽章；四个字段被填成当前值（名字 `beta`、端口 `16850`、描述 `测试环境`、规则为空） | PASS |
 | 选规则 `beta` + 改描述 → 保存 | 表格规则列从 `—` 变成 `beta (2)`；提示「已保存。」；表单回到新建模式 | PASS |
 | 启动实例 → 再点「编辑」 | 名字/端口/规则三个输入框 `disabled === true`，描述可编辑；提示写明"实例在运行，只能改描述" | PASS |

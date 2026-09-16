@@ -4,6 +4,11 @@
 > **凡是"前端行为"的改动，必须有真浏览器验收；curl 只能证明服务端返回了什么。**
 > 记录时间：2026-09-15。工具：`bsk`（用户的真实 Chromium/Edge 153，Agent Window）。
 > 环境：工作台跑在 WSL2 内、监听 `127.0.0.1:8900`；浏览器在 **Windows 侧**。
+>
+> **2026-09-16 更新**：工作台界面升级为明亮主题（规范见 `docs/ui-spec.md`）。本页三条
+> 断言已在真实实例上用无头 Edge 153（CDP）重跑取证：`envboardReady === "yes"`、计算
+> 样式对应明亮令牌（下表已更新）、控制台零 CSP 报错与零异常；同一轮还验证了「更多
+> 操作」菜单、删除的就地二次确认与「停止 → SSE → 重绘」链路。以下原始记录保留。
 
 ---
 
@@ -22,7 +27,7 @@ target/debug/envboard --state-dir /tmp/wb web --listen 127.0.0.1:8900      # cor
 | 断言 | 结果 | 证据 |
 |---|---|---|
 | **JS 真的跑了** | PASS | `document.documentElement.dataset.envboardReady = "yes"`；表格的 2 行由 JS 从 `/api/environments` 渲染出来（静态 HTML 里只有"加载中…"） |
-| **样式真的生效** | PASS | `getComputedStyle(document.body).backgroundColor = rgb(15,17,21)`、`color = rgb(230,233,239)`，健康徽章 `rgb(53,192,127)` —— 与 `app.css` 里的 `--bg/--text/--ok` 一一对应。**只看 HTTP 200 是查不出"CSS 没加载"的**，所以必须读计算样式 |
+| **样式真的生效** | PASS | `getComputedStyle(document.body).backgroundColor = rgb(244,246,250)`、`color = rgb(20,26,36)`，健康徽章 `rgb(21,128,61)` —— 与 `app.css` 里的明亮令牌 `--bg #f4f6fa / --text #141a24 / --ok #15803d` 一一对应（2026-09-16 复验）。**只看 HTTP 200 是查不出"CSS 没加载"的**，所以必须读计算样式 |
 | **无 CSP 报错** | PASS | 控制台只有 `chrome-extension://invalid/`（扩展内部）与一次 `favicon.ico` 404（见本文件 §4 已修）；**没有任何 CSP violation** |
 
 CSP 头本身（curl 取证）：

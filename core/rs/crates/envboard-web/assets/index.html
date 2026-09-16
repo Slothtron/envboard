@@ -3,107 +3,364 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <title>envboard — 多环境管理器</title>
-  <!-- 样式与脚本一律外置：CSP 里没有 'unsafe-inline'，内联会被浏览器拒绝。
-       这正是 v1 踩过的坑（内联脚本被宿主 CSP 拒绝，而 curl 断言看不出来）。 -->
+  <!-- 样式与脚本一律外置：响应头的 CSP 里没有 'unsafe-inline'。
+       内联脚本、内联样式表、内联 style 属性、内联 onclick 属性，
+       都会被宿主 CSP 静默拒绝 —— 而只看 HTTP 200 的 curl 断言查不出
+       "页面活着但样式没生效"这类故障。
+       本文件因此**不含**上述四类写法；界面图标改用同文档内的 svg symbol 定义
+       （SVG 元素不是脚本，不受 CSP 限制）。
+       注：这段注释刻意不写出那些写法的字面形式 —— 实机断言就是按字面量
+       在页面源码里找它们，注释命中一样会判定为内联。 -->
   <!-- 内联 data: 图标而不是加一个 404 的 favicon.ico：CSP 的 img-src 明确允许 data:，
        浏览器因此不会再为缺图标报一条控制台错误（验收会看控制台）。 -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1115'/%3E%3Cpath d='M8 21V11l8 6 8-6v10' stroke='%234c8dff' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a5fe8'/%3E%3Cpath d='M9 22V10l7 6 7-6v12' stroke='white' stroke-width='2.5' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
+  <!-- 图标精灵：24 网格线性图标，描边/圆角/颜色由引用处的 .ic 类决定
+       （stroke: currentColor），因此同一份图标在明暗主题下都成立。 -->
+  <svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></symbol>
+    <symbol id="i-rules" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M6 8 3 13h6L6 8Z"/><path d="m18 8-3 5h6l-3-5Z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5 19 12 7 19.5Z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-restart" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8"/><path d="M3 3v5h5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="i-log" viewBox="0 0 24 24"><path d="M4 5h16M4 10h11M4 15h16M4 20h7"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5h.01"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.5h.01"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+  </svg>
+
+  <a class="skip-link" href="#main">跳到主内容</a>
+
+  <!-- ===================== 顶部栏 ===================== -->
   <header class="topbar">
     <div class="brand">
-      <h1>envboard</h1>
-      <span class="subtitle">一个环境 = 一个实例 = 一个端口</span>
+      <span class="brand-logo" aria-hidden="true">e</span>
+      <span class="brand-text">
+        <span class="brand-name">envboard</span>
+        <span class="brand-sub">一个环境 = 一个实例 = 一个端口</span>
+      </span>
     </div>
-    <div class="status" id="status-bar">
-      <span class="pill" id="core-pill">core: …</span>
-      <span class="pill" id="conn-pill">连接中…</span>
+
+    <!-- 视图切换：三个视图互斥，用 aria-pressed 表达选中 -->
+    <nav class="view-switch" id="view-switch" aria-label="视图">
+      <button type="button" class="seg-btn is-active" data-view="environments" aria-pressed="true">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-layers"></use></svg><span>环境</span>
+      </button>
+      <button type="button" class="seg-btn" data-view="rules" aria-pressed="false">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-rules"></use></svg><span>规则库</span>
+      </button>
+      <button type="button" class="seg-btn" data-view="compare" aria-pressed="false">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-compare"></use></svg><span>跨环境对比</span>
+      </button>
+    </nav>
+
+    <div class="topbar-right">
+      <span class="badge" id="core-badge" title="proxy core">
+        <span class="dot" aria-hidden="true"></span><span id="core-badge-text">core: …</span>
+      </span>
+      <span class="badge" id="conn-badge" title="事件流与改写状态">
+        <span class="dot" aria-hidden="true"></span><span id="conn-badge-text">连接中…</span>
+      </span>
+      <button type="button" class="btn icon-btn" id="refresh" title="刷新：重新拉取状态、环境、规则与日志" aria-label="刷新">
+        <svg class="ic" aria-hidden="true"><use href="#i-refresh"></use></svg>
+      </button>
     </div>
   </header>
 
-  <main>
-    <section class="panel">
-      <div class="panel-head">
-        <h2>环境</h2>
-        <div class="actions">
-          <button id="refresh" class="ghost" type="button">刷新</button>
+  <!-- ===================== 侧边栏：环境列表 ===================== -->
+  <aside class="sidebar" aria-label="环境列表">
+    <div class="sidebar-head">
+      <span class="sidebar-title">环境</span>
+      <span class="count mono" id="env-count">0</span>
+      <button type="button" class="btn icon-btn sm" id="env-new" title="新建环境" aria-label="新建环境">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-plus"></use></svg>
+      </button>
+    </div>
+
+    <div class="search-box">
+      <svg class="ic ic-sm" aria-hidden="true"><use href="#i-search"></use></svg>
+      <input type="search" id="env-search" placeholder="搜索环境 / 端口 / 规则" aria-label="搜索环境" autocomplete="off">
+      <button type="button" class="icon-clear is-hidden" id="env-search-clear" aria-label="清空搜索">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-close"></use></svg>
+      </button>
+    </div>
+
+    <div class="filter-bar is-hidden" id="filter-bar">
+      <span class="badge info" id="filter-tag">筛选：全部</span>
+      <button type="button" class="btn ghost sm" id="filter-clear">清除筛选</button>
+    </div>
+
+    <ul class="env-list" id="env-list"></ul>
+
+    <div class="sidebar-foot">
+      <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
+      <span class="sidebar-foot-text mono" id="sidebar-foot-text">连接中…</span>
+    </div>
+  </aside>
+
+  <!-- ===================== 主内容区 ===================== -->
+  <main class="main" id="main" tabindex="-1">
+    <!-- ---------- 视图：环境 ---------- -->
+    <section class="view" id="view-environments" aria-label="环境视图">
+      <!-- 统计卡：点击即按状态筛选侧栏列表（再次点击取消） -->
+      <div class="stats-grid" id="stats-grid">
+        <button type="button" class="stat-card is-active" data-filter="all" aria-pressed="true">
+          <span class="stat-icon tint-accent"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-layers"></use></svg></span>
+          <span class="stat-body">
+            <span class="stat-value mono" id="stat-total">0</span>
+            <span class="stat-label">环境总数</span>
+          </span>
+        </button>
+        <button type="button" class="stat-card" data-filter="running" aria-pressed="false">
+          <span class="stat-icon tint-ok"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-play"></use></svg></span>
+          <span class="stat-body">
+            <span class="stat-value mono" id="stat-running">0</span>
+            <span class="stat-label">运行中</span>
+          </span>
+        </button>
+        <button type="button" class="stat-card" data-filter="issues" aria-pressed="false">
+          <span class="stat-icon tint-bad"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-alert"></use></svg></span>
+          <span class="stat-body">
+            <span class="stat-value mono" id="stat-issues">0</span>
+            <span class="stat-label">需处理</span>
+          </span>
+        </button>
+        <button type="button" class="stat-card" data-filter="rules" aria-pressed="false">
+          <span class="stat-icon tint-purple"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-rules"></use></svg></span>
+          <span class="stat-body">
+            <span class="stat-value mono" id="stat-rules">0</span>
+            <span class="stat-label">规则集</span>
+          </span>
+        </button>
+      </div>
+
+      <!-- 空状态：一个环境都没有时替代详情区 -->
+      <div class="detail empty-state" id="detail-empty" hidden>
+        <span class="empty-icon"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-server"></use></svg></span>
+        <p class="empty-title">还没有环境</p>
+        <p class="empty-hint">一个环境 = 一个独立代理实例 + 一个独立端口。创建第一个环境后，这里会显示它的概览、配置与规则绑定。</p>
+        <button type="button" class="btn primary" id="empty-new">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-plus"></use></svg><span>新建环境</span>
+        </button>
+      </div>
+
+      <!-- 详情面板 -->
+      <div class="detail" id="detail" hidden>
+        <div class="detail-head">
+          <div class="detail-id">
+            <span class="detail-name mono" id="detail-name">—</span>
+            <span class="badge" id="detail-badge" hidden>
+              <span class="dot" aria-hidden="true"></span><span id="detail-badge-text">—</span>
+            </span>
+          </div>
+          <!-- 动作按钮由 app.js 依据当前环境状态渲染（见 renderDetailActions） -->
+          <div class="detail-actions" id="detail-actions"></div>
+        </div>
+
+        <!-- 次级操作（编辑配置 / 复制命令 / 重分配端口 / 删除环境）由 app.js 渲染 -->
+        <div class="detail-more is-hidden" id="detail-more"></div>
+
+        <!-- 异常原因条：health_reason 有值时显示（异常态必须给出原因与建议动作） -->
+        <div class="notice danger is-hidden" id="detail-reason">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-alert"></use></svg>
+          <span id="detail-reason-text"></span>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="环境详情">
+          <button type="button" class="tab is-active" role="tab" data-tab="overview" aria-selected="true" aria-controls="panel-overview" id="tabbtn-overview">概览</button>
+          <button type="button" class="tab" role="tab" data-tab="config" aria-selected="false" aria-controls="panel-config" id="tabbtn-config">配置</button>
+          <button type="button" class="tab" role="tab" data-tab="rules" aria-selected="false" aria-controls="panel-rules" id="tabbtn-rules">规则</button>
+        </div>
+
+        <div class="tab-panels">
+          <!-- 概览 -->
+          <div class="tab-panel" data-panel="overview" id="panel-overview" role="tabpanel" aria-labelledby="tabbtn-overview">
+            <div class="info-grid">
+              <div class="info-cell"><span class="info-label">状态</span><span class="info-value mono" id="ov-health">—</span></div>
+              <div class="info-cell"><span class="info-label">监听端口</span><span class="info-value mono" id="ov-port">—</span></div>
+              <div class="info-cell"><span class="info-label">期望</span><span class="info-value mono" id="ov-desired">—</span></div>
+              <div class="info-cell"><span class="info-label">规则绑定</span><span class="info-value mono" id="ov-rules">—</span></div>
+              <div class="info-cell"><span class="info-label">规则条数</span><span class="info-value mono" id="ov-rules-count">—</span></div>
+              <div class="info-cell"><span class="info-label">描述</span><span class="info-value" id="ov-desc">—</span></div>
+            </div>
+
+            <div class="cmd-card">
+              <div class="cmd-head">
+                <span class="cmd-title">代理命令（复制即可用）</span>
+                <button type="button" class="btn sm" id="copy-cmd">
+                  <svg class="ic ic-sm" aria-hidden="true"><use href="#i-copy"></use></svg><span>复制</span>
+                </button>
+              </div>
+              <code class="cmd-text mono" id="ov-cmd">—</code>
+            </div>
+          </div>
+
+          <!-- 配置：同一个表单两种模式（新建 / 编辑），提交时按 data-editing 决定 POST 还是 PATCH -->
+          <div class="tab-panel is-hidden" data-panel="config" id="panel-config" role="tabpanel" aria-labelledby="tabbtn-config">
+            <div class="form-head">
+              <span class="form-title" id="env-form-title">新建环境</span>
+              <span class="badge info" id="env-form-mode" hidden><span class="dot" aria-hidden="true"></span><span id="env-form-mode-text">编辑中</span></span>
+            </div>
+            <!-- 名字的 pattern 必须能在 **`v` 标志**下编译：Chrome 现在用 `v`（不是 `u`）校验
+                 `pattern`，而 `v` 模式里裸的 `-` 是非法字符类成员 —— 于是整个 pattern 被
+                 浏览器**静默忽略**，只在控制台留一行 SyntaxError（实测）。转义成 `\-` 后
+                 两种模式都合法。契约本身见 core/spec/capabilities.md 的 `^[a-z][a-z0-9_-]{0,31}$`。 -->
+            <form id="env-form" class="form" data-editing="">
+              <label class="field">
+                <span class="field-label">名字</span>
+                <input name="name" placeholder="beta" required pattern="[a-z][a-z0-9_\-]*" autocomplete="off">
+                <span class="field-hint">小写字母开头，限 a-z 0-9 _ -</span>
+              </label>
+              <label class="field">
+                <span class="field-label">端口</span>
+                <input name="port" placeholder="留空 = 自动分配" inputmode="numeric" autocomplete="off">
+                <span class="field-hint" id="env-form-port-hint">留空则从端口区间里自动分配</span>
+              </label>
+              <label class="field">
+                <span class="field-label">规则</span>
+                <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select>
+                <span class="field-hint">绑定在下次启动时生效；规则文件内容是热重载的</span>
+              </label>
+              <label class="field">
+                <span class="field-label">描述</span>
+                <input name="description" placeholder="灰度环境" autocomplete="off">
+              </label>
+              <div class="form-actions">
+                <button type="submit" class="btn primary" id="env-form-submit">
+                  <svg class="ic ic-sm" aria-hidden="true"><use href="#i-plus"></use></svg><span id="env-form-submit-text">创建</span>
+                </button>
+                <button type="button" class="btn ghost" id="env-form-cancel" hidden>取消编辑</button>
+              </div>
+            </form>
+            <p class="hint" id="env-form-hint"></p>
+          </div>
+
+          <!-- 规则：当前环境绑定的规则文件预览 -->
+          <div class="tab-panel is-hidden" data-panel="rules" id="panel-rules" role="tabpanel" aria-labelledby="tabbtn-rules">
+            <div id="bound-rules"></div>
+          </div>
         </div>
       </div>
-      <table id="env-table">
-        <thead>
-          <tr>
-            <th>名字</th><th>状态</th><th>端口</th><th>规则</th><th>期望</th>
-            <th>代理命令</th><th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="env-body">
-          <tr><td colspan="7" class="empty">加载中…</td></tr>
-        </tbody>
-      </table>
     </section>
 
-    <div class="grid">
-      <section class="panel">
+    <!-- ---------- 视图：规则库 ---------- -->
+    <section class="view is-hidden" id="view-rules" aria-label="规则库视图">
+      <div class="panel">
         <div class="panel-head">
-          <h2 id="env-form-title">新建环境</h2>
-          <span class="pill" id="env-form-mode" hidden>编辑中</span>
+          <h2 class="panel-title">
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-rules"></use></svg><span>规则库</span>
+          </h2>
+          <span class="count mono" id="rules-count">0</span>
         </div>
-        <!-- 同一个表单两种模式：提交时按 data-editing 决定 POST 还是 PATCH。
-             刻意不搞"行内编辑"—— 两套 DOM 迟早不一致，而这里字段集本来就一样。 -->
-        <!-- 名字的 pattern 必须能在 **`v` 标志**下编译：Chrome 现在用 `v`（不是 `u`）校验
-             `pattern`，而 `v` 模式里裸的 `-` 是非法字符类成员 —— 于是整个 pattern 被
-             浏览器**静默忽略**，只在控制台留一行 SyntaxError（实测）。转义成 `\-` 后
-             两种模式都合法。契约本身见 core/spec/capabilities.md 的 `^[a-z][a-z0-9_-]{0,31}$`。 -->
-        <form id="env-form" class="form" data-editing="">
-          <label>名字 <input name="name" placeholder="beta" required pattern="[a-z][a-z0-9_\-]*"></label>
-          <label>端口 <input name="port" placeholder="留空 = 自动分配" inputmode="numeric"></label>
-          <label>规则 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select></label>
-          <label>描述 <input name="description" placeholder="灰度环境"></label>
-          <div class="form-actions">
-            <button type="submit" class="primary" id="env-form-submit">创建</button>
-            <button type="button" class="ghost" id="env-form-cancel" hidden>取消编辑</button>
-          </div>
-        </form>
-        <p class="hint" id="env-form-hint"></p>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>跨环境对比</h2></div>
-        <form id="compare-form" class="form inline">
-          <label>域名 <input name="host" placeholder="api.example.com" required></label>
-          <button type="submit" class="primary">对比</button>
-        </form>
-        <div id="compare-result" class="result"></div>
-        <p class="hint">纯静态查表：规则是确定性的，所以这个问题不发任何请求、也不会失败。</p>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>规则库</h2></div>
-        <ul id="rules-list" class="list"></ul>
+        <ul class="rule-list" id="rules-list"></ul>
         <form id="rules-form" class="form">
-          <label>名字 <input name="name" placeholder="beta" required></label>
-          <label>内容 <textarea name="text" rows="4" placeholder="10.0.0.11 api.example.com"></textarea></label>
-          <button type="submit" class="primary">导入</button>
+          <label class="field">
+            <span class="field-label">名字</span>
+            <input name="name" placeholder="beta" required autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="field-label">内容</span>
+            <textarea name="text" rows="6" placeholder="10.0.0.11 api.example.com" spellcheck="false"></textarea>
+            <span class="field-hint">hosts 语法：一行一条 <code class="mono">IP 域名</code></span>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">
+              <svg class="ic ic-sm" aria-hidden="true"><use href="#i-check"></use></svg><span>导入</span>
+            </button>
+          </div>
         </form>
         <p class="hint" id="rules-hint">导入是整份覆盖同名文件；改之前先点列表里的「载入」，
           免得盲覆盖。绑定它的实例按 mtime 热重载，不必重启。</p>
-      </section>
+      </div>
+    </section>
 
-      <section class="panel">
+    <!-- ---------- 视图：跨环境对比 ---------- -->
+    <section class="view is-hidden" id="view-compare" aria-label="跨环境对比视图">
+      <div class="panel">
         <div class="panel-head">
-          <h2>实例日志</h2>
-          <span class="pill" id="logs-env">—</span>
+          <h2 class="panel-title">
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-compare"></use></svg><span>跨环境对比</span>
+          </h2>
         </div>
-        <pre id="logs" class="logs">点某个环境的「日志」看尾部输出。</pre>
-      </section>
-    </div>
+        <form id="compare-form" class="form inline">
+          <label class="field">
+            <span class="field-label">域名</span>
+            <input name="host" placeholder="api.example.com" required autocomplete="off">
+          </label>
+          <button type="submit" class="btn primary">
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-search"></use></svg><span>对比</span>
+          </button>
+        </form>
+        <p class="hint">纯静态查表：规则是确定性的，所以这个问题不发任何请求、也不会失败。</p>
+        <div id="compare-result" class="compare-result"></div>
+      </div>
+    </section>
   </main>
 
-  <footer class="footer">
-    <span>规则生效方式：建连时改写上连目标（不改 Host、不改 SNI 基准）</span>
-  </footer>
+  <!-- ===================== 底部日志栏 ===================== -->
+  <section class="logbar" id="logbar" aria-label="实例日志">
+    <div class="logbar-head">
+      <button type="button" class="btn icon-btn sm" id="log-collapse" aria-expanded="true" title="折叠 / 展开日志栏" aria-label="折叠日志栏">
+        <svg class="ic ic-sm chev" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+      </button>
+      <span class="logbar-title">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-log"></use></svg>
+        <span>实例日志</span>
+        <span class="env-tag mono" id="logs-env">—</span>
+      </span>
+      <!-- 这里的过滤维度是**事件类型**（请求 / 响应 / 连接 / 运行 / 异常），
+           不是日志级别：实测日志行本身不带 INFO/WARN 前缀，按级别过滤会是个假功能。
+           容器 id 必须与 app.js 的 getElementById("log-filters") 一致 ——
+           改名只落在一侧会让 renderLogFilters 抛空指针，进而中断整条引导链。 -->
+      <div class="log-filters" id="log-filters" role="group" aria-label="按事件类型过滤日志"></div>
+      <div class="search-box log-search">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-search"></use></svg>
+        <input type="search" id="log-search" placeholder="搜索日志" aria-label="搜索日志" autocomplete="off">
+        <button type="button" class="icon-clear is-hidden" id="log-search-clear" aria-label="清空日志搜索">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-close"></use></svg>
+        </button>
+      </div>
+      <span class="log-count mono" id="log-count">—</span>
+      <div class="log-actions">
+        <button type="button" class="btn icon-btn sm is-active" id="log-follow" aria-pressed="true" title="暂停跟随：暂停后日志视图不再自动刷新，便于读现场" aria-label="暂停跟随">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-pause"></use></svg>
+        </button>
+        <!-- 图标随状态在 pause / play 之间切换（见 app.js 的 setIcon） -->
+        <button type="button" class="btn icon-btn sm is-active" id="log-autoscroll" aria-pressed="true" title="自动滚动到最新一行" aria-label="自动滚动">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
+        </button>
+      </div>
+    </div>
+    <!-- aria-live 显式关掉：日志每秒重放一次，交给读屏器逐行播报只会变成噪声；
+         需要主动告知的事件走 .toasts（role="status"）。 -->
+    <div class="log-view mono" id="logs" role="log" aria-live="off" tabindex="0"></div>
+  </section>
+
+  <!-- 轻提示堆叠：同一时刻最多 3 条，新的在下 -->
+  <div class="toasts" id="toasts" role="status" aria-live="polite" aria-relevant="additions"></div>
+
+  <noscript>
+    <p class="hint">这个界面需要 JavaScript。CSP 不允许内联脚本，请确认 <code class="mono">/app.js</code> 可以取回。</p>
+  </noscript>
 </body>
 </html>

@@ -142,6 +142,9 @@ bash ci/verify.sh live       # 实机层：真 mitmdump + 真改写 + 真管理�
 实机证据在 `docs/acceptance/`：`m0.5-spike.md`、`m3-workbench.md`、`log-channel.md`、
 `edit-environment.md`（`v0.1.0.md` 是 v1 的历史证据，v1 代码已在本版移除）。
 
+工作台界面的视觉令牌、CSP 约束与交互纪律见 `docs/ui-spec.md`；令牌的机器可读定义在
+`core/rs/crates/envboard-web/assets/app.css` 第 ① 区，两者不一致时以 `app.css` 为准。
+
 ### 文本自包含（`doc-scope-lint`）
 
 **本仓内的一切面向读者的文本必须自包含** —— `README.md`、`CHANGELOG.md`、`core/spec/**`、
