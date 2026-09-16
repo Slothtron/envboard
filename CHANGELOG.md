@@ -344,11 +344,15 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 
 ### Added（安全增强 — URL token / 代理鉴权 / 对外服务开关）
 
-- **工作台 URL token 鉴权**：`guard()` 在 header（`x-envboard-token`）优先之外接受
+- **工作台 URL token 鉴权（默认启用）**：token 鉴权**开箱即开** —— 不给 `--token`
+  时自动生成 128 bit 随机 token（`/dev/urandom`；异常环境退化到时间+PID 混合），
+  启动日志打印 `dashboard: http://<host>:<port>/?token=<值>`
+  （通配监听地址用 `127.0.0.1` 展示），点击直达。显式 `--without-token` 才能关闭，
+  且**非回环监听拒绝关闭**（无鉴权对外不允许）；与 `--token` 同给是配置冲突。
+  生成的 token 写入 `<state_dir>/runtime/api.json`（0600），CLI 瘦客户端自动发现并
+  带上，不再依赖用户手抄。`guard()` 在 header（`x-envboard-token`）优先之外接受
   URL `?token=`（浏览器直接打开工作台、SSE 的 EventSource 都带不了自定义头），
-  比较改为常量时间。启用 token 时启动日志打印
-  `dashboard: http://<host>:<port>/?token=<值>`（通配监听地址用 `127.0.0.1` 展示），
-  点击直达；前端捕获后立即 `history.replaceState` 抹掉地址栏中的 token，
+  比较改为常量时间；前端捕获后立即 `history.replaceState` 抹掉地址栏中的 token，
   之后全部请求走 header。
 - **环境字段 `proxy_auth`**（契约 4 字段 → 5）：`user:password` 形态（恰好一个冒号、
   两段非空、无空白/控制字符、总长 ≤128），`null` = 不启用。启用后实例以

@@ -110,12 +110,15 @@ enum Command {
     Status,
     /// 工作台：常驻管理器 + 本地 HTTP API + 内嵌前端。
     Web {
-        /// 监听地址；非 127.0.0.1 时必须给 `--token`。
+        /// 监听地址；token 鉴权默认启用（自动生成，启动日志打印可点链接）。
         #[arg(long, default_value = "127.0.0.1:8900")]
         listen: String,
-        /// 非本机监听时必填的访问令牌（**不允许无鉴权对外**）。
+        /// 显式指定访问令牌（默认自动生成随机值；与 `--without-token` 互斥）。
         #[arg(long)]
         token: Option<String>,
+        /// 显式关闭 token 鉴权（仅限回环监听；非回环会被拒绝 —— 不允许无鉴权对外）。
+        #[arg(long)]
+        without_token: bool,
         /// 只做一轮 reconcile 就退出（烟测用，不起 HTTP 服务）。
         #[arg(long)]
         once: bool,
@@ -306,6 +309,7 @@ fn run(cli: Cli) -> Result<(), Error> {
             Command::Web {
                 listen,
                 token,
+                without_token,
                 once,
             } => {
                 if once {
@@ -313,11 +317,21 @@ fn run(cli: Cli) -> Result<(), Error> {
                     print_reconcile(&report, cli.json);
                     return Ok(());
                 }
-                let web_config =
-                    envboard_web::WebConfig::parse(&listen, token, &manager.config().state_dir)?;
-                // 把监听地址写进 runtime/api.json：CLI 靠它发现自定义端口的工作台
-                // （否则只会去试默认的 8900），退出时清掉。
-                api_client::write_api_record(&state_dir, web_config.listen).ok();
+                let web_config = envboard_web::WebConfig::parse(
+                    &listen,
+                    token,
+                    without_token,
+                    &manager.config().state_dir,
+                )?;
+                // 把监听地址与 token 写进 runtime/api.json：CLI 靠它发现自定义端口的
+                // 工作台并自动带上 token（token 默认自动生成，不写下来 CLI 就再也
+                // 进不去了）。文件由 api_client 收紧到 0600，退出时清掉。
+                api_client::write_api_record(
+                    &state_dir,
+                    web_config.listen,
+                    web_config.token.as_deref(),
+                )
+                .ok();
                 let result = envboard_web::serve(Arc::new(manager), web_config).await;
                 api_client::remove_api_record(&state_dir);
                 result
@@ -381,17 +395,20 @@ fn build_core(
 /// 找到常驻实例：`--api` > `<state_dir>/runtime/api.json` > 默认 8900。
 ///
 /// 三个来源都**必须探测成功**才算找到 —— 端口上蹲着别的程序时不能误判。
+/// token 来源：显式 `--token` 优先；`api.json` 里常驻实例写下的那个次之
+/// （token 默认自动生成，这是 CLI 自动带上它的唯一途径）。
 fn resolve_api(cli: &Cli, config: &ManagerConfig) -> Option<ApiClient> {
-    let token = cli.token.clone();
+    let cli_token = cli.token.clone();
 
     if let Some(raw) = &cli.api {
         let addr = raw.parse().ok()?;
-        return ApiClient::probe(addr, token);
+        return ApiClient::probe(addr, cli_token);
     }
-    if let Some(addr) = api_client::read_api_record(&config.state_dir)
-        && let Some(client) = ApiClient::probe(addr, token.clone())
-    {
-        return Some(client);
+    if let Some((addr, record_token)) = api_client::read_api_record(&config.state_dir) {
+        let token = cli_token.clone().or(record_token);
+        if let Some(client) = ApiClient::probe(addr, token) {
+            return Some(client);
+        }
     }
     // 默认端口的兜底**只在用户没有显式指定状态目录时**生效。
     //
@@ -402,7 +419,7 @@ fn resolve_api(cli: &Cli, config: &ManagerConfig) -> Option<ApiClient> {
         return None;
     }
     let fallback: std::net::SocketAddr = "127.0.0.1:8900".parse().ok()?;
-    ApiClient::probe(fallback, token)
+    ApiClient::probe(fallback, cli_token)
 }
 
 /// 瘦客户端模式：把命令翻译成 REST 调用。

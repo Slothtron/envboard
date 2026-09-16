@@ -19,7 +19,7 @@
 | 按 host 改写上连目标（真 mitmproxy `server_connect`） | ✅ |
 | 共享 CA（所有实例一张，客户端只装一次） | ✅ |
 | 工作台（环境列表 / 启停 / 编辑 / 规则导入与载入 / 跨环境对比 / 日志 / SSE） | ✅ |
-| 工作台 URL token 鉴权（header 优先，`?token=` 等效；启动日志打印可点链接） | ✅ |
+| 工作台 URL token 鉴权（默认启用、自动生成；header 优先，`?token=` 等效） | ✅ |
 | 代理访问鉴权（环境 `proxy_auth` 字段 → mitmproxy `proxyauth`，Basic 认证） | ✅ |
 | 对外服务开关（环境监听 `0.0.0.0`，默认 `127.0.0.1`） | ✅ |
 | CLI（本地 API 的瘦客户端；无常驻实例时自己驱动管理器） | ✅ |
@@ -93,19 +93,22 @@ envboard rules show beta                        # 改规则文件前先取回原
 | `--no-log-file` | 关 | 不落盘：日志只留在内存的有界环形缓冲里（随实例结束消失）。磁盘零写入，代价是回到"必须持续把管道读走"的形态 |
 | `--max-log-bytes` | 8 MiB | 单环境日志文件上限，超过就 copytruncate 轮转（保留一份 `.1`）。`0` = 不轮转 |
 | `--reload-interval` | 5s | 注入器检查规则文件 mtime 的间隔 |
-| `--api` / `--token` | 自动发现 | 本地 API 地址与令牌（`--token` 仅在非回环监听时需要）。发现顺序：`--api` → `<state_dir>/runtime/api.json` → 默认端口，**最后这一步只在没显式给 `--state-dir` 时才走** —— 否则 `--state-dir /tmp/x` 会被另一个状态目录的常驻实例接管 |
-| `web --listen` | `127.0.0.1:8900` | 工作台监听地址；**非回环必须给 `--token`** |
+| `--api` / `--token` | 自动发现 | 本地 API 地址与令牌。发现顺序：`--api` → `<state_dir>/runtime/api.json`（含工作台写下的 token）→ 默认端口，**最后这一步只在没显式给 `--state-dir` 时才走** —— 否则 `--state-dir /tmp/x` 会被另一个状态目录的常驻实例接管 |
+| `web --listen` | `127.0.0.1:8900` | 工作台监听地址 |
+| `web --token` | 自动生成 | 显式指定工作台访问令牌；不指定时**默认启用鉴权并自动生成**（128 bit 随机值）。与 `--without-token` 互斥 |
+| `web --without-token` | 关 | 显式关闭 token 鉴权（与 `--token` 互斥）。**仅限回环监听**：非回环拒绝关闭 —— 无鉴权对外不允许 |
 
 非法配置**加载即失败**并给出字段路径（如 `environment.listen.port`）。
 
 ### 工作台鉴权与对外暴露
 
-- **token**：`web --token <值>` 启用工作台鉴权后，启动日志会打印
+- **token**：鉴权默认启用 —— 未给 `--token` 时自动生成随机 token，启动日志打印
   `dashboard: http://<host>:<port>/?token=<值>`，点击即可在浏览器直接打开
   （浏览器与 SSE 的 EventSource 带不了自定义头，所以服务端同样接受 `?token=`；
   header `x-envboard-token` 优先）。前端拿到 URL 上的 token 后会立刻从地址栏抹掉，
-  之后所有请求走 header。注意 `?token=` 会出现在访问日志与浏览器历史里，
-  API 调用请优先用 header。
+  之后所有请求走 header。生成的 token 同时写入
+  `<state_dir>/runtime/api.json`（0600），CLI 瘦客户端自动带上，无需手抄。
+  注意 `?token=` 会出现在访问日志与浏览器历史里，API 调用请优先用 header。
 - **代理访问鉴权**：环境新增 `proxy_auth` 字段（`user:password`，恰好一个冒号、
   两段非空、无空白/控制字符、总长 ≤128；`null` = 不启用）。启用后实例以
   `--set proxyauth=<user:password>` 启动，客户端凭据才能连代理（否则 407）；

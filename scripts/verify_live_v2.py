@@ -31,6 +31,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -181,10 +182,13 @@ def main() -> int:
     workbench: subprocess.Popen | None = None
 
     def start_workbench() -> subprocess.Popen:
+        # `--without-token`：token 鉴权现在是默认启用的（自动生成）。这组断言只管
+        # 管理器/代理本体，显式关掉鉴权免得每个 api() 调用都要带凭据；
+        # token 的默认启用与自动生成在第 11 组里单独验。
         process = subprocess.Popen(
             [str(BINARY), "--state-dir", str(state), "--core", "mitmproxy",
              "--log-dir", str(logs), "--reload-interval", RELOAD_INTERVAL,
-             "web", "--listen", f"127.0.0.1:{web_port}"],
+             "web", "--listen", f"127.0.0.1:{web_port}", "--without-token"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if not wait_port(web_port):
@@ -450,26 +454,71 @@ def main() -> int:
         )
 
         # ---- 11 dashboard URL token 鉴权 ----
-        # 独立起一个带 --token 的工作台：回环监听本来不要求 token，但配了就必须带对；
-        # 浏览器与 SSE 带不了自定义头，`?token=` 必须与 header 等效。
+        # token 鉴权**默认启用**（自动生成随机值）：不给任何 token 旗标起一个工作台，
+        # 必须无 token 401、带横幅里的 token 200，且横幅打印可点链接；
+        # 显式 --token 与 header/?token= 等效另行验证。
+        # token 工作台用 --core fake（不起实例）+ 独立 state-dir：主工作台持有状态锁。
+        def banner_of(process: subprocess.Popen, needle: str) -> str:
+            banner = ""
+            deadline = time.time() + 5
+            while time.time() < deadline and needle not in banner:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                banner += line
+            return banner
+
+        auto_port = free_port()
+        auto_work: subprocess.Popen | None = None
+        try:
+            auto_work = subprocess.Popen(
+                [str(BINARY), "--state-dir", str(work / "state-auto"), "--core", "fake",
+                 "web", "--listen", f"127.0.0.1:{auto_port}"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            assert wait_port(auto_port), "auto-token workbench did not start"
+            banner = banner_of(auto_work, "dashboard:")
+            match = re.search(r"dashboard: \S*//\S*token=([0-9a-f]+)", banner)
+            auto_token = match.group(1) if match else ""
+            status_none, _ = api(auto_port, "/api/status", raw=True)
+            status_auto, _ = api(auto_port, "/api/status", token=auto_token, raw=True)
+            check(
+                "11a token 默认启用：自动生成随机 token，启动日志打印可点链接",
+                bool(auto_token) and len(auto_token) == 32
+                and status_none == 401 and status_auto == 200,
+                f"token_len={len(auto_token)} none={status_none} with_token={status_auto} "
+                f"banner={'…' + banner.strip().splitlines()[-1] if banner.strip() else '(empty)'}",
+            )
+        finally:
+            if auto_work is not None:
+                auto_work.kill()
+                auto_work.wait(timeout=10)
+
+        # --without-token 在非回环监听上必须被拒绝：进程应立即带着错误退出
+        deny_port = free_port()
+        refused = subprocess.run(
+            [str(BINARY), "--state-dir", str(work / "state-deny"), "--core", "fake",
+             "web", "--listen", f"0.0.0.0:{deny_port}", "--without-token"],
+            capture_output=True, text=True, timeout=30,
+        )
+        check(
+            "11b 非回环监听拒绝 --without-token（无鉴权对外不允许）",
+            refused.returncode != 0 and "web.token" in (refused.stderr + refused.stdout),
+            f"exit={refused.returncode} "
+            f"stderr={refused.stderr.strip().splitlines()[-1][:80] if refused.stderr.strip() else '(empty)'}",
+        )
+
         token_port = free_port()
         token_work: subprocess.Popen | None = None
         try:
-            # 独立 state-dir：主工作台持有状态锁，第二个进程用同一目录会 flock 失败退出
             token_work = subprocess.Popen(
-                [str(BINARY), "--state-dir", str(work / "state-token"), "--core", "mitmproxy",
-                 "--log-dir", str(logs), "web", "--listen", f"127.0.0.1:{token_port}",
+                [str(BINARY), "--state-dir", str(work / "state-token"), "--core", "fake",
+                 "web", "--listen", f"127.0.0.1:{token_port}",
                  "--token", "s3cret-token"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             )
             assert wait_port(token_port), "token workbench did not start"
-            banner = ""
-            deadline = time.time() + 5
-            while time.time() < deadline and "dashboard:" not in banner:
-                line = token_work.stdout.readline()
-                if not line:
-                    break
-                banner += line
+            banner = banner_of(token_work, "dashboard:")
             status_none, _ = api(token_port, "/api/status", raw=True)
             status_wrong, _ = api(token_port, "/api/status", token="wrong", raw=True)
             status_header, _ = api(token_port, "/api/status", token="s3cret-token", raw=True)
@@ -477,7 +526,7 @@ def main() -> int:
             sse_status_code = sse_status(token_port, "/api/events?token=s3cret-token")
             bad_page, _ = api(token_port, "/?token=nope", raw=True)
             check(
-                "11 dashboard URL token：header 与 ?token= 等效，启动日志打印可点链接",
+                "11c 显式 --token：header 与 ?token= 等效，横幅打印可点链接",
                 status_none == 401 and status_wrong == 401 and status_header == 200
                 and page_status == 200 and sse_status_code == 200 and bad_page == 401
                 and "dashboard:" in banner and "token=s3cret-token" in banner,

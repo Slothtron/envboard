@@ -159,25 +159,42 @@ impl ApiClient {
     }
 }
 
-/// 常驻实例把自己监听的地址写到 `<state_dir>/runtime/api.json`，
-/// CLI 靠它发现自定义端口的工作台（而不是只会试默认的 8900）。
+/// 常驻实例把自己监听的地址与 token 写到 `<state_dir>/runtime/api.json`，
+/// CLI 靠它发现自定义端口的工作台（而不是只会试默认的 8900）并自动带上 token
+/// —— token 默认自动生成，不落盘的话 CLI 就再也进不去了。
 pub fn api_record_path(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("runtime").join("api.json")
 }
 
-pub fn write_api_record(state_dir: &std::path::Path, addr: SocketAddr) -> std::io::Result<()> {
+/// **这是凭据**：写完收紧到 0600（与状态账本同一纪律）。
+pub fn write_api_record(
+    state_dir: &std::path::Path,
+    addr: SocketAddr,
+    token: Option<&str>,
+) -> std::io::Result<()> {
     let path = api_record_path(state_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let body = serde_json::json!({"listen": addr.to_string()}).to_string();
-    std::fs::write(&path, body)
+    let body = serde_json::json!({"listen": addr.to_string(), "token": token}).to_string();
+    std::fs::write(&path, &body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
-pub fn read_api_record(state_dir: &std::path::Path) -> Option<SocketAddr> {
+pub fn read_api_record(state_dir: &std::path::Path) -> Option<(SocketAddr, Option<String>)> {
     let raw = std::fs::read_to_string(api_record_path(state_dir)).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
-    value.get("listen")?.as_str()?.parse().ok()
+    let addr: SocketAddr = value.get("listen")?.as_str()?.parse().ok()?;
+    let token = value
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some((addr, token))
 }
 
 pub fn remove_api_record(state_dir: &std::path::Path) {
@@ -198,14 +215,36 @@ mod tests {
     }
 
     #[test]
-    fn api_record_round_trips() {
+    fn api_record_round_trips_with_token() {
         let dir = std::env::temp_dir().join(format!("envboard-api-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let addr: SocketAddr = "127.0.0.1:8901".parse().unwrap();
-        write_api_record(&dir, addr).unwrap();
-        assert_eq!(read_api_record(&dir), Some(addr));
+        write_api_record(&dir, addr, Some("s3cret")).unwrap();
+        assert_eq!(
+            read_api_record(&dir),
+            Some((addr, Some("s3cret".to_string())))
+        );
+        // 显式关闭鉴权的工作台（token = null）与"没写 token 字段"同义
+        write_api_record(&dir, addr, None).unwrap();
+        assert_eq!(read_api_record(&dir), Some((addr, None)));
         remove_api_record(&dir);
         assert_eq!(read_api_record(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_record_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("envboard-api-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let addr: SocketAddr = "127.0.0.1:8902".parse().unwrap();
+        write_api_record(&dir, addr, Some("s3cret")).unwrap();
+        let mode = std::fs::metadata(api_record_path(&dir))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
