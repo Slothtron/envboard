@@ -110,6 +110,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/environments/:name/reallocate", post(api_reallocate))
         .route("/api/environments/:name/logs", get(api_logs))
         .route("/api/rules", get(api_rules_list).post(api_rules_import))
+        // 故障注入旋钮（live 断言组 9 的面）：核心不支持注入时如实 400。
+        .route("/api/_fault", post(api_fault))
         .route(
             "/api/rules/:name",
             get(api_rules_read).delete(api_rules_delete),
@@ -405,6 +407,34 @@ struct LogsQuery {
 
 fn default_lines() -> usize {
     200
+}
+
+/// POST /api/_fault {"env": "...", "reason": "..."} —— 把在跑实例置为 failed
+/// （等价于"引擎线程死了"的可观察形态）。只有实现了注入旋钮的核心会成功；
+/// 真引擎与 fake 都实现它，语义是"模拟线程死亡"，不是新造状态机分支。
+async fn api_fault(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let env = body.get("env").and_then(Value::as_str).unwrap_or_default();
+    let reason = body
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("fault injection");
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.manager.inject_fault(env, reason)
+    })) {
+        Ok(true) => Json(serde_json::json!({"injected": true, "env": env})).into_response(),
+        Ok(false) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!(
+                "core does not support fault injection for {env:?} (not running, or unsupported)"
+            ),
+        )
+            .into_response(),
+        Err(_) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            "fault injection failed".to_string(),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_logs(

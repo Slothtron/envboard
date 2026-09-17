@@ -1046,6 +1046,11 @@ impl Manager {
         }
     }
 
+    /// 故障注入转发（live 断言面）：核心不支持或环境没在跑 → false，不假装。
+    pub fn inject_fault(&self, name: &str, reason: &str) -> bool {
+        self.engine.inject_failed(name, reason)
+    }
+
     fn require(&self, name: &str) -> Result<Value, Error> {
         self.state
             .lock()

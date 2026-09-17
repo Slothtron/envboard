@@ -1000,7 +1000,9 @@ async fn write_status<W: AsyncWriteExt + Unpin>(
     status: u16,
     reason: &str,
 ) -> Result<(), HttpError> {
-    let body = format!("{reason}\n");
+    // 正文回声状态行：拿到的响应体自带"502 Bad Gateway: ..."—— 与 v2 的失败页
+    // 同款可辨识（live 判据依赖它），也方便人从任何一层日志直接读出发生了什么。
+    let body = format!("{status} {}: {reason}\n", reason_for_status(status));
     let head = format!(
         "HTTP/1.1 {status} {text}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len(),

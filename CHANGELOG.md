@@ -11,6 +11,29 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Changed（v3 重构 M-P5 第三步：live 层迁移——一条不减）
+
+- **live/workbench 28 项全绿**：v2 的 24 条断言全部保留（机制触点按映射换），
+  新增 4 条：
+  - 12b **凭据 argv 审计**：全系统 /proc cmdline 扫描不得出现明文密码（v2 靠
+    脱敏契约兜底，v3 结构性成立）；
+  - 14b **热生效时延**：PATCH 返回后的第一次请求即已生效（v2 要等 1s 轮询）；
+  - 15 **既有 CA 零感知兼容**：confdir 预放 mitmproxy 形状 CA → 引擎原样加载
+    （逐字节不变）且真 curl 仅凭该 CA 校验 MITM 链成功；
+  - 端点清单扩到 18 个（含 /api/_fault）且全部无 token 401 的清点面不变。
+- 组 9（实例崩溃）机制替换：SIGKILL 真子进程 → **注入 failed**（ProxyEngine 的
+  故障注入旋钮，真引擎与 fake 同构实现，经 web 的 /api/_fault 转发）；"僵尸
+  回收"判据 → "监听端口真的释放"（原端口可再 bind）。组 8 的"写满 64 KiB 管道"
+  字节判据 → "全部成功 + 日志逐条落盘"（总线介质不同，丢弃量归 log_drops 面）。
+- **live/manager 3 组重写为引擎直驱**（真 openssl 现场 + 真 curl）：①预放 CA
+  加载复用 + 回执如实 + curl --cacert 验链；②注入 failed 可见、端口释放、重拉
+  回 running；③insecure 名单外 502 → 热 apply 第一次请求即 200 且未点名域名
+  仍 502（放宽不传染）。v2 的 options_echo 断言随"静默忽略选项"介质的消失删除。
+- live 宿主从 mitmdump/openssl/curl 三件减到 openssl/curl 两件；verify.sh 的
+  live/manager 指向 envboard-core。
+- 产品侧顺手修一处可用性缺陷：自产 502 的响应体现在回声状态行
+  （"502 Bad Gateway: <原因>"），与 v2 失败页同款可辨识。
+
 ### Changed（v3 重构 M-P5 第二步：manager 行为测试按 v3 语义重实现）
 
 - manager_lifecycle.rs 以 v3 形态重写（28 条全绿），暂存件删除；v2 的 29 条
@@ -643,29 +666,3 @@ mitmproxy，本条目记录的是独立库面的落地。
 
 ### Added
 - Multi-environment registry: name + DNS servers + domain suffix + static host
-  overrides + colour/description, with CRUD and an active-environment switch.
-  Persisted atomically to `<confdir>/envboard.json` with mode `0600`.
-- Dynamic DNS server discovery, three sources: the environment's own
-  `dns_servers`, runtime edits through the dashboard, and
-  `mitmproxy_rs.dns.get_system_dns_servers()` for the OS configuration.
-- Forward resolution (host → ip) via a per-environment
-  `mitmproxy_rs.dns.DnsResolver` (Rust / hickory).
-- Multi-environment comparison: resolve the same hostnames against every
-  environment's DNS servers in one call (`all_envs`).
-- Passive collection of host/ip mappings from `dns_response` when running with
-  `--mode dns`.
-- Bidirectional mapping index with per-environment sharding, TTLs, provenance
-  (`static` / `passive` / `active`) and source precedence. Forward only —
-  there is no ip → host reverse lookup by design.
-- Flow annotation (`flow.comment` and/or `flow.metadata`) for hosts that match a
-  known environment.
-- Dashboard served from mitmweb at `/envboard/`, inheriting mitmweb's
-  authentication, `Sec-Fetch-Site` guard and XSRF cookie handling. No second web
-  server, no second auth system.
-- Rules files: import a hand-written hosts-style file (`ip host…` or the reverse
-  `host… ip`, several hosts sharing one IP, comments, blanks) and get a
-  deterministic normalized rules file. Invalid content is ignored per item and
-  reported (line + reason), never fatal; conflicting hosts resolve last-wins.
-  One rules file is **bound per environment**, so switching environment switches
-  the rules file. `Environment.hosts` still wins over the bound rules file.
-- `examples/hosts.sample.txt`, a sanitized import sample (the real

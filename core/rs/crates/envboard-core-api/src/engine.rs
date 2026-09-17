@@ -143,4 +143,13 @@ pub trait ProxyEngine: Send + Sync {
 
     /// 内存读健康（同步：视图层因此不需要 await 引擎）。
     fn report(&self, handle: &EngineHandle) -> EngineReport;
+
+    /// 故障注入旋钮（live 断言与集成测试用；对齐 v2 FakeCore 的 StatusMode 先例）：
+    /// 把已登记实例置为 failed 并释放监听 —— 与"引擎线程 panic 后运行时散掉、
+    /// socket 关闭"同构。返回 false = 该实现不支持注入（调用方不得假装成功）。
+    /// 生产路径没有任何入口调它；它存在的唯一目的是让"实例崩溃可见、可回收、
+    /// 可重拉"这条契约可以在真进程里被断言。
+    fn inject_failed(&self, _env: &str, _reason: &str) -> bool {
+        false
+    }
 }

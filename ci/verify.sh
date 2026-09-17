@@ -139,7 +139,7 @@ step_adapter() {
 # --------------------------------------------------------------------------- #
 
 step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-cli --test live_workbench -- --ignored --nocapture; }
-step_live_manager()   { cargo test "${LOCKED[@]}" -p envboard-core-mitmproxy --test live_manager -- --nocapture; }
+step_live_manager()   { cargo test "${LOCKED[@]}" -p envboard-core --test live_manager -- --ignored --nocapture; }
 step_live_thin()      { cargo test "${LOCKED[@]}" -p envboard-cli --test thin_client -- --nocapture; }
 
 step_live() {

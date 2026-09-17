@@ -27,10 +27,25 @@ fn receipt_of(spec: &EngineSpec) -> String {
 }
 
 struct Entry {
-    engine: EngineInstance,
+    /// None = 被注入过 failed（引擎实例已停并已释放监听），墓碑留在表里，
+    /// 报告如实说 failed —— 与真线程死亡后的可观察形态一致。
+    engine: Option<EngineInstance>,
     pump: Arc<BoundedLinePump>,
     /// 最近一次成功装配的 spec 回执（start 与 apply 更新）。
     receipt: Mutex<String>,
+    injected: Option<String>,
+}
+
+impl Entry {
+    /// 取出活的引擎；被注入过 failed 的实例对此回答"不可操作"。
+    fn live_engine(&self) -> Result<&EngineInstance, Error> {
+        self.engine.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorCode::Conflict,
+                "instance is in failed state; stop and start it again".to_string(),
+            )
+        })
+    }
 }
 
 /// v3 引擎后端（进程内、多线程安全：簿记锁只保护 map，不跨 await 持有）。
@@ -105,9 +120,10 @@ impl ProxyEngine for EngineBackend {
         self.entries.lock().unwrap().insert(
             env,
             Entry {
-                engine,
+                engine: Some(engine),
                 pump,
                 receipt: Mutex::new(receipt),
+                injected: None,
             },
         );
         Ok(handle)
@@ -123,17 +139,33 @@ impl ProxyEngine for EngineBackend {
         })?;
         // apply 是同步语义（ArcSwap 换入即生效），锁内直接转发是安全的：
         // EngineInstance::apply_config 不持簿记锁、不做 I/O。
-        entry.engine.apply_config(spec_to_config(&spec, None))?;
+        let engine = entry.live_engine()?;
+        engine.apply_config(spec_to_config(&spec, None))?;
         let receipt = receipt_of(&spec);
         *entry.receipt.lock().unwrap() = receipt.clone();
         Ok(receipt)
+    }
+
+    fn inject_failed(&self, env: &str, reason: &str) -> bool {
+        let mut guard = self.entries.lock().unwrap();
+        let Some(entry) = guard.get_mut(env) else {
+            return false;
+        };
+        if let Some(engine) = entry.engine.take() {
+            // stop 内部 join 引擎线程：返回即监听已释放、端口重新可用。
+            engine.stop();
+        }
+        entry.injected = Some(format!("injected failure: {reason}"));
+        true
     }
 
     async fn stop(&self, handle: &EngineHandle) -> Result<(), Error> {
         let entry = self.entries.lock().unwrap().remove(&handle.env);
         match entry {
             Some(entry) => {
-                entry.engine.stop();
+                if let Some(engine) = entry.engine {
+                    engine.stop();
+                }
                 Ok(())
             }
             None => Err(Error::new(
@@ -155,19 +187,35 @@ impl ProxyEngine for EngineBackend {
                 log_drops: 0,
             };
         };
-        let status = entry.engine.status();
-        EngineReport {
-            state: map_state(status.state),
-            config_hash: entry.receipt.lock().unwrap().clone(),
-            epoch: status.epoch,
-            last_error: status.last_error,
-            bypass_counts: entry
-                .engine
-                .bypass_counts()
-                .into_iter()
-                .map(|(id, count)| (id.to_string(), count))
-                .collect(),
-            log_drops: entry.pump.dropped(),
+        match &entry.engine {
+            Some(engine) => {
+                let status = engine.status();
+                EngineReport {
+                    state: map_state(status.state),
+                    config_hash: entry.receipt.lock().unwrap().clone(),
+                    epoch: status.epoch,
+                    last_error: status.last_error,
+                    bypass_counts: engine
+                        .bypass_counts()
+                        .into_iter()
+                        .map(|(id, count)| (id.to_string(), count))
+                        .collect(),
+                    log_drops: entry.pump.dropped(),
+                }
+            }
+            None => EngineReport {
+                state: InstanceState::Failed {
+                    reason: entry
+                        .injected
+                        .clone()
+                        .unwrap_or_else(|| "engine is gone".to_string()),
+                },
+                config_hash: entry.receipt.lock().unwrap().clone(),
+                epoch: 0,
+                last_error: entry.injected.clone(),
+                bypass_counts: Vec::new(),
+                log_drops: entry.pump.dropped(),
+            },
         }
     }
 }

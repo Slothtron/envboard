@@ -1,4 +1,4 @@
-//! 实机端到端（v2）：真 `mitmdump`、真改写、真管理器。
+//! 实机端到端（v3）：真进程、真 TLS 引擎、真管理器。
 //!
 //! 这一层回答的是"脚本化不了的实机行为"，14 组断言：
 //!
@@ -11,25 +11,31 @@
 //! 6. **跨环境静态对比**：某域名在哪个环境被覆盖（不发请求）；
 //! 7. **崩溃恢复**：SIGKILL 工作台后重启，`desired=running` 的环境自动恢复；
 //! 8. **日志通道不会拖死代理**：连打 320 个请求全部成功；
-//! 9. **实例崩溃可见且不留僵尸**：SIGKILL 实例后不再报 running、子进程被回收；
-//! 10. **编辑已建环境**：运行中换绑定**热生效**（绑定由固定名软链承载，不重启实例）、
+//! 9. **实例崩溃可见且不占资源**：注入 failed（等价"引擎线程死了"的可观察形态）
+//!    后不再报 running、原因可见、监听端口真的释放；
+//! 10. **编辑已建环境**：运行中换绑定**热生效**（v3 = 一次同步装配，不重启实例）、
 //!     停止后可改名换端口、新配置真的生效；
 //! 11. **dashboard token 鉴权**：默认启用且自动生成、`--without-token` 在非回环被拒、
 //!     header 与 `?token=` 等效、静态资产豁免、**全部 API 端点无 token 一律 401**；
-//! 12. **代理鉴权**：`proxy_auth` 下发为 mitmproxy `proxyauth`（无凭据 407、带凭据 200）；
+//! 12. **代理鉴权**：一等字段下发（无凭据 407、带凭据 200）；12b **凭据 argv 审计**
+//!     （/proc 全量 cmdline 不得出现明文密码 —— v2 靠脱敏契约兜底，v3 结构性成立）；
 //! 13. **对外服务开关**：`listen.host` 换 `0.0.0.0` 并按新地址重启，回环方向照常服务；
 //! 14. **按域名放宽上游证书校验（`insecure_hosts`）**：自签上游在名单外必然 502，
 //!     运行中把它加进名单即热生效（不重启、健康保持 running），同一实例里另一个
-//!     被改写但未列出的域名仍旧 502。
+//!     被改写但未列出的域名仍旧 502；14b **热生效时延**：PATCH 返回后的**第一次**
+//!     请求即已生效（v2 要等 reload 轮询，v3 装配是同步的 —— 计时留证据）；
+//! 15. **既有 CA 零感知兼容**：confdir 预放 mitmproxy 形状的 CA（PKCS#1 私钥+证书
+//!     拼接），引擎必须**原样加载**（文件逐字节不变、不重新生成），客户端以该 CA
+//!     校验 MITM 证书链成功 —— 已装证书用户升级零感证的实机形式。
 //!
 //! 做法上有一个关键点：规则只改**连到哪个 IP**、不改端口，所以"命中哪个上游"由客户端
 //! 请求里的端口决定 —— 于是"同一域名 + 两个环境各覆盖不同域名"就构造出了判别性对照。
 //!
-//! **为什么标 `#[ignore]`**：它需要真 `mitmdump` 与真网络。默认的
+//! **为什么标 `#[ignore]`**：它需要真宿主工具与真网络（真进程起停）。默认的
 //! `cargo test --workspace` 因此不需要宿主；`ci/verify.sh live` 用 `--ignored` 显式触发。
-//! 显式要跑这一层时宿主缺失**响亮失败**（不静默跳过 —— 跳过等于这 24 条断言消失）。
+//! 显式要跑这一层时宿主缺失**响亮失败**（不静默跳过 —— 跳过等于这些断言消失）。
 //!
-//! 跑法：`cargo test -p envboard-cli --test live_workbench --locked --offline -- --ignored --nocapture`
+//! 跑法：`bash ci/verify.sh live`（或本测试加 `--ignored` 直跑）
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -38,7 +44,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const RELOAD_INTERVAL: &str = "1";
 /// 管道容量 64 KiB、默认详细度约 307 字节/请求 —— 320 个足以写满。
 const BURST_TOTAL: usize = 320;
 
@@ -280,7 +285,7 @@ fn proxy_get(proxy_port: u16, url: &str, auth: Option<&str>) -> Response {
 
 /// "这个域名没被本环境覆盖"的判据：请求失败（502 页面或空响应）。
 ///
-/// 注意别用"响应体为空"当判据 —— 明文 HTTP 场景下 mitmproxy 会回一页 502 HTML，
+/// 注意别用"响应体为空"当判据 —— 明文 HTTP 场景下代理会回一页 502 文本，
 /// 只有 HTTPS（CONNECT）失败才是空响应。用"不是另一个上游的名字 + 是失败"更稳。
 fn not_covered(body: &str) -> bool {
     body.is_empty() || body.contains("502") || body.contains("Bad Gateway")
@@ -363,6 +368,33 @@ fn start_tls_upstream(work: &Path, host: &str) -> (u16, Child) {
         "自签 HTTPS 上游没起来"
     );
     (port, child)
+}
+
+/// 经代理请求 HTTPS，客户端用指定 CA 校验（不带 -k）：链验不过就是失败。
+fn curl_with_ca(proxy_port: u16, url: &str, cacert: &std::path::Path) -> u16 {
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-x",
+            &format!("http://127.0.0.1:{proxy_port}"),
+            "--cacert",
+            cacert.to_str().expect("cacert path"),
+            "--noproxy",
+            "",
+            "--max-time",
+            "20",
+            url,
+        ])
+        .output()
+        .expect("run curl --cacert");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// 经代理请求 **HTTPS** 并返回状态码。
@@ -467,21 +499,19 @@ fn spawn_workbench(state: &Path, extra: &[&str]) -> Child {
 }
 
 #[test]
-#[ignore = "需要真宿主（mitmdump / openssl / curl）与真网络；由 ci/verify.sh 的 live 层用 --ignored 触发"]
+#[ignore = "需要真宿主工具（openssl / curl）与真网络；由 ci/verify.sh 的 live 层用 --ignored 触发"]
 fn the_workbench_behaves_on_a_real_host() {
-    let missing: Vec<&str> = ["mitmdump", "openssl", "curl"]
+    let missing: Vec<&str> = ["openssl", "curl"]
         .into_iter()
         .filter(|tool| which(tool).is_none())
         .collect();
     if !missing.is_empty() {
         panic!(
-            "live 层需要真宿主工具 {missing:?}，但 PATH 上没有全部。\n\
-             三条工具各有归属：mitmdump 是被测环境本身，openssl 现造自签证书并充当\n\
-             自签 HTTPS 上游（第 14 组的可复现现场），curl 只用于经代理的 HTTPS 请求\n\
-             —— TLS 客户端不在标准库里，而明文请求都走裸 TCP。\n\
-             两条出路：\n\
-               1) 装上缺的工具（mitmproxy 自带 mitmdump；openssl / curl 通常随系统）；\n\
-               2) 不跑这一层：cargo test --workspace（本测试已标 #[ignore]）"
+            "live 层需要真宿主工具 {missing:?}，但 PATH 上没有全部。\\n\
+             openssl 现造自签 CA/上游证书并充当自签 HTTPS 上游（第 14、15 组的
+             可复现现场），curl 只用于经代理的 HTTPS 请求 —— TLS 客户端不在
+             标准库里，明文请求全部走裸 TCP。两条出路：装上缺的工具，或不跑
+             这一层（cargo test --workspace 不含本测试）。"
         );
     }
 
@@ -530,12 +560,8 @@ fn the_workbench_behaves_on_a_real_host() {
         child: spawn_workbench(
             &state,
             &[
-                "--core",
-                "mitmproxy",
                 "--log-dir",
                 logs.to_str().unwrap(),
-                "--reload-interval",
-                RELOAD_INTERVAL,
                 "web",
                 "--listen",
                 &format!("127.0.0.1:{web_port}"),
@@ -625,7 +651,8 @@ fn the_workbench_behaves_on_a_real_host() {
         ),
     );
 
-    // ---- 2 规则热重载：加一条规则，不重启实例 ----
+    // ---- 2 规则热更新：加一条规则，不重启实例 ----
+    // v3 的热是一次同步 apply：POST 返回即生效，下面的宽限循环通常首轮命中。
     api(
         web_port,
         "POST",
@@ -741,7 +768,7 @@ fn the_workbench_behaves_on_a_real_host() {
     let log_body = json(&api(
         web_port,
         "GET",
-        "/api/environments/alpha/logs?lines=5",
+        "/api/environments/alpha/logs?lines=400",
         None,
         true,
         None,
@@ -820,12 +847,8 @@ fn the_workbench_behaves_on_a_real_host() {
         child: spawn_workbench(
             &state,
             &[
-                "--core",
-                "mitmproxy",
                 "--log-dir",
                 logs.to_str().unwrap(),
-                "--reload-interval",
-                RELOAD_INTERVAL,
                 "web",
                 "--listen",
                 &format!("127.0.0.1:{web_port}"),
@@ -870,8 +893,9 @@ fn the_workbench_behaves_on_a_real_host() {
     // ---- 8 日志通道不会拖死代理 ----
     //
     // 这一条是"日志把代理卡死"的回归护栏：管道容量 64 KiB、默认详细度约 307 字节/请求，
-    // 所以约 213 个请求就能写满；写满之后 mitmdump 会阻塞在自己的事件循环里，所有客户端
-    // 一起挂住（实测过）。现在子进程的输出直接接文件，内核负责写盘，我们进程不在链路上。
+    // 所以约 213 个请求就能写满；写满之后代理会阻塞在写日志上，所有客户端
+    // 一起挂住（实测过）。v3 的形态：投递进有界总线立即返回，满了丢弃并计数 ——
+    // 数据面与日志面彻底解耦（丢弃量在 EngineReport.log_drops 可见）。
     //
     // 逐个请求（而不是一条连接复用到底）：后者测出来的是客户端的调度，不是"日志会不会
     // 卡住代理"。裸 TCP 直连同时省掉了 320 次 curl spawn，也不受 *_proxy 环境变量干扰。
@@ -905,24 +929,35 @@ fn the_workbench_behaves_on_a_real_host() {
     let log_size = std::fs::metadata(&log_file)
         .map(|meta| meta.len())
         .unwrap_or(0);
+    // v3 判据：全部成功 + 日志确实落盘（行数与请求数对得上）。总线的有界性由
+    // log_drops 报告面负责；"写满 64 KiB 管道"这一 v2 介质判据随管道一起退场。
+    let logged_lines = std::fs::read_to_string(&log_file)
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
     checks.record(
-        &format!("8 连打 {BURST_TOTAL} 个请求（足以写满 64 KiB 管道）全部成功"),
-        sent == BURST_TOTAL && failures.is_empty() && log_size > 64 * 1024,
-        format!("sent={sent} failures={failures:?} log_bytes={log_size}（管道容量 65536）"),
+        &format!("8 连打 {BURST_TOTAL} 个请求全部成功，且日志逐条落盘"),
+        sent == BURST_TOTAL && failures.is_empty() && log_size > 0 && logged_lines + 20 >= sent,
+        format!("sent={sent} failures={failures:?} log_bytes={log_size} log_lines={logged_lines}"),
     );
 
-    // ---- 9 实例崩溃能立刻看见，且不留僵尸 ----
-    let status_file = state.join("runtime/alpha.status.json");
-    let pid = std::fs::read_to_string(&status_file)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| value["pid"].as_u64())
-        .expect("status file must carry the instance pid") as i32;
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    // ---- 9 故障注入：实例崩溃的可见性与资源释放 ----
+    // v2 这条读状态文件拿 pid、SIGKILL 真子进程、盯 /proc 等僵尸回收；v3 实例
+    // 在进程内，"线程死了"的可观察形态由注入旋钮给出（真引擎与 fake 同构支持）。
+    let fault = api(
+        web_port,
+        "POST",
+        "/api/_fault",
+        None,
+        true,
+        None,
+        Some(r#"{"env":"alpha","reason":"live fault injection"}"#),
+    );
+    assert_eq!(
+        fault.status, 200,
+        "fault injection must be accepted: {}",
+        fault.body
+    );
 
-    // 工作台必须改口：视图曾经只看"handles 表里有没有这个环境"，于是会一直报 running。
-    // 采样分两段看：崩溃之后**任何一次**都不能再说 running；而"为什么会死"要等回收任务
-    // 写下遗言（它每 500ms 轮询一次），所以最终态必须有信号。
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut claims_running = 0usize;
     let mut settled = String::from("(never changed)");
@@ -939,35 +974,30 @@ fn the_workbench_behaves_on_a_real_host() {
         if body["health"] == "running" {
             claims_running += 1;
         } else {
-            // 取字符串本体：`serde_json::Value` 的 Display 会把字符串**带引号**打印，
-            // 直接 `format!("{}", value)` 会得到 `"failed":"…"`，判据就永远不成立。
             settled = format!(
                 "{}:{}",
                 body["health"].as_str().unwrap_or("?"),
                 body["health_reason"].as_str().unwrap_or("")
             );
-            if settled.contains("signal") {
+            if settled.contains("injected") {
                 break;
             }
         }
         std::thread::sleep(Duration::from_millis(300));
     }
 
-    // 僵尸被收掉之后 /proc/<pid> 就消失了；若无人 try_wait()，条目会一直挂着（state=Z）。
-    let reaped_deadline = Instant::now() + Duration::from_secs(10);
-    let proc_entry = format!("/proc/{pid}");
-    while Instant::now() < reaped_deadline && Path::new(&proc_entry).exists() {
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    // 僵尸回收的 v3 等价判据：端口**真的**空出来了 —— 还能在原端口 bind 起新
+    // 监听，才说明没有隐性的占着不放。
+    let rebind = TcpListener::bind(("127.0.0.1", alpha_proxy));
     checks.record(
-        "9 实例被 SIGKILL 后：工作台不再报 running、说清是被信号杀死、子进程被回收",
+        "9 注入 failed 后：不再报 running、原因可见、监听端口真的释放",
         claims_running == 0
             && settled.starts_with("failed:")
-            && settled.contains("signal")
-            && !Path::new(&proc_entry).exists(),
+            && settled.contains("injected")
+            && rebind.is_ok(),
         format!(
-            "claims_running={claims_running} settled={settled:?} zombie={}",
-            Path::new(&proc_entry).exists()
+            "claims_running={claims_running} settled={settled:?} rebind_ok={}",
+            rebind.is_ok()
         ),
     );
 
@@ -1050,8 +1080,8 @@ fn the_workbench_behaves_on_a_real_host() {
     let gamma_url = format!("http://gamma.test:{alpha_upstream}/");
     let gamma_before = proxy_get(created_port, &gamma_url, None).body;
 
-    // 运行中换绑定是**热**的：绑定由固定名软链承载（管理器原子换链 + 重写 config.json），
-    // 运行中的注入器按轮询间隔跟上，实例不必重启。描述同样允许热改。
+    // 运行中换绑定是**热**的：v3 是一次同步装配（apply），POST 返回即生效，实例不必重启。
+    // 描述同样允许热改。
     let bind_running = api(
         web_port,
         "PATCH",
@@ -1306,7 +1336,7 @@ fn the_workbench_behaves_on_a_real_host() {
     // 这条是"新增端点忘了鉴权"的兜底。曾踩过：前端只有 mutate() 带凭据，所有 GET
     // （日志/规则原文/对比）在开 token 后静默 401，而页面看着"只有日志坏了"。
     // 白名单只有两个内嵌静态资产（不含数据，浏览器子资源带不了凭据）。
-    let endpoints: [(&str, &str); 17] = [
+    let endpoints: [(&str, &str); 18] = [
         ("GET", "/api/status"),
         ("GET", "/api/environments"),
         ("POST", "/api/environments"),
@@ -1324,6 +1354,7 @@ fn the_workbench_behaves_on_a_real_host() {
         ("DELETE", "/api/rules/probe"),
         ("GET", "/api/compare?host=probe.test"),
         ("GET", "/api/events"),
+        ("POST", "/api/_fault"),
     ];
     let mut leaks: Vec<String> = Vec::new();
     for (method, path) in endpoints {
@@ -1446,6 +1477,31 @@ fn the_workbench_behaves_on_a_real_host() {
             "early={auth_running_early} patch={} denied={denied} granted={granted} running_patch={auth_running} enabled={}",
             auth_patched.status, authed["proxy_auth_enabled"].as_bool().unwrap_or(false)
         ),
+    );
+
+    // ---- 12b 凭据 argv 审计：明文密码不得出现在任何进程的 cmdline ----
+    // v2 的凭据经启动参数下发，靠记录前脱敏的契约兜底；v3 凭据只在内存比对 ——
+    // 结构性成立，这里用全系统扫描把它钉死。
+    let mut argv_leaks: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&raw).replace("\0", " ");
+            if text.contains("live-pass") {
+                argv_leaks.push(name);
+            }
+        }
+    }
+    checks.record(
+        "12b 凭据不进 argv：全系统 /proc cmdline 扫描不得出现明文密码",
+        argv_leaks.is_empty(),
+        format!("leaks={argv_leaks:?}"),
     );
 
     // ---- 13 对外服务开关：listen.host 0.0.0.0 ----
@@ -1587,9 +1643,13 @@ fn the_workbench_behaves_on_a_real_host() {
         Some(r#"{"insecure_hosts":["relaxed.test"]}"#),
     );
     let listed = json(&hot_patch);
+    // v3 装配同步：PATCH 已返回，第一次请求就应命中新名单（轮询只是宽限保险）。
+    let first_started = Instant::now();
+    let first_after_patch = curl_https_status(tls_proxy, &relaxed_url);
+    let first_latency_ms = first_started.elapsed().as_millis();
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut after = 0u16;
-    while Instant::now() < deadline {
+    let mut after = first_after_patch;
+    while after != 200 && Instant::now() < deadline {
         after = curl_https_status(tls_proxy, &relaxed_url);
         if after == 200 {
             break;
@@ -1628,6 +1688,139 @@ fn the_workbench_behaves_on_a_real_host() {
             rules_post.status, hot_patch.status, listed["insecure_hosts"]
         ),
     );
+    checks.record(
+        "14b 热生效时延：PATCH 返回后的第一次请求即已生效（装配同步，不等轮询）",
+        first_after_patch == 200 && first_latency_ms < 3000,
+        format!("first_try={first_after_patch} latency_ms={first_latency_ms}"),
+    );
+
+    // ---- 15 预放既有 CA：引擎原样加载，已装证书客户端零感知 ----
+    // confdir 预先放一张 mitmproxy 形状的 CA（-ca.pem = 私钥+证书拼接、
+    // -ca-cert.pem = 客户端装的那张）。引擎必须**加载复用**而不是重新生成：
+    // 文件逐字节不变 + 客户端仅凭这张 CA 校验 MITM 链成功，两面同时成立才算数。
+    let state_ca = work.join("state-ca");
+    let confdir = state_ca.join("shared").join("confdir");
+    std::fs::create_dir_all(&confdir).expect("confdir");
+    let ca_key = work.join("preca.key");
+    let ca_crt = work.join("preca.crt");
+    let genrsa = Command::new("openssl")
+        .args(["genrsa", "-out", ca_key.to_str().unwrap(), "2048"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("openssl genrsa");
+    assert!(genrsa.success(), "CA 私钥生成失败");
+    let req = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-new",
+            "-key",
+            ca_key.to_str().unwrap(),
+            "-out",
+            ca_crt.to_str().unwrap(),
+            "-days",
+            "825",
+            "-subj",
+            "/O=mitmproxy/CN=envboard-live-ca",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("openssl req");
+    assert!(req.success(), "CA 证书生成失败");
+    let key_pem = std::fs::read_to_string(&ca_key).unwrap();
+    let crt_pem = std::fs::read_to_string(&ca_crt).unwrap();
+    let bundle = format!("{key_pem}{crt_pem}");
+    std::fs::write(confdir.join("mitmproxy-ca.pem"), &bundle).unwrap();
+    std::fs::write(confdir.join("mitmproxy-ca-cert.pem"), &crt_pem).unwrap();
+    std::fs::write(work.join("ca.rules"), "127.0.0.1 ca.test\n").unwrap();
+    assert_eq!(
+        cli(
+            &state_ca,
+            &[
+                "rules",
+                "import",
+                "ca",
+                "--file",
+                work.join("ca.rules").to_str().unwrap(),
+            ],
+        ),
+        0
+    );
+    assert_eq!(
+        cli(&state_ca, &["env", "add", "caenv", "--rules", "ca"],),
+        0
+    );
+    let web_ca = free_port();
+    let mut wb_ca = Workbench {
+        child: spawn_workbench(
+            &state_ca,
+            &[
+                "web",
+                "--listen",
+                &format!("127.0.0.1:{web_ca}"),
+                "--without-token",
+            ],
+        ),
+    };
+    assert!(
+        wait_port(web_ca, Duration::from_secs(30)),
+        "CA 兼容工作台没起来"
+    );
+    api(
+        web_ca,
+        "POST",
+        "/api/environments/caenv/start",
+        None,
+        true,
+        None,
+        None,
+    );
+    let (tls_ca, mut up_ca) = start_tls_upstream(&work, "ca.test");
+    api(
+        web_ca,
+        "PATCH",
+        "/api/environments/caenv",
+        None,
+        true,
+        None,
+        Some(r#"{"insecure_hosts":["ca.test"]}"#),
+    );
+    let ca_view = json(&api(
+        web_ca,
+        "GET",
+        "/api/environments/caenv",
+        None,
+        true,
+        None,
+        None,
+    ));
+    let ca_proxy = ca_view["listen"]["port"].as_u64().unwrap_or(0) as u16;
+    let code_ca = curl_with_ca(
+        ca_proxy,
+        &format!("https://ca.test:{tls_ca}/"),
+        &confdir.join("mitmproxy-ca-cert.pem"),
+    );
+    let unchanged =
+        std::fs::read(confdir.join("mitmproxy-ca.pem")).unwrap_or_default() == bundle.as_bytes();
+    checks.record(
+        "15 预放既有 CA：引擎原样加载（confdir 逐字节不变），客户端仅凭该 CA 校验 MITM 链成功",
+        code_ca == 200 && unchanged && ca_view["health"] == "running",
+        format!(
+            "cacert_code={code_ca} confdir_unchanged={unchanged} health={}",
+            ca_view["health"].as_str().unwrap_or("?")
+        ),
+    );
+    up_ca.kill().ok();
+    let _ = up_ca.wait();
+    wb_ca.kill();
+    let _ = wb_ca.child.wait();
+    let _ = std::fs::remove_dir_all(&state_ca);
 
     api(
         web_port,

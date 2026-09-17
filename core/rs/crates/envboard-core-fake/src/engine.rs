@@ -193,6 +193,15 @@ impl ProxyEngine for FakeEngine {
             })
     }
 
+    fn inject_failed(&self, env: &str, reason: &str) -> bool {
+        self.inject_state(
+            env,
+            InstanceState::Failed {
+                reason: format!("injected failure: {reason}"),
+            },
+        )
+    }
+
     fn report(&self, handle: &EngineHandle) -> EngineReport {
         let guard = self.entries.lock().unwrap();
         match guard.get(&handle.env) {
