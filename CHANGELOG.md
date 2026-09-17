@@ -11,6 +11,36 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Added（v3 重构 M-P1：纯库引擎骨架 envboard-core）
+
+v3 把数据面重构为**纯 Rust 库 + 进程内引擎实例**（分支
+`refactor_envboard_v3_rust_engine_20260917`）。本阶段不改运行行为：manager 仍走
+mitmproxy，本条目记录的是独立库面的落地。
+
+- 新 crate `envboard-core`（内部依赖只有 `envboard-core-api`，已登记进 `deps`
+  门禁边表）：
+  - **共享 CA 的加载与物化**：直接读既有 confdir——`mitmproxy-ca.pem`（PKCS#1 RSA
+    私钥 + 证书拼接）与 `mitmproxy-ca-cert.pem`。判据沿用 v2 并逐条实现：私钥与证书
+    公钥**逐字节配对**、`-ca.pem` 内嵌证书与 `-ca-cert.pem` 一致、basicConstraints
+    CA:TRUE、未过期；任一不满足 → 删除并重新物化，且**以 `CaOutcome::Regenerated
+    { reason }` 交回上层**——坏 CA 的处置必须可见，禁止静默带病服务。
+  - **新生成的 CA 用 ECDSA P-256**（签发库 rcgen 0.14 的 ring 后端不支持生成 RSA
+    密钥，文档明示只有 aws-lc-rs 能生成）；**加载既有 RSA CA 并用它现场签发**已由
+    进程内握手测试实证（`core/rs/crates/envboard-core/tests/mitm.rs`，fixture 为
+    纯测试假值 CA，密钥无外部用途）。
+  - **叶子证书按 SNI 现签现缓存**：容量 512、满则整体清空重签；剩余寿命不足 30 天
+    即重签；私钥文件写盘 0600。
+  - **rustls 接线**：MITM 服务侧配置（客户端 ALPN 只协商 `http/1.1`）与上游客户侧
+    严格校验配置（系统信任库 `rustls-native-certs`）。信任库来源从 certifi 换成
+    系统库会影响"哪些域名免名单通过"的集合，最终由 v3 README 的已知限制收口。
+  - **自写定形 DER 读取**（TLV、PKCS#1↔PKCS#8 封装互转、证书 SPKI/CA 标志/有效期）：
+    PKCS#1 兼容面不随上游库的支持摇摆。
+- 新增 workspace 依赖：rustls 0.23（ring provider）/ tokio-rustls / rcgen 0.14 /
+  rustls-native-certs / rustls-pemfile / time；`Cargo.lock` 已入库（rcgen 首次引入
+  需一次联网预热，已完成）。
+- **v1 协议面限制**：ALPN 只声明 HTTP/1.1，强制 h2 的客户端（gRPC 等）会失败——
+  这是写明的非目标，不是静默降级。
+
 ### Added（按域名放宽上游证书校验）
 
 - `Environment.insecure_hosts`：**完整域名清单**（默认空），命中 ⟺ 归一化后的 SNI 与该

@@ -44,6 +44,19 @@ clap = { version = "4.6.6", features = ["derive"] }
 # 只被工程门禁用来解析各 crate 的 Cargo.toml（依赖方向、发布标识）；产品代码不用它。
 toml = "1.1.4"
 
+# v3 引擎（envboard-core，M-P1 起）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
+# 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA
+# 用 ECDSA P-256，加载既有 RSA CA 不受影响）。
+# x509-parser 与 time 是 rcgen 的**同版本可选传递依赖**，被本仓直接 used 的两条：
+# 公钥配对校验要读证书 SPKI、证书有效期要设时间戳 —— 版本必须与 rcgen 内部一致。
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+rustls-native-certs = "0.8.4"
+rustls-pemfile = "2.2.0"
+x509-parser = { version = "0.18", default-features = false }
+time = { version = "0.3", default-features = false, features = ["std"] }
+
 [profile.release]
 # 单机工具，体积与启动速度优先于极致优化
 lto = "thin"

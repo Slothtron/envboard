@@ -52,6 +52,9 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
         &["envboard-core-api", "envboard-domain", "envboard-manager"],
     ),
     ("envboard-core-mitmproxy", &["envboard-core-api"]),
+    // v3 纯库引擎（M-P1 起）。只依赖契约词汇；数据面与 manager 接线落地时
+    // 按 capabilities 的接缝逐阶段扩边。"不依赖 axum"由这条边表本身就是判据。
+    ("envboard-core", &["envboard-core-api"]),
     (
         "envboard-contract-tests",
         &["envboard-core-api", "envboard-domain", "envboard-rules"],
