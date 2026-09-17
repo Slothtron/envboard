@@ -1,30 +1,18 @@
 {
   "capability": "instance.reconcile",
-  "description": "reconcile 顺序固定：先清理孤儿，再拉起期望为 running 的环境。输入顺序故意与期望动作顺序相反，以便断言顺序而不是碰巧",
+  "description": "顺序固定：清理遍（stop/keep，按输入序）全部先于启动遍（start/mark_conflict）；停了且期望 stopped 无动作",
   "input": {
     "instances": [
-      {
-        "env": "beta",
-        "desired": "running",
-        "record": null,
-        "live": null
-      },
-      {
-        "env": "alpha",
-        "desired": "stopped",
-        "record": {
-          "pid": 111,
-          "starttime": 900,
-          "cmdline": ["mitmdump", "-s", "/home/u/.envboard/agent/envboard_mitmproxy.py", "--set", "listen_port=16301"]
-        },
-        "live": {
-          "pid": 111,
-          "starttime": 900,
-          "cmdline": ["mitmdump", "-s", "/home/u/.envboard/agent/envboard_mitmproxy.py", "--set", "listen_port=16301"]
-        }
-      }
+      { "env": "gamma", "desired": "running", "live": true, "listen_port": 16303 },
+      { "env": "beta", "desired": "running", "live": false, "listen_port": 16302 },
+      { "env": "alpha", "desired": "stopped", "live": true, "listen_port": 16301 },
+      { "env": "delta", "desired": "stopped", "live": false, "listen_port": 16304 }
     ],
     "occupied_by_others": []
   },
-  "expect": { "ok": true, "actions": [["alpha", "stop"], ["beta", "start"]], "warnings": [] }
+  "expect": {
+    "ok": true,
+    "actions": [["gamma", "keep"], ["alpha", "stop"], ["beta", "start"]],
+    "warnings": []
+  }
 }

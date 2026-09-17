@@ -166,7 +166,7 @@ envboard rules show beta                        # 改规则文件前先取回原
 ## 架构
 
 ```
-core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、68 个 golden fixture
+core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、66 个 golden fixture
 core/rs/crates/
   envboard-core-api   ProxyCore trait、实例契约、错误码、端口（时钟/日志）  ← 根，无内部依赖
   envboard-domain     环境校验/合并、端口选择、reconcile 决策              ← 纯逻辑
@@ -176,7 +176,7 @@ core/rs/crates/
   envboard-manager    环境 CRUD、端口分配、状态持久化、锁、健康检查、reconcile
   envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
   envboard-cli        envboard 二进制
-  envboard-contract-tests  消费全部 68 个契约 fixture（只有测试目标）
+  envboard-contract-tests  消费全部 66 个契约 fixture（只有测试目标）
   envboard-policy-tests    工程门禁本身（只有测试目标，不进发布物）
 adapters/mitmproxy/   单文件注入器（只用标准库与宿主自带的依赖；被二进制 include_str! 内嵌）
 scripts/systemd/      部署工件（用户级 unit）
@@ -220,7 +220,7 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 |---|---|---|---|
 | `policy` | `cargo test -p envboard-policy-tests` | 见下面「工具链纪律」与「文本自包含」两节 | 只有 cargo |
 | `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测（端口分配、reconcile、锁、健康判定含僵尸判活、日志尾部与轮转、参数拼装、CLI 瘦客户端、**环境编辑：热改 vs 必须停机**） | 只有 cargo |
-| `contract` | `cargo test -p envboard-contract-tests` | 68 个 fixture 的形状与语义都由实现消费（含 `rules.parse` 与 `insecure.hosts`）；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 | 只有 cargo |
+| `contract` | `cargo test -p envboard-contract-tests` | 66 个 fixture 的形状与语义都由实现消费（含 `rules.parse` 与 `insecure.hosts`）；失败用例必须钉住错误码、成功用例至少钉一个归一化字段 | 只有 cargo |
 | `artifact` | `cargo test -p envboard-cli --test artifact` | 发布工件清单齐全、v1 残留为零、二进制里真的内嵌了注入器 | 只有 cargo |
 | `adapter` | `cargo test -p envboard-rules --test dual_impl -- --ignored` | Rust 与注入器的解析/渲染输出**逐字节**一致（63 个用例；已知分歧必须显式声明，声明过期同样失败） | 适配器宿主的解释器 |
 | `live` | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境**同时**可用且结果不同、规则热重载、**按域名放宽上游校验（含运行中热改，以及名单外域名仍然 502 的对照）**、安全（Host / CSRF）、CSP 形态、日志、崩溃恢复、连打 320 个请求不卡死、实例崩溃可见且不留僵尸、**编辑后按新配置真的生效** | mitmdump + 网络 |
@@ -345,6 +345,6 @@ envboard env list
 - `capabilities.md` —— 能力清单、领域不变量、端口分配与生命周期语义、ProxyCore 能力矩阵
 - `rules.md` —— hosts 规则语法的 **BNF**（容错规则、跳过原因码、渲染的逐字节要求）
 - `errors.md` —— 统一错误码与健康状态表
-- `fixtures/` —— 68 个 golden case
+- `fixtures/` —— 66 个 golden case
 
 改实现之前先问"契约该不该改"；该改就改契约并同步 fixture。

@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envboard_core_api::{
     ClockPort, CoreCapabilities, EngineHandle, EngineSpec, Error, ErrorCode, InstanceState,
-    LineWriter, Listen, LogLevel, LoggerPort, ProcessIdentity, ProxyEngine,
+    LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine,
 };
 use envboard_domain::{
     Action, Desired, Environment, InstanceRecord, PortRequest, ReconcilePlan, candidate_ports,
@@ -41,16 +41,6 @@ use crate::state::{ManagerConfig, PersistedState, StoredError, StoredRules};
 /// 启动后等待绑定定态的预算（绑定是本地 bind，毫秒级；给足宽容只防极端调度）。
 const SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const SETTLE_POLL: Duration = Duration::from_millis(10);
-
-/// 进程内实例的哨兵身份：domain 的 reconcile 纯逻辑面仍按 record/live 身份
-/// 建模（fixtures 是它的契约），v3 用固定哨兵表达"活着"，死实例不会带上它。
-fn engine_sentinel() -> ProcessIdentity {
-    ProcessIdentity {
-        pid: -1,
-        starttime: 0,
-        cmdline: vec!["engine-in-process".to_string()],
-    }
-}
 
 /// 一个环境对外的视图（工作台与 CLI 都渲染它）。
 #[derive(Debug, Clone)]
@@ -541,15 +531,11 @@ impl Manager {
         for raw in &state.environments {
             let environment = Environment::from_json(raw)?;
             let name = environment.name().to_string();
-            let live = self.is_live(&name).then(engine_sentinel);
             records.push(InstanceRecord {
-                env: name,
+                env: name.clone(),
                 desired: state.desired_of(environment.name()),
-                // 进程内实例没有可跨重启的身份：record 与 live 同值（哨兵）。
-                record: live.clone(),
-                live,
+                live: self.is_live(&name),
                 listen_port: Some(environment.listen().port),
-                legacy: false,
             });
         }
 
@@ -560,11 +546,7 @@ impl Manager {
                 .iter()
                 .map(|(env, action)| (env.clone(), action.as_str().into()))
                 .collect(),
-            warnings: plan
-                .warnings
-                .iter()
-                .map(|warning| warning.as_str().to_string())
-                .collect(),
+            warnings: plan.warnings,
         };
 
         for (env, action) in &plan.actions {
@@ -578,20 +560,6 @@ impl Manager {
                         self.logger.log(
                             LogLevel::Warn,
                             &format!("reconcile: cannot start {env}: {error}"),
-                        );
-                    }
-                }
-                Action::Restart => {
-                    if let Err(error) = self.stop(env).await {
-                        self.logger.log(
-                            LogLevel::Warn,
-                            &format!("reconcile: cannot stop {env}: {error}"),
-                        );
-                    }
-                    if let Err(error) = self.start(env).await {
-                        self.logger.log(
-                            LogLevel::Warn,
-                            &format!("reconcile: cannot restart {env}: {error}"),
                         );
                     }
                 }

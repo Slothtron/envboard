@@ -18,6 +18,4 @@ pub use ports::{
     DEFAULT_MAX_ATTEMPTS, DEFAULT_PORT_RANGE, PORT_FIELD, PortDecision, PortRequest, Warning,
     candidate_ports, occupancy_from, seed_from, select_port,
 };
-pub use reconcile::{
-    Action, Desired, InstanceRecord, ReconcilePlan, ReconcileWarning, plan_reconcile,
-};
+pub use reconcile::{Action, Desired, InstanceRecord, ReconcilePlan, plan_reconcile};

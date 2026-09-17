@@ -11,6 +11,26 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Changed（v3 重构 M-P5 第一步：契约改写与对拍退役）
+
+- 实例生命周期契约改写为 v3（capabilities.md 的「实例生命周期」与「配置下发与热
+  应用」两节、errors.md 健康状态表）：判定 = 标记 → desired → 引擎内存报告；
+  **config_mismatch 从契约删除**（装配即生效没有中间态；被拒配置以 invalid_config
+  标记 + unhealthy 表达）；僵尸/PID 复用/状态文件 TTL/收敛窗口等进程时代判据
+  全部退场；"任务级崩溃隔离 + release 保持 unwind"与"视图与权威判定同源"升格
+  为契约硬要求。
+- domain 的 plan_reconcile 换 v3 模型：InstanceRecord.live 从"进程身份"改为
+  **bool（线程存活）**；Action 去掉 Restart（上一代概念消失）；keep 成为清理遍的
+  可见决策；warnings 恒空（字段保留给未来的退避/告警面）。契约 fixture 7 张 → 5 张
+  （lifecycle 组按新语义重写：starts/stops/order/port-conflict/no-port-start），
+  总数 68 → 66（计数断言与 README 同步）。
+- 规则语法 BNF 仍是唯一仲裁（fixtures/rules 组不动）；**dual_impl 逐字节对拍退役**
+  ——v3 只剩一份解析实现（envboard-rules），第二份 Python 镜像与它需要的宿主解释器
+  探测一起删除；ci/verify.sh 的 adapter/dual 层与 PYTHON 旋钮随之移除（默认层 =
+  policy + rust + contract + artifact）。
+- 「引擎能力矩阵」改写为 v3 表（内核能力 + hosts-rules/request-log 的落点逐项对应
+  代码；已知限制——仅 h1、信任库换源——随本表登记，README 收口在 M-P6）。
+
 ### Changed（v3 重构 M-P4 第二步：manager/web/cli 接线到 ProxyEngine）
 
 - Manager 换依赖面：构造参数从 ProxyCore 九件套变成 ProxyEngine 八件套
@@ -653,7 +673,3 @@ mitmproxy，本条目记录的是独立库面的落地。
 - `mypy` is not vendored; `typecheck` degrades to a skip with an explicit notice
   when it is unavailable.
 - `envboard.resolve` is an asynchronous command implemented as "schedule + read
-  the mapping table", because mitmproxy has no awaitable command path. The REST
-  endpoints await properly and return results directly.
-- Environment switching is observation-only (L1). Traffic rewriting (L2) is
-  deliberately out of scope for this version.

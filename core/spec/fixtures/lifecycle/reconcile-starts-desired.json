@@ -1,18 +1,9 @@
 {
   "capability": "instance.reconcile",
-  "description": "期望 running 但实际没在跑 → 拉起；无端口冲突，无告警",
+  "description": "期望 running 而引擎实例不在跑 → 拉起；无端口占用、无告警",
   "input": {
     "instances": [
-      {
-        "env": "beta",
-        "desired": "running",
-        "record": {
-          "pid": 111,
-          "starttime": 900,
-          "cmdline": ["mitmdump", "-s", "/home/u/.envboard/agent/envboard_mitmproxy.py", "--set", "listen_port=16301"]
-        },
-        "live": null
-      }
+      { "env": "beta", "desired": "running", "live": false, "listen_port": 16301 }
     ],
     "occupied_by_others": []
   },

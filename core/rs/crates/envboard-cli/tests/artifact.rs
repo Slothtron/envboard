@@ -103,9 +103,9 @@ fn the_release_artifact_contains_only_expected_files() {
         }
     }
 
-    // v3 断言：进程内引擎在场（"engine-in-process" 是 manager 对哨兵身份的唯一出处）。
+    // v3 断言：进程内引擎在场（引擎线程名是 envboard-core 运行时的必然足迹）。
     let binary = std::fs::read(envboard_binary()).expect("built binary must be readable");
-    const ENGINE_MARKER: &[u8] = b"engine-in-process";
+    const ENGINE_MARKER: &[u8] = b"envboard-engine-";
     if !binary
         .windows(ENGINE_MARKER.len())
         .any(|w| w == ENGINE_MARKER)
