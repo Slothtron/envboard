@@ -205,6 +205,28 @@ fn api(
 }
 
 /// 只要状态码（SSE 的响应体永不结束，**不能**读到底）。
+/// token 放在 **URL query** 里的 GET —— 浏览器直接打开工作台时唯一可用的携带
+/// 方式，与 api() 的 header 通道互补（两条都要有断言：query 端到端曾是盲区）。
+fn api_query(port: u16, path: &str, token: &str) -> u16 {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    let request = format!(
+        "GET {path}{sep}token={token} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the workbench");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(25)))
+        .expect("set read timeout");
+    stream.write_all(request.as_bytes()).expect("send request");
+    stream.flush().ok();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).ok();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    text.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0)
+}
+
 fn status_only(port: u16, path: &str) -> u16 {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
@@ -1202,6 +1224,7 @@ fn the_workbench_behaves_on_a_real_host() {
         })
         .unwrap_or_default();
     let none_status = api(auto_port, "GET", "/api/status", None, true, None, None).status;
+    let query_status = api_query(auto_port, "/api/status", &auto_token);
     let auto_status = api(
         auto_port,
         "GET",
@@ -1217,9 +1240,10 @@ fn the_workbench_behaves_on_a_real_host() {
         !auto_token.is_empty()
             && auto_token.len() == 32
             && none_status == 401
-            && auto_status == 200,
+            && auto_status == 200
+            && query_status == 200,
         format!(
-            "token_len={} none={none_status} with_token={auto_status}",
+            "token_len={} none={none_status} header={auto_status} query={query_status}",
             auto_token.len()
         ),
     );

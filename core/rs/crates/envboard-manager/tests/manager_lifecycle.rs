@@ -1107,3 +1107,36 @@ impl PortProbe for CountingProbe {
         <SocketPortProbe as PortProbe>::is_free(&SocketPortProbe, host, port)
     }
 }
+
+/// 契约（capabilities.md「实例日志」）：每次启动写一行运行标记，追加不截断。
+/// 这也是"日志面板在第一个请求之前就有东西可看"的来源。
+#[tokio::test]
+async fn starting_an_instance_writes_the_run_marker_line() {
+    let harness = Harness::new();
+    create_beta(&harness);
+    harness.manager.start("beta").await.unwrap();
+    let path = harness
+        .manager
+        .config()
+        .log_file("beta")
+        .expect("默认 log_dir 是开着的");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.starts_with("--- envboard: env=beta listen=127.0.0.1:"),
+        "{text}"
+    );
+    assert!(text.contains("started="), "{text}");
+
+    // 重启追加第二段而不是截断：跨重启的历史靠标记分段。
+    harness.manager.stop("beta").await.unwrap();
+    harness.manager.start("beta").await.unwrap();
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after
+            .lines()
+            .filter(|line| line.starts_with("--- envboard:"))
+            .count(),
+        2,
+        "{after}"
+    );
+}

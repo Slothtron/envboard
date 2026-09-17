@@ -890,6 +890,15 @@ impl Manager {
             // 启动前照看一次体积：新的一段日志不该写进"下一行就触发轮转"的文件。
             let _ = crate::logs::rotate_if_needed(&path, self.config.max_log_bytes);
         }
+        // 运行标记（契约见 core/spec/capabilities.md「实例日志」）：每次启动一行、
+        // 追加不截断 —— 跨重启的历史靠它分段，日志面板在第一个请求之前也有东西可看。
+        if let Some(writer) = self.log_writer(name) {
+            writer.write_line(&format!(
+                "--- envboard: env={name} listen={} started={} ---",
+                environment.listen(),
+                self.clock.now_unix()
+            ));
+        }
         let handle = self.engine.start(name.to_string(), spec).await?;
         let deadline = tokio::time::Instant::now() + SETTLE_BUDGET;
         loop {

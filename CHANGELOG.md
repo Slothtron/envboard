@@ -11,6 +11,21 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Fixed（实机浏览器走查揪出的三个缺口 + 一个测试盲区）
+
+- **空列表里「新建环境」是死的**：renderDetail 在没有选中环境时把含表单的详情区
+  整体隐藏 —— 第一个环境永远建不出来（v2 遗留，live 层从不走 UI 所以从未暴露）。
+  前端引入显式 creating 态：新建时详情区盖过空态、动作行收起、取消/创建后回位；
+  renderDetailActions 补回 is-hidden 复位（曾经隐藏过的动作行必须能回来）。
+- **硬刷新必 401**：前端捕获 token 后立刻抹掉地址栏 query，而 document 请求本身
+  需要 token —— F5 得到 401 JSON 页。改为捕获后保留在 URL（可用性优先于观感，
+  凭据本就在启动横幅里，换 token 随时可重启）。
+- **运行标记行随子进程模型丢失**：契约承诺"每次启动写一行运行标记"，v3 实现漏了
+  ——launch 现在经 log writer 写运行标记行（追加不截断；manager_lifecycle 新增
+  断言：启动即有文件、重启成两段）。
+- **query token 端到端是测试盲区**：live 的 api() helper 一直用 header 通道，
+  "URL 携带 token"这条浏览器唯一路径从未被断言覆盖。补 api_query helper 并把
+  11a 扩成 header 与 query 双通道断言（实机验证 query 200 ✓）。
 ### Removed（v3 重构 M-P6：收尾退场，v2 面清零）
 
 - **全部 Python 产品代码退场**：`adapters/mitmproxy/`（注入器）、
@@ -641,32 +656,3 @@ mitmproxy，本条目记录的是独立库面的落地。
   （host 或端口任一变化时两个字段都发全）；勾选 0.0.0.0 而未启用鉴权时表单给
   红色警示；概览新增「访问鉴权」格、非回环监听地址加警示色；运行中锁定
   新增的两个输入框。创建时勾选对外服务则端口必填（自动分配只支持默认监听地址）。
-- **前端请求统一带凭据**：`api()` 收口所有请求的 header（此前只有 `mutate()` 显式带，
-  于是所有 GET —— 日志、规则原文、跨环境对比 —— 在 token 默认启用后一起 401，
-  而环境列表走 SSE 快照所以看着"只有日志坏了"）。`scripts/verify_live_v2.py` 新增
-  11d/11e 端面清点：**逐个** API 端点无 token 必须 401（静态资产是唯一白名单）、
-  `?token=` 对普通 GET 同样有效；README 补「HTTP 端点」全量表。
-- `scripts/verify_live_v2.py` 新增三组实机断言：`?token=` 与 header 等效（含 401
-  对照与启动日志横幅）、`proxy_auth` 下发后 407/200 对照（含运行中改被拒、
-  视图不回显凭据）、`listen.host = 0.0.0.0` 换址重启且回环方向照常服务。
-
-### Changed (breaking：工程工具链)
-
-- **仓库的工程门禁全部改用 Rust 写，工具链收敛为 `cargo` 一条。**
-  9 个 Python 工具脚本与 1 个 Node 入口壳全部退场，"禁止引入其他语言工具链"从文档
-  约束变成门禁会红的事实：
-
-  | 旧 | 新 |
-  |---|---|
-  | `scripts/naming_lint.py` | `cargo test -p envboard-policy-tests --test naming` |
-  | `scripts/doc_scope_lint.py` | `… --test doc_scope` |
-  | `scripts/rust_dependency_lint.py` | `… --test deps` |
-  | `scripts/compile_check.py` | 由 `dual` 真加载注入器 + `… --test adapter` 的静态检查承接 |
-  | `scripts/artifact_check.py` | `cargo test -p envboard-cli --test artifact` |
-  | `scripts/verify_contract.py` | 形状进 `envboard-contract-tests`，Python 侧消费由 `dual` 覆盖 |
-  | `scripts/verify_dual_impl.py` | `cargo test -p envboard-rules --test dual_impl -- --ignored` |
-  | `scripts/verify_live_v2.py` | `cargo test -p envboard-cli --test live_workbench -- --ignored` |
-  | `scripts/spike_m0_5.py` | 删除（机制已由 `live_manager` 常态覆盖） |
-  | `package.json` | 删除（它的唯一作用是转发 `npm run verify`） |
-
-- **新增门禁「工具链收敛」**（`envboard-policy-tests` 的 `toolchain`）：文件面不许有
