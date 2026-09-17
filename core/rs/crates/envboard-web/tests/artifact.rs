@@ -49,6 +49,17 @@ const REMOVED_IN_V2: &[&str] = &[
     "scripts/pack_check.py", // doc-scope-lint: allow —— v1 的发布物校验脚本，路径故意不存在
 ];
 
+/// 这些**测试资产**不进二进制，但必须随仓库存在 —— mitm 测试的四件假值 CA
+/// fixture 曾被全局 gitignore（`*.pem`）静默吞掉，制造了"worktree 全绿、fresh
+/// clone 必红"的事故（测试到 master 上 NotFound）。全局 ignore 管得着仓库想留的
+/// 文件，所以入库判据必须由门禁自己钉。
+const REPO_TEST_ASSETS: &[&str] = &[
+    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat/mitmproxy-ca.pem",
+    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat/mitmproxy-ca-cert.pem",
+    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat-alt/mitmproxy-ca.pem",
+    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat-alt/mitmproxy-ca-cert.pem",
+];
+
 /// 发布工件清单（二进制另由 [`envboard_binary`] 校验）。
 const RELEASE_ARTIFACTS: &[&str] = &[
     "Cargo.lock",
@@ -106,6 +117,15 @@ fn the_release_artifact_contains_only_expected_files() {
     for name in RELEASE_ARTIFACTS {
         if !root.join(name).exists() {
             problems.push(format!("发布工件清单里的 {name} 不存在"));
+        }
+    }
+
+    // 测试资产同样逐项在位（它们不进发布物，但必须随仓库走）。
+    for name in REPO_TEST_ASSETS {
+        if !root.join(name).exists() {
+            problems.push(format!(
+                "测试资产 {name} 不在仓库里 —— fresh clone 上的测试必红"
+            ));
         }
     }
 

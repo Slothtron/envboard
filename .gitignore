@@ -28,6 +28,11 @@ envboard.json
 /examples/hosts.txt
 /examples/*.rules
 
+# 测试 fixture 的假值 CA 必须入库（mitm.rs 消费）—— 全局 gitignore 的 *.pem
+# 会静默吞掉它们，这里显式豁免。判据由 artifact 门禁钉（文件不在必红）。
+!core/rs/crates/envboard-core/tests/fixtures/
+!core/rs/crates/envboard-core/tests/fixtures/**
+
 # 编辑器 / 系统
 .DS_Store
 .idea/
