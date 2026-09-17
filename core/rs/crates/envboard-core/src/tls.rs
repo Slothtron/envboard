@@ -91,6 +91,66 @@ pub fn strict_upstream_client_config() -> Result<Arc<ClientConfig>, Error> {
     Ok(Arc::new(config))
 }
 
+/// 放宽档的上游客户配置：**只有** TlsPolicy::Insecure（insecure_hosts 精确命中）
+/// 的连接执行路径才允许拿它去握手 —— 它是"连接执行器的一个档位"，不是可以
+/// 全局选择的 client config。
+pub fn permissive_upstream_client_config() -> Result<Arc<ClientConfig>, Error> {
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(rustls_error)?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyUpstreamCert))
+            .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// insecure_hosts 命中时的证书验证器：逐项放行。
+///
+/// 它存在的唯一合法语境是"用户点名放宽了这个域名"（名单判定发生在选择本配置
+/// 之前，见 engine 的连接执行路径）；判定与名单来自 `envboard-rules` 的同一份
+/// 实现，禁止在这一层再放宽任何东西（比如"证书链不完整也严格校验时放行"）。
+#[derive(Debug)]
+struct AcceptAnyUpstreamCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyUpstreamCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // 放宽档不检查签名（verify_*_signature 都是 assertion），这里给后端全表，
+        // 让 ClientHello 的 signature_algorithms 与严格档一致 —— 放宽只放宽"信任"，
+        // 不放宽协议面。
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 fn rustls_error(error: rustls::Error) -> Error {
     Error::new(ErrorCode::InternalError, format!("rustls: {error}"))
 }

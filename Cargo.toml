@@ -54,8 +54,11 @@ tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 rustls-native-certs = "0.8.4"
 rustls-pemfile = "2.2.0"
-x509-parser = { version = "0.18", default-features = false }
+# x509-parser 不作直接依赖：证书结构的读取由 envboard-core 的 der 模块自己做
+# （固定形状、可单测），它只是 rcgen 的可选传递依赖随 feature 进入。
 time = { version = "0.3", default-features = false, features = ["std"] }
+# 热更新单快照：数据面每请求 load_full，装配即整体换入，无文件通道、无轮询。
+arc-swap = "1.9.2"
 
 [profile.release]
 # 单机工具，体积与启动速度优先于极致优化

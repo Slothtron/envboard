@@ -11,6 +11,31 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Added（v3 重构 M-P2：数据面——进程内引擎实例）
+
+- envboard-core::engine：**引擎实例 = 一个 OS 线程 + 一个 current-thread
+  runtime + 一个监听端口**。状态机 starting → running / port_conflict /
+  failed：绑定即真相（EADDRINUSE → port_conflict，不换端口、不试绑）；
+  请求任务级崩溃隔离（tokio 逐任务捕获），引擎线程 panic → failed。
+  apply_config 同步换入全量快照（ArcSwap），回执 config_hash 与 epoch；
+  listen 是停机字段，热改它按 invalid_config 拒绝。v2 的状态文件 TTL、
+  收敛窗口、/proc 身份、试绑在这条路径上整体消失（manager 侧删除在 M-P4）。
+- 数据面能力：CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；
+  absolute-URI（http scheme）正向代理；407 鉴权门（CONNECT 与 absolute-URI
+  同一条门，凭据只在内存里定长时间比对）；insecure_hosts 经
+  ConnectTarget.tls_policy 落到连接执行器的两个档位（严格 = 系统信任库，
+  放宽 = 仅精确命中可用；不存在"全局关校验"的表达路径）。改写语义与 v2
+  注入器逐项一致：只改连接目标，不动请求内容、不动 Host 头、不动 SNI 基准。
+- ConnectTarget（envboard-core::target）：authority / sni / resolved_addr /
+  tls_policy / chained_proxy（恒 None 的扩展位）——基础配置与后续插件管道的
+  唯一接缝。
+- body 默认缓冲（8 MiB 上限，超限 413/502 而非静默流式）；101 升级走透传
+  旁路，upgrade 链的请求头原样带走。上游连接一问一答（不复用）：热改规则/
+  名单不会被连接池里的旧策略穿越。
+- 验收：core/rs/crates/envboard-core/tests/data_plane.rs 六组 hermetic 断言
+  （规则命中 200、未覆盖 502、407 门、insecure 对照 + 热翻转不重启、
+  port_conflict、隧道保活多轮）。
+
 ### Added（v3 重构 M-P1：纯库引擎骨架 envboard-core）
 
 v3 把数据面重构为**纯 Rust 库 + 进程内引擎实例**（分支
