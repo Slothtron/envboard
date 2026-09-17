@@ -1,0 +1,28 @@
+[package]
+name = "envboard-core"
+description = "envboard v3 纯库代理引擎：共享 CA 与 SNI 按需签发（M-P1 起逐步落数据面与插件管道）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 本仓不发布 crate：发布物是 `envboard` 二进制。
+publish = false
+
+[dependencies]
+envboard-core-api.workspace = true
+async-trait.workspace = true
+envboard-rules.workspace = true
+arc-swap.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "sync", "io-util"] }
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }

@@ -1,18 +1,19 @@
-//! 期望状态与实际状态的对齐（`instance.reconcile`）—— 纯决策，不做 I/O。
+//! 期望状态与实际状态的对齐（instance.reconcile）—— 纯决策，不做 I/O。
 //!
-//! 契约见 `core/spec/capabilities.md`（§实例生命周期）。两条容易写错、
-//! 且都有 golden fixture 钉住的规则：
+//! v3 的"实际在跑"是**引擎实例的存活性**（同进程的线程/运行时状态，由管理面
+//! 读内存报告得出）—— 不再是 OS 进程身份。v2 在这里的三条判据随子进程模型退场：
+//! PID+starttime+cmdline 三重比对、PID 复用告警、上一代实例重启。它们防的是
+//! "跨进程边界的身份错认"；实例不出进程边界，错认就没有发生的介质。
 //!
-//! 1. **孤儿清理必须比对 PID + 启动时刻 + cmdline**。只比 PID 存活会误杀 PID 复用后的
-//!    无关进程；只比 PID + cmdline 也不够 —— 同一份配置的实例 cmdline **完全相同**，
-//!    PID 复用后照样撞上。任一项不匹配就**不动那个进程**，只记告警。
-//! 2. **顺序固定**：先清理孤儿，再拉起期望 running 的环境。
-//! 3. **上一代实例要重启**：在跑但状态文件里没有配置哈希回执的实例，跑的是旧通道下的
-//!    配置，`Keep` 会让分叉一直留着 —— 它走 `Restart`，不参与"没坏就不动"。
+//! 保留并有 golden fixture 钉住的规则：
+//!
+//! 1. **顺序固定**：先清理（stop），后启动（start/mark_conflict）。
+//! 2. **desired=running 且没在跑、而端口被别的程序占着 → 标记冲突，绝不自动换端口**
+//!    （已持久化端口是环境的对外身份）。
+//! 3. **failed 自愈走 Start**：live=false 统一按期望重新拉起；"该不该重启"由
+//!    desired 裁决，不在这里做退避（节奏归管理面的 reconcile 循环）。
 
 use std::collections::BTreeSet;
-
-use envboard_core_api::ProcessIdentity;
 
 /// 持久化的期望状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -27,29 +28,20 @@ pub enum Desired {
 pub struct InstanceRecord {
     pub env: String,
     pub desired: Desired,
-    /// 上次启动时记录下来的进程身份（`None` = 从没启动过）。
-    pub record: Option<ProcessIdentity>,
-    /// 现在实际在跑的那个进程（`None` = 没有活着）。
-    pub live: Option<ProcessIdentity>,
-    /// 该环境的持久化端口。只有 `desired = running` 且没在跑时才用得上。
+    /// 引擎实例当前是否在跑（内存报告的 starting/running 即 true）。
+    pub live: bool,
+    /// 该环境的持久化端口。只有 desired = running 且没在跑时才用得上。
     pub listen_port: Option<u16>,
-    /// 在跑的实例是**上一代二进制**拉起来的（状态文件里没有配置哈希回执）。
-    ///
-    /// 那一代实例拿不到"配置文件 + 固定名软链"这套通道，因此它跑的配置与账本必然
-    /// 分叉；`Keep` 会让分叉一直留着，所以这里要**重启一次**把它拉齐。
-    pub legacy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Start,
     Stop,
-    /// 什么都不做（进程还活着 / 不是我们的进程）。
+    /// 什么都不做（已在跑且期望 running，或本就没在跑且期望 stopped）。
     Keep,
-    /// 端口被别的程序占走：标记 `port_conflict`，**不换端口**。
+    /// 端口被别的程序占走：标记 port_conflict，**不换端口**。
     MarkConflict,
-    /// 在跑，但那是上一代二进制拉起来的实例：停掉再按当前配置拉起一次。
-    Restart,
 }
 
 impl Action {
@@ -59,27 +51,6 @@ impl Action {
             Action::Stop => "stop",
             Action::Keep => "keep",
             Action::MarkConflict => "mark_conflict",
-            Action::Restart => "restart",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileWarning {
-    /// PID 相同但启动时刻不同（或 PID 不同）：PID 复用，别动它。
-    PidReuseSuspected,
-    /// PID + 启动时刻相同但 cmdline 不同：也不是我们的进程。
-    CmdlineMismatch,
-    /// 在跑，但没有记录可对——无法归属，因此不动它。
-    UntrackedProcess,
-}
-
-impl ReconcileWarning {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ReconcileWarning::PidReuseSuspected => "pid_reuse_suspected",
-            ReconcileWarning::CmdlineMismatch => "cmdline_mismatch",
-            ReconcileWarning::UntrackedProcess => "untracked_process",
         }
     }
 }
@@ -88,7 +59,9 @@ impl ReconcileWarning {
 pub struct ReconcilePlan {
     /// 有序动作列表：**先清理、后启动**。
     pub actions: Vec<(String, Action)>,
-    pub warnings: Vec<ReconcileWarning>,
+    /// v3 没有"不可归属的进程"这类需要告警的形态；字段保留是给未来的
+    /// 告警面（如自动重启退避）留的落点，恒空由 fixture 断言钉住。
+    pub warnings: Vec<String>,
 }
 
 impl ReconcilePlan {
@@ -107,38 +80,23 @@ pub fn plan_reconcile(
 ) -> ReconcilePlan {
     let mut plan = ReconcilePlan::default();
 
-    // 第一遍：清理。只处理"确实在跑"的实例。
+    // 第一遍：清理与在册确认。live 的实例要么被停，要么被记 keep（"没坏就不动"是
+    // 可见的决策，不是静默缺省）。
     for instance in instances {
-        let Some(live) = instance.live.as_ref() else {
+        if !instance.live {
             continue;
-        };
-        let Some(record) = instance.record.as_ref() else {
-            plan.warnings.push(ReconcileWarning::UntrackedProcess);
-            plan.actions.push((instance.env.clone(), Action::Keep));
-            continue;
-        };
-
-        if record.same_process(live) {
-            if instance.desired == Desired::Stopped {
-                plan.actions.push((instance.env.clone(), Action::Stop));
-            } else if instance.legacy {
-                // 上一代实例配置必然与账本分叉：重启一次把它拉齐。
-                plan.actions.push((instance.env.clone(), Action::Restart));
-            } else {
-                plan.actions.push((instance.env.clone(), Action::Keep));
-            }
-        } else if record.same_process_different_cmdline(live) {
-            plan.warnings.push(ReconcileWarning::CmdlineMismatch);
-            plan.actions.push((instance.env.clone(), Action::Keep));
-        } else {
-            plan.warnings.push(ReconcileWarning::PidReuseSuspected);
-            plan.actions.push((instance.env.clone(), Action::Keep));
         }
+        let action = if instance.desired == Desired::Stopped {
+            Action::Stop
+        } else {
+            Action::Keep
+        };
+        plan.actions.push((instance.env.clone(), action));
     }
 
-    // 第二遍：启动。顺序固定 —— 清理做完才拉起。
+    // 第二遍：启动。已在跑的（含 failed 前被摘除登记的场合由调用方处理）不重复拉起。
     for instance in instances {
-        if instance.desired != Desired::Running || instance.live.is_some() {
+        if instance.desired != Desired::Running || instance.live {
             continue;
         }
         let conflicts = instance
@@ -159,57 +117,21 @@ pub fn plan_reconcile(
 mod tests {
     use super::*;
 
-    fn identity(pid: i32, starttime: u64, port: u16) -> ProcessIdentity {
-        ProcessIdentity {
-            pid,
-            starttime,
-            cmdline: vec![
-                "mitmdump".into(),
-                "-s".into(),
-                "/home/u/.envboard/agent/envboard_mitmproxy.py".into(),
-                "--set".into(),
-                format!("listen_port={port}"),
-            ],
+    fn record(env: &str, desired: Desired, live: bool, port: u16) -> InstanceRecord {
+        InstanceRecord {
+            env: env.into(),
+            desired,
+            live,
+            listen_port: Some(port),
         }
-    }
-
-    #[test]
-    fn pid_reuse_is_never_killed() {
-        let plan = plan_reconcile(
-            &[InstanceRecord {
-                env: "alpha".into(),
-                desired: Desired::Stopped,
-                record: Some(identity(111, 900, 16_301)),
-                live: Some(identity(111, 1200, 16_301)),
-                listen_port: Some(16_301),
-                legacy: false,
-            }],
-            &BTreeSet::new(),
-        );
-        assert_eq!(plan.actions, vec![("alpha".to_string(), Action::Keep)]);
-        assert_eq!(plan.warnings, vec![ReconcileWarning::PidReuseSuspected]);
     }
 
     #[test]
     fn cleanup_runs_before_starts() {
         let plan = plan_reconcile(
             &[
-                InstanceRecord {
-                    env: "beta".into(),
-                    desired: Desired::Running,
-                    record: None,
-                    live: None,
-                    listen_port: Some(16_302),
-                    legacy: false,
-                },
-                InstanceRecord {
-                    env: "alpha".into(),
-                    desired: Desired::Stopped,
-                    record: Some(identity(111, 900, 16_301)),
-                    live: Some(identity(111, 900, 16_301)),
-                    listen_port: Some(16_301),
-                    legacy: false,
-                },
+                record("beta", Desired::Running, false, 16_302),
+                record("alpha", Desired::Stopped, true, 16_301),
             ],
             &BTreeSet::new(),
         );
@@ -220,20 +142,23 @@ mod tests {
                 ("beta".to_string(), Action::Start)
             ]
         );
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn running_and_desired_running_is_kept() {
+        let plan = plan_reconcile(
+            &[record("beta", Desired::Running, true, 16_301)],
+            &BTreeSet::new(),
+        );
+        assert_eq!(plan.actions, vec![("beta".to_string(), Action::Keep)]);
     }
 
     #[test]
     fn occupied_port_marks_conflict_instead_of_reallocating() {
         let occupied: BTreeSet<u16> = [16_301u16].into_iter().collect();
         let plan = plan_reconcile(
-            &[InstanceRecord {
-                env: "beta".into(),
-                desired: Desired::Running,
-                record: None,
-                live: None,
-                listen_port: Some(16_301),
-                legacy: false,
-            }],
+            &[record("beta", Desired::Running, false, 16_301)],
             &occupied,
         );
         assert_eq!(
@@ -243,21 +168,11 @@ mod tests {
     }
 
     #[test]
-    fn runs_from_the_previous_generation_are_restarted_not_kept() {
-        // 上一代实例拿不到"配置文件 + 固定名软链"通道，配置必然与账本分叉：
-        // 期望 running 时它不是 Keep 而是 Restart。
+    fn stopped_and_not_live_gets_no_action() {
         let plan = plan_reconcile(
-            &[InstanceRecord {
-                env: "beta".into(),
-                desired: Desired::Running,
-                record: Some(identity(111, 900, 16_301)),
-                live: Some(identity(111, 900, 16_301)),
-                listen_port: Some(16_301),
-                legacy: true,
-            }],
+            &[record("beta", Desired::Stopped, false, 16_301)],
             &BTreeSet::new(),
         );
-        assert_eq!(plan.actions, vec![("beta".to_string(), Action::Restart)]);
-        assert!(plan.warnings.is_empty());
+        assert!(plan.actions.is_empty());
     }
 }

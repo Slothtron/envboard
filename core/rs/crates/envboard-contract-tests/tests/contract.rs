@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use envboard_core_api::{ErrorCode, InstanceHealth, ProcessIdentity};
+use envboard_core_api::{ErrorCode, InstanceState};
 use envboard_domain::{
     Desired, Environment, InstanceRecord, PortRequest, candidate_ports, occupancy_from,
     plan_reconcile, select_port,
@@ -280,14 +280,11 @@ fn instance_reconcile_matches_the_contract() {
                     Some("running") => Desired::Running,
                     _ => Desired::Stopped,
                 },
-                record: read_identity(&raw["record"]),
-                live: read_identity(&raw["live"]),
+                live: raw["live"].as_bool().unwrap_or(false),
                 listen_port: raw
                     .get("listen_port")
                     .and_then(Value::as_u64)
                     .map(|port| port as u16),
-                // 缺省 = 不是上一代实例（fixture 只为那条规则显式给 true）。
-                legacy: raw.get("legacy").and_then(Value::as_bool).unwrap_or(false),
             })
             .collect();
         let occupied: BTreeSet<u16> = input
@@ -356,20 +353,6 @@ fn rules_parse_matches_the_contract_and_is_deterministic() {
     }
 }
 
-fn read_identity(value: &Value) -> Option<ProcessIdentity> {
-    let object = value.as_object()?;
-    Some(ProcessIdentity {
-        pid: object.get("pid")?.as_i64()? as i32,
-        starttime: object.get("starttime")?.as_u64()?,
-        cmdline: object
-            .get("cmdline")?
-            .as_array()?
-            .iter()
-            .filter_map(|item| item.as_str().map(str::to_string))
-            .collect(),
-    })
-}
-
 // --------------------------------------------------------------------------- //
 // 防呆：目录与注册表必须一致，否则"绿"没有意义
 // --------------------------------------------------------------------------- //
@@ -402,7 +385,7 @@ fn fixture_directories_match_the_capability_registry() {
         .map(|(_, dir)| load_cases(dir).len())
         .sum();
     assert_eq!(
-        total, 68,
+        total, 66,
         "契约 fixture 总数变了：请同时更新 core/spec/ 与 README 里的数字"
     );
 }
@@ -473,17 +456,17 @@ fn every_fixture_pins_the_contract_shape() {
 }
 
 #[test]
-fn manager_can_run_without_any_mitmproxy() {
-    // 一条"架构成立与否"的断言：管理器与它的端口抽象、错误码、状态契约
-    // 完全不依赖具体 core。这里只引用类型，证明编译期就不需要 mitmproxy。
+fn the_orchestration_surface_is_core_neutral() {
+    // 一条"架构成立与否"的断言：管理器的端口抽象、错误码、状态词汇与
+    // 能力表完全不依赖任何具体引擎实现 —— 只引用类型，证明编译期独立性。
     let capabilities = envboard_core_api::CoreCapabilities {
         listen: true,
-        external_processes: true,
+        http1_only: true,
         ..Default::default()
     };
     assert!(capabilities.listen);
     assert_eq!(ErrorCode::PortConflict.as_str(), "port_conflict");
-    assert_eq!(InstanceHealth::Stopped.as_str(), "stopped");
+    assert_eq!(InstanceState::Stopped.as_str(), "stopped");
     let candidates = candidate_ports((16_000, 16_002), &BTreeSet::new(), 7);
     assert_eq!(candidates.len(), 3);
     let _: BTreeMap<String, String> = BTreeMap::new();

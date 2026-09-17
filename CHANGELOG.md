@@ -4,12 +4,282 @@ All notable changes to `slothtron-envboard` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-17
 
 v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多环境管理器**
 （一个环境 = 一个独立代理实例 + 一个独立端口，附 Rust 工作台），落地分支
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
+
+### Changed（走查后第二轮：鉴权换默认 + CLI 退役，两条 BREAKING）
+
+- **鉴权按绑定地址定档**：回环监听（127.0.0.1 / ::1）**默认免鉴权** —— 本机即本机
+  用户，token 挡不住同机进程、只添摩擦；`--token <T>` 在任何监听上显式启用，裸给
+  `--token`（不带值）自动生成 128 bit 随机值并在启动日志打印可点链接；**非回环监听
+  不给 token 直接拒绝启动**（`invalid_config`，字段 `web.token`）。`--without-token`
+  退役（它的语义成了默认档，选项失去存在理由）。`Host` 校验与 CSRF 头与档位无关、
+  永久在场；多用户共享主机建议回环也上 `--token`（README「工作台鉴权与对外暴露」
+  有取舍说明）。token 不再落盘：`runtime/api.json` 随 CLI 一起退场。
+- **CLI 子命令面整体退役**：`envboard-cli` crate（`status` / `run` / `env` / `rules` /
+  `compare` 子命令、直连模式、瘦客户端 `api_client`）删除，`--core`（含 `fake`）、
+  `--once`、`--json` 一并退役 —— `envboard` 二进制唯一行为 = 启动工作台；`[[bin]]`
+  并入 `envboard-web`（组合根与产品同 crate，一个 crate = 一个发布物）。管理动作
+  统一走工作台 UI 或本地 HTTP API（端点不变，README 有 curl 示例）：判定只在服务端
+  做一次，界面与脚本是两个翻译面，这正是砍掉第三张面孔后仍成立的理由。
+- **测试面随迁**：smoke 重写，钉住"命令面不得再长出子命令"、鉴权四档、非回环
+  拒启（负向守卫）、状态单写者；live 工作台铺设从 `cli()` 改 HTTP（`seed_rule` /
+  `seed_env`，与脚本用户同一条路）；第 11 组按新档位重写（回环默认免鉴权 200、
+  裸 `--token` 自动生成、显式 token 双通道 200 与端面逐个 401 清点、非回环拒启）；
+  `thin_client` 层随功能退场。
+
+- **deps 门禁随形态调整（有理由的放宽，负向验证过）**：crate 登记表移除
+  `envboard-cli`；`envboard-web → envboard-core` 边放行，但**只给 `src/main.rs` 组合根用**
+  —— 工作台 lib 面（api / config / lib.rs）新增源文件面判据：出现 `envboard_core::`
+  引用即红（注入探针验证过）。"换引擎实现不动工作台"这条不变量原样在场，只是裁决
+  粒度从 manifest 细化到了文件。
+
+### Fixed（实机浏览器走查揪出的三个缺口 + 一个测试盲区）
+
+- **空列表里「新建环境」是死的**：renderDetail 在没有选中环境时把含表单的详情区
+  整体隐藏 —— 第一个环境永远建不出来（v2 遗留，live 层从不走 UI 所以从未暴露）。
+  前端引入显式 creating 态：新建时详情区盖过空态、动作行收起、取消/创建后回位；
+  renderDetailActions 补回 is-hidden 复位（曾经隐藏过的动作行必须能回来）。
+- **硬刷新必 401**：前端捕获 token 后立刻抹掉地址栏 query，而 document 请求本身
+  需要 token —— F5 得到 401 JSON 页。改为捕获后保留在 URL（可用性优先于观感，
+  凭据本就在启动横幅里，换 token 随时可重启）。
+- **运行标记行随子进程模型丢失**：契约承诺"每次启动写一行运行标记"，v3 实现漏了
+  ——launch 现在经 log writer 写运行标记行（追加不截断；manager_lifecycle 新增
+  断言：启动即有文件、重启成两段）。
+- **query token 端到端是测试盲区**：live 的 api() helper 一直用 header 通道，
+  "URL 携带 token"这条浏览器唯一路径从未被断言覆盖。补 api_query helper 并把
+  11a 扩成 header 与 query 双通道断言（实机验证 query 200 ✓）。
+- **新增内嵌资产完整性门禁**（本轮修复过程自己的事故换来的）：app.js 曾被
+  "读截断 + 写回"弄丢尾部并随 release 部署出去——JS 没有任何编译期检查，默认层
+  全绿而页面卡死。artifact 门禁现在钉住 app.js 最小行数与关键符号（envboardReady/
+  renderDetail/refreshAll/addEventListener）、index.html 关键 id；已负向验证
+  （截断必红、恢复转绿）。
+### Removed（v3 重构 M-P6：收尾退场，v2 面清零）
+
+- **全部 Python 产品代码退场**：`adapters/mitmproxy/`（注入器）、
+  `envboard-core-mitmproxy` crate（子进程监督 + 内嵌 + 状态文件读侧）、
+  FakeCore/StatusMode（v2 替身）、dual_impl 对拍与 `--render` 跨语言入口文档
+  ——一次删净。工具链收敛门禁的适配器例外整套翻正：`.py`/`__pycache__`/适配器
+  脚本调用现在是**无条件违规**（PENDING 白名单机制保留，表已空 = 收敛完成）；
+  artifact 门禁把"注入器自包含"检查换成 v3 反向断言（adapters/ 不得存在 +
+  引擎线程名标记在场），并做了负向验证（塞入 .py 必红）。
+- ProxyCore-v2 抽象面删除（InstanceSpec/InstanceHandle/InstanceHealth/StatusReport/
+  ProcessIdentity/redact_cmdline/config.json 与软链常量）；core-api 的 proxy 模块
+  只剩 v3 共享词汇：Listen、CoreInfo、能力表（六项：listen/dynamic_certs/
+  rewrite_upstream/per_domain_insecure/shared_ca/http1_only，全部在线声明）。
+- 状态面剪枝：PersistedState 不再携带 records/config_seals；ManagerConfig 删
+  status_ttl_secs/reload_interval_secs/annotate 与 confdir config.yaml 防线；
+  cli 删 `--reload-interval`；reconcile 规划保留**占用探测**（MarkConflict 判据），
+  启动路径以绑定为唯一真相。**新增升级契约测试**：v2 的 state.json（含旧键）
+  直接加载成立，再保存时旧键整体消失、环境数据原样搬过来。
+- 契约文档收口：capabilities.md「实例日志」按 v3 总线形态重写（有界 1024 行 +
+  丢弃计数 + copytruncate + 有界尾读，v2 的 64 KiB 管道实测教训作为约束来历保留）。
+- README 全量重写为 v3（架构/能力矩阵/已知限制/从 v2 升级/验证分层）；
+  systemd 单元同步 v3（去 `--core-bin`/mitmdump/PDEATHSIG 叙述；单进程语义：
+  停服务即停一切、无孤儿代理）。
+- 版本 0.1.0 → **0.2.0**（v2 多环境形态与 v3 纯 Rust 引擎随本版一并发布）。
+
+### Changed（v3 重构 M-P5 第三步：live 层迁移——一条不减）
+
+- **live/workbench 28 项全绿**：v2 的 24 条断言全部保留（机制触点按映射换），
+  新增 4 条：
+  - 12b **凭据 argv 审计**：全系统 /proc cmdline 扫描不得出现明文密码（v2 靠
+    脱敏契约兜底，v3 结构性成立）；
+  - 14b **热生效时延**：PATCH 返回后的第一次请求即已生效（v2 要等 1s 轮询）；
+  - 15 **既有 CA 零感知兼容**：confdir 预放 mitmproxy 形状 CA → 引擎原样加载
+    （逐字节不变）且真 curl 仅凭该 CA 校验 MITM 链成功；
+  - 端点清单扩到 18 个（含 /api/_fault）且全部无 token 401 的清点面不变。
+- 组 9（实例崩溃）机制替换：SIGKILL 真子进程 → **注入 failed**（ProxyEngine 的
+  故障注入旋钮，真引擎与 fake 同构实现，经 web 的 /api/_fault 转发）；"僵尸
+  回收"判据 → "监听端口真的释放"（原端口可再 bind）。组 8 的"写满 64 KiB 管道"
+  字节判据 → "全部成功 + 日志逐条落盘"（总线介质不同，丢弃量归 log_drops 面）。
+- **live/manager 3 组重写为引擎直驱**（真 openssl 现场 + 真 curl）：①预放 CA
+  加载复用 + 回执如实 + curl --cacert 验链；②注入 failed 可见、端口释放、重拉
+  回 running；③insecure 名单外 502 → 热 apply 第一次请求即 200 且未点名域名
+  仍 502（放宽不传染）。v2 的 options_echo 断言随"静默忽略选项"介质的消失删除。
+- live 宿主从 mitmdump/openssl/curl 三件减到 openssl/curl 两件；verify.sh 的
+  live/manager 指向 envboard-core。
+- 产品侧顺手修一处可用性缺陷：自产 502 的响应体现在回声状态行
+  （"502 Bad Gateway: <原因>"），与 v2 失败页同款可辨识。
+
+### Changed（v3 重构 M-P5 第二步：manager 行为测试按 v3 语义重实现）
+
+- manager_lifecycle.rs 以 v3 形态重写（28 条全绿），暂存件删除；v2 的 29 条
+  逐条对账，**机制退场者目的由等价断言接替**：
+  - stale/missing 状态文件 → unhealthy/failed **来自引擎内存报告**
+    （inject_state 旋钮；"TCP 可连≠在跑"反转为"报告是唯一真相，期望保持
+    running 等 reconcile 拉回"）；
+  - 配置回显比对 / 收敛窗口 / config_error → apply 被拒三连：旧快照继续服务、
+    invalid_config 标记进健康原因、修复后标记自动清除；同步生效留痕
+    "hot-applied configuration"；
+  - 软链断 = 不覆盖 → 账本缺条目 = rules_missing（legacy 状态场景），
+    补导入即在跑实例热应用；
+  - 孤儿清理 / PID 复用绝不杀 → 结构上不存在可误杀的进程：reconcile 在
+    现实与期望一致时保持安静（keep / 无动作）；上一代重启 → **failed 引擎
+    被 reconcile 拉回 running**；
+  - reconcile 的 MarkConflict：占用探测**只保留在规划路径**（没有它，
+    自动端口环境会在 reconcile 里被静默换端口——契约禁止）；启动路径仍以
+    绑定为唯一真相。
+- FakeEngine 注入语义补强：非 running/starting 的报告**同时释放监听**
+  （与真引擎"线程死→运行时散→socket 关"同构），否则 failed-自愈路径测不出来。
+- 测试脚手架换共享 RecordingLogger 的 standalone()：单一写者纪律下，
+  "改状态文件再观察"的 legacy 场景必须经新管理器读取（这正是纪律的演习）。
+
+### Changed（v3 重构 M-P5 第一步：契约改写与对拍退役）
+
+- 实例生命周期契约改写为 v3（capabilities.md 的「实例生命周期」与「配置下发与热
+  应用」两节、errors.md 健康状态表）：判定 = 标记 → desired → 引擎内存报告；
+  **config_mismatch 从契约删除**（装配即生效没有中间态；被拒配置以 invalid_config
+  标记 + unhealthy 表达）；僵尸/PID 复用/状态文件 TTL/收敛窗口等进程时代判据
+  全部退场；"任务级崩溃隔离 + release 保持 unwind"与"视图与权威判定同源"升格
+  为契约硬要求。
+- domain 的 plan_reconcile 换 v3 模型：InstanceRecord.live 从"进程身份"改为
+  **bool（线程存活）**；Action 去掉 Restart（上一代概念消失）；keep 成为清理遍的
+  可见决策；warnings 恒空（字段保留给未来的退避/告警面）。契约 fixture 7 张 → 5 张
+  （lifecycle 组按新语义重写：starts/stops/order/port-conflict/no-port-start），
+  总数 68 → 66（计数断言与 README 同步）。
+- 规则语法 BNF 仍是唯一仲裁（fixtures/rules 组不动）；**dual_impl 逐字节对拍退役**
+  ——v3 只剩一份解析实现（envboard-rules），第二份 Python 镜像与它需要的宿主解释器
+  探测一起删除；ci/verify.sh 的 adapter/dual 层与 PYTHON 旋钮随之移除（默认层 =
+  policy + rust + contract + artifact）。
+- 「引擎能力矩阵」改写为 v3 表（内核能力 + hosts-rules/request-log 的落点逐项对应
+  代码；已知限制——仅 h1、信任库换源——随本表登记，README 收口在 M-P6）。
+
+### Changed（v3 重构 M-P4 第二步：manager/web/cli 接线到 ProxyEngine）
+
+- Manager 换依赖面：构造参数从 ProxyCore 九件套变成 ProxyEngine 八件套
+  （**ProcessTable 参数删除**——没有外部进程就没有孤儿清理）。启动 =
+  engine.start + 等待绑定定态（running / port_conflict / failed）；端口冲突
+  的"新建自动重试一次、已持久化只标记"契约原样保留。健康判定统一走
+  verdict（标记 → 期望 → 引擎内存报告），**视图与权威判定同一实现**；
+  EnvView.health 升级为 v3 InstanceState（新增 starting 态；config_mismatch
+  随同步装配消亡）。
+- 进程监督层在管理面的用法全部消失：config.json 通道、固定名规则软链、
+  状态文件物化与 TTL/收敛窗、runtime/agent 目录、/proc 身份、信号梯子。
+  规则绑定改为**账本 rendered 直接进 EngineSpec**（账本唯一真相不变，少了
+  整条文件物化-轮询链）。热更新改为对运行中实例的同步 apply：insecure_hosts、
+  rules 绑定、**规则内容**（import_rules 覆盖即热应用）、description；apply
+  失败留 invalid_config 标记（health_reason 可见"旧快照继续服务"），成功清标记。
+  ProxyEngine::apply 改同步签名（装配即生效没有异步语义；管理面同步入口
+  不再 runtime 套 runtime）。
+- CLI：--core 取值 engine|fake（默认 engine），--core-bin/--core-python 随
+  mitmproxy 退场删除；共享 CA 在 confdir 就绪（兼容既有 mitmproxy CA），
+  重新物化时向 stderr 响亮警告"客户端需重装证书"。
+- 产物门禁翻档：删除"二进制内嵌注入器"断言（include_str 链已断），改为
+  断言 v3 进程内引擎簿记标记在场；注入器文件自检保留至 adapters 退场（M-P6）。
+- **v2 测试暂存（断言不减，搬家不丢弃）**：manager_lifecycle.rs（29 条）与
+  core-mitmproxy 的 live_manager.rs（3 条）改名为 *.pending-migration 暂存
+  ——它们断言的机制（状态文件新鲜度/config 哈希回显/收敛窗/软链完整性/
+  mitmdump 子进程）在 v3 已不存在。M-P5 逐条按 v3 语义重实现（引擎直驱、
+  注入状态替代崩溃、epoch/hash 回执替代文件比对），清单即这两份文件本身。
+
+### Added（v3 重构 M-P4 第一步：ProxyEngine 接缝与双实现）
+
+- core-api 新增 v3 引擎接缝（engine 模块）：EngineSpec（监听/名单/凭据/规则文本/
+  日志线出口——全部一等字段，无透传通道）、EngineHandle（**无进程身份**）、
+  EngineReport（state/config_hash/epoch/last_error/bypass_counts/log_drops，
+  内存读同步报告）、InstanceState（starting/running/stopped/unhealthy/
+  port_conflict/failed；**config_mismatch 消亡**——同步换快照 + hash 回执让
+  "生效不一致"没有存在的形态）。LineWriter 端口进 core-api::ports。
+- config_hash 单一真相：EngineSpec::hashable_json 的 sha256（log 与展示字段
+  不参与）。引擎内部编译哈希只做幂等，绝不作对外回执（两处哈希曾差点成为
+  第二真相，测试把它钉回了同源）。
+- EngineBackend（envboard-core）：ProxyEngine 真实现——簿记 map + 有界日志
+  总线（logsink：try_send 即返回、满则丢弃计数；v2"213 个请求写满 64 KiB
+  管道全体挂死"的教训以新形态继续成立）。start 成功 = 已登记；端口占用是
+  **报告里的状态**而非启动错误（管理面"新建冲突自动重试一次"契约依赖此）。
+- FakeEngine（envboard-core-fake）：同一接口的替身，真绑定端口，故障注入
+  旋钮 inject_state/inject_log_drops（live"实例崩溃"类断言的迁移目标）。
+  迁移期与 v2 FakeCore 并存；Manager 接线完成后 FakeCore 与 ProxyCore 一起退场。
+- 验收：backend 实机 2 组（trait 全生命周期 + 真实转发 + 总线日志 + 幂等
+  stop/NotFound/Conflict），fake 单测 4 条，总线非阻塞单测 1 条。
+
+### Added（v3 重构 M-P3：插件宿主——阶段管道与能力注册表）
+
+- 三层能力模型落地：内核能力（listen/proxy-auth/tls-policy/mitm-ca/protocol）
+  保持原生快路径；内置插件 hosts-rules 与 request-log 走与扩展插件完全相同的
+  接口（产品功能自举验证）。阶段模型写死：connect → request_head →
+  request_body →（上游）→ response_head → response_body → log。
+- 能力注册表（envboard-core/src/plugin.rs 的 CAPABILITIES，静态只读）：
+  只参与装配期校验与自省，不参与请求路径查找。契约表在
+  core/spec/capabilities.md 的「v3 插件与能力注册表」；三方一致性
+  （契约表 ↔ 静态注册表 ↔ 内置实现）由新增 policy 门禁判定
+  （envboard-policy-tests/tests/registry.rs，负向样本双向验证过会红）。
+- 装配期校验：id 未注册 / 内核冒充插件 / 缺依赖 / 依赖环 → invalid_config
+  点名双方；执行序 = 声明序，依赖约束 > 声明序（同层同依赖保持声明序）。
+  明确不采纳"静默等待依赖"语义。
+- 错误契约两档：connect/改写钩子 Err → fail-closed 502（正文带插件名与
+  原因）；显式 bypass（request-log 即此档）→ 跳过 + 强制 WARN + 逐插件
+  计数（EngineInstance::bypass_counts）；每钩子超时（connect/head 1s、
+  body 5s）按 Err；on_log 在类型上就不可外溢（同步、返回 unit）。
+- Flow::Early 短路语义（mock 类插件的接缝）：request_head 可整条替换响应，
+  response_head 可重写上游响应；两者都不触碰上游连接。
+- max_buffered_body 从编译期常量升级为快照字段（EngineConfig 可选，默认
+  8 MiB）；超限 413/502 而非静默流式。
+- 测试/故障注入旋钮 debug-inject（Extension 层，注册表在册——注入路径走
+  真实装配校验，不是旁路后门；产品链恒为空，对齐 envboard-core-fake 先例）。
+- 验收：单测 7 条（拓扑与注册表拒绝面）+ tests/plugins.rs 实机 6 条
+  （fail-closed 带名、bypass+WARN+计数、钩子超时、Early 不触上游、
+  connect 阶段失败、未注册 id 启动即拒）。
+
+### Added（v3 重构 M-P2：数据面——进程内引擎实例）
+
+- envboard-core::engine：**引擎实例 = 一个 OS 线程 + 一个 current-thread
+  runtime + 一个监听端口**。状态机 starting → running / port_conflict /
+  failed：绑定即真相（EADDRINUSE → port_conflict，不换端口、不试绑）；
+  请求任务级崩溃隔离（tokio 逐任务捕获），引擎线程 panic → failed。
+  apply_config 同步换入全量快照（ArcSwap），回执 config_hash 与 epoch；
+  listen 是停机字段，热改它按 invalid_config 拒绝。v2 的状态文件 TTL、
+  收敛窗口、/proc 身份、试绑在这条路径上整体消失（manager 侧删除在 M-P4）。
+- 数据面能力：CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；
+  absolute-URI（http scheme）正向代理；407 鉴权门（CONNECT 与 absolute-URI
+  同一条门，凭据只在内存里定长时间比对）；insecure_hosts 经
+  ConnectTarget.tls_policy 落到连接执行器的两个档位（严格 = 系统信任库，
+  放宽 = 仅精确命中可用；不存在"全局关校验"的表达路径）。改写语义与 v2
+  注入器逐项一致：只改连接目标，不动请求内容、不动 Host 头、不动 SNI 基准。
+- ConnectTarget（envboard-core::target）：authority / sni / resolved_addr /
+  tls_policy / chained_proxy（恒 None 的扩展位）——基础配置与后续插件管道的
+  唯一接缝。
+- body 默认缓冲（8 MiB 上限，超限 413/502 而非静默流式）；101 升级走透传
+  旁路，upgrade 链的请求头原样带走。上游连接一问一答（不复用）：热改规则/
+  名单不会被连接池里的旧策略穿越。
+- 验收：core/rs/crates/envboard-core/tests/data_plane.rs 六组 hermetic 断言
+  （规则命中 200、未覆盖 502、407 门、insecure 对照 + 热翻转不重启、
+  port_conflict、隧道保活多轮）。
+
+### Added（v3 重构 M-P1：纯库引擎骨架 envboard-core）
+
+v3 把数据面重构为**纯 Rust 库 + 进程内引擎实例**（分支
+`refactor_envboard_v3_rust_engine_20260917`）。本阶段不改运行行为：manager 仍走
+mitmproxy，本条目记录的是独立库面的落地。
+
+- 新 crate `envboard-core`（内部依赖只有 `envboard-core-api`，已登记进 `deps`
+  门禁边表）：
+  - **共享 CA 的加载与物化**：直接读既有 confdir——`mitmproxy-ca.pem`（PKCS#1 RSA
+    私钥 + 证书拼接）与 `mitmproxy-ca-cert.pem`。判据沿用 v2 并逐条实现：私钥与证书
+    公钥**逐字节配对**、`-ca.pem` 内嵌证书与 `-ca-cert.pem` 一致、basicConstraints
+    CA:TRUE、未过期；任一不满足 → 删除并重新物化，且**以 `CaOutcome::Regenerated
+    { reason }` 交回上层**——坏 CA 的处置必须可见，禁止静默带病服务。
+  - **新生成的 CA 用 ECDSA P-256**（签发库 rcgen 0.14 的 ring 后端不支持生成 RSA
+    密钥，文档明示只有 aws-lc-rs 能生成）；**加载既有 RSA CA 并用它现场签发**已由
+    进程内握手测试实证（`core/rs/crates/envboard-core/tests/mitm.rs`，fixture 为
+    纯测试假值 CA，密钥无外部用途）。
+  - **叶子证书按 SNI 现签现缓存**：容量 512、满则整体清空重签；剩余寿命不足 30 天
+    即重签；私钥文件写盘 0600。
+  - **rustls 接线**：MITM 服务侧配置（客户端 ALPN 只协商 `http/1.1`）与上游客户侧
+    严格校验配置（系统信任库 `rustls-native-certs`）。信任库来源从 certifi 换成
+    系统库会影响"哪些域名免名单通过"的集合，最终由 v3 README 的已知限制收口。
+  - **自写定形 DER 读取**（TLV、PKCS#1↔PKCS#8 封装互转、证书 SPKI/CA 标志/有效期）：
+    PKCS#1 兼容面不随上游库的支持摇摆。
+- 新增 workspace 依赖：rustls 0.23（ring provider）/ tokio-rustls / rcgen 0.14 /
+  rustls-native-certs / rustls-pemfile / time；`Cargo.lock` 已入库（rcgen 首次引入
+  需一次联网预热，已完成）。
+- **v1 协议面限制**：ALPN 只声明 HTTP/1.1，强制 h2 的客户端（gRPC 等）会失败——
+  这是写明的非目标，不是静默降级。
 
 ### Added（按域名放宽上游证书校验）
 
@@ -418,110 +688,3 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   （host 或端口任一变化时两个字段都发全）；勾选 0.0.0.0 而未启用鉴权时表单给
   红色警示；概览新增「访问鉴权」格、非回环监听地址加警示色；运行中锁定
   新增的两个输入框。创建时勾选对外服务则端口必填（自动分配只支持默认监听地址）。
-- **前端请求统一带凭据**：`api()` 收口所有请求的 header（此前只有 `mutate()` 显式带，
-  于是所有 GET —— 日志、规则原文、跨环境对比 —— 在 token 默认启用后一起 401，
-  而环境列表走 SSE 快照所以看着"只有日志坏了"）。`scripts/verify_live_v2.py` 新增
-  11d/11e 端面清点：**逐个** API 端点无 token 必须 401（静态资产是唯一白名单）、
-  `?token=` 对普通 GET 同样有效；README 补「HTTP 端点」全量表。
-- `scripts/verify_live_v2.py` 新增三组实机断言：`?token=` 与 header 等效（含 401
-  对照与启动日志横幅）、`proxy_auth` 下发后 407/200 对照（含运行中改被拒、
-  视图不回显凭据）、`listen.host = 0.0.0.0` 换址重启且回环方向照常服务。
-
-### Changed (breaking：工程工具链)
-
-- **仓库的工程门禁全部改用 Rust 写，工具链收敛为 `cargo` 一条。**
-  9 个 Python 工具脚本与 1 个 Node 入口壳全部退场，"禁止引入其他语言工具链"从文档
-  约束变成门禁会红的事实：
-
-  | 旧 | 新 |
-  |---|---|
-  | `scripts/naming_lint.py` | `cargo test -p envboard-policy-tests --test naming` |
-  | `scripts/doc_scope_lint.py` | `… --test doc_scope` |
-  | `scripts/rust_dependency_lint.py` | `… --test deps` |
-  | `scripts/compile_check.py` | 由 `dual` 真加载注入器 + `… --test adapter` 的静态检查承接 |
-  | `scripts/artifact_check.py` | `cargo test -p envboard-cli --test artifact` |
-  | `scripts/verify_contract.py` | 形状进 `envboard-contract-tests`，Python 侧消费由 `dual` 覆盖 |
-  | `scripts/verify_dual_impl.py` | `cargo test -p envboard-rules --test dual_impl -- --ignored` |
-  | `scripts/verify_live_v2.py` | `cargo test -p envboard-cli --test live_workbench -- --ignored` |
-  | `scripts/spike_m0_5.py` | 删除（机制已由 `live_manager` 常态覆盖） |
-  | `package.json` | 删除（它的唯一作用是转发 `npm run verify`） |
-
-- **新增门禁「工具链收敛」**（`envboard-policy-tests` 的 `toolchain`）：文件面不许有
-  Python / Node / TS 的工具链痕迹、调用面不许出现 `npm` / `pip` / `mypy` / `<解释器> -m`、
-  反向守卫 `adapters/` 仍是单文件注入器。迁移期由一张**双向**白名单承载待退场文件
-  （条目失效同样失败），**现已清空 = 收敛完成**。
-- **`ci/verify.sh` 收缩为纯编排**：分层（`policy` / `rust` / `contract` / `artifact` /
-  `adapter` / `live`）、顺序、依赖探测与响亮失败；判据一律搬进测试，脚本里不再有断言。
-  `bash ci/verify.sh rust` 现在是**零第二种语言运行时**的子集（不需要 Python / Node）。
-- **子进程/依赖前提变化**：默认层需要适配器宿主的解释器（跑注入器对拍），缺了**响亮
-  失败**并给出两条出路，不再静默跳过；fmt / clippy 随 toolchain 一起来，因此成为必需
-  步骤（此前缺失时打印 SKIPPED 继续跑）。新增依赖 `toml`，只被门禁解析 `Cargo.toml` 用。
-- **全部 crate 显式 `publish = false`**：本仓不发布 crate，发布物是 `envboard` 二进制；
-  发布工件清单（二进制 + 5 个必需文件 + systemd unit）由 `artifact` 门禁逐项校验。
-- **实质改进**：实机套件改裸 TCP 直连代理（不再 spawn `curl`，320 次请求 2.85s → 0.44s，
-  整套 17.5s → 12.9s）；`dual` / `artifact` / 实机测试改用 `CARGO_BIN_EXE_<bin>` 取被测
-  二进制，cargo 保证构建次序，去掉"必须先 `cargo build`"的顺序依赖。
-- **文档**：设计文档、开发计划、实机验收转录不再入库（改为包内本机工作材料）；
-  入库文本只保留 `README.md` / `CHANGELOG.md` / `core/spec/**`。
-
-## [0.1.0] - 2026-09-15
-
-### Added
-- Multi-environment registry: name + DNS servers + domain suffix + static host
-  overrides + colour/description, with CRUD and an active-environment switch.
-  Persisted atomically to `<confdir>/envboard.json` with mode `0600`.
-- Dynamic DNS server discovery, three sources: the environment's own
-  `dns_servers`, runtime edits through the dashboard, and
-  `mitmproxy_rs.dns.get_system_dns_servers()` for the OS configuration.
-- Forward resolution (host → ip) via a per-environment
-  `mitmproxy_rs.dns.DnsResolver` (Rust / hickory).
-- Multi-environment comparison: resolve the same hostnames against every
-  environment's DNS servers in one call (`all_envs`).
-- Passive collection of host/ip mappings from `dns_response` when running with
-  `--mode dns`.
-- Bidirectional mapping index with per-environment sharding, TTLs, provenance
-  (`static` / `passive` / `active`) and source precedence. Forward only —
-  there is no ip → host reverse lookup by design.
-- Flow annotation (`flow.comment` and/or `flow.metadata`) for hosts that match a
-  known environment.
-- Dashboard served from mitmweb at `/envboard/`, inheriting mitmweb's
-  authentication, `Sec-Fetch-Site` guard and XSRF cookie handling. No second web
-  server, no second auth system.
-- Rules files: import a hand-written hosts-style file (`ip host…` or the reverse
-  `host… ip`, several hosts sharing one IP, comments, blanks) and get a
-  deterministic normalized rules file. Invalid content is ignored per item and
-  reported (line + reason), never fatal; conflicting hosts resolve last-wins.
-  One rules file is **bound per environment**, so switching environment switches
-  the rules file. `Environment.hosts` still wins over the bound rules file.
-- `examples/hosts.sample.txt`, a sanitized import sample (the real
-  `examples/hosts.txt` is gitignored — it carries internal IPs and hostnames).
-- 16 `envboard.*` mitmproxy commands giving full CLI/console parity with the
-  dashboard (5 new: `rules.list` / `rules.import` / `rules.show` / `rules.bind`
-  / `rules.remove`).
-- `ci/verify.sh` verification entrypoint: compile-check, dependency-lint,
-  unit tests, contract golden fixtures, best-effort mypy, pack-check and a smoke
-  test. Reachable as `npm run verify`.
-- `scripts/verify_live.sh` end-to-end check against a real mitmweb instance.
-
-### Fixed
-- `Environment.hosts` keys were stored **un-normalized**, so `API.Example.COM.`
-  or `*.wild.example.com` never matched the normalized lookup host — a silent
-  no-op, and contrary to what `core/spec/capabilities.md` promised. Hosts keys
-  are now normalized on construction (`*.` prefix stripped, per the contract),
-  and two keys collapsing to the same host is now a loud `invalid_config`.
-- The dashboard's JavaScript was inline in `index.html`, which mitmweb's CSP
-  (`default-src 'self'`, no `script-src`) makes browsers **refuse to execute**.
-  The page still returned 200 and rendered, so the curl-based live check passed
-  while the dashboard was in fact inert in a real browser (no data loaded, no
-  button worked). The script now lives in `web/app.js`, served by a same-origin
-  `AssetHandler`; `pack_check.py` rejects any inline `<script>` and
-  `verify_live.sh` asserts the external asset is served.
-
-### Known limitations
-- `mypy` is not vendored; `typecheck` degrades to a skip with an explicit notice
-  when it is unavailable.
-- `envboard.resolve` is an asynchronous command implemented as "schedule + read
-  the mapping table", because mitmproxy has no awaitable command path. The REST
-  endpoints await properly and return results directly.
-- Environment switching is observation-only (L1). Traffic rewriting (L2) is
-  deliberately out of scope for this version.

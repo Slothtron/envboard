@@ -1,15 +1,15 @@
-//! 工具链收敛门禁：**除宿主适配器外，仓库里不许有第二种语言工具链的痕迹**。
+//! 工具链收敛门禁：**仓库里不许有第二种语言工具链的任何痕迹**（v3：纯 Rust）。
 //!
 //! 这条规则的价值在于可机械判定 —— 它必须由门禁自己证明，而不是写在文档里靠人自觉。
 //! 判据分三面：
 //!
 //! - **文件面** R1/R2：禁出现的清单文件与源码后缀；
 //! - **调用面** R3：可执行面里禁出现的命令形态；
-//! - **反向守卫** R4：保留的适配器脚本仍是单文件。
+//! - **白名单反向**：迁移白名单条目失效同样判红（v3 起表为空 = 收敛完成）。
 //!
-//! 关键区分：**禁的是工具链，不是文件类型**。浏览器的 `assets/app.js` / `app.css`
-//! 是数据（`include_str!` 内嵌、没有构建步骤），`adapters/` 下的 `.py` 是产品代码
-//! （宿主 mitmproxy 用 `-s` 加载它），两者都不算工具链，因此都不在禁列。
+//! 关键区分：**禁的是工具链，不是文件类型**。浏览器资产的 `.js` / `.css` / `.html`
+//! 是数据（`include_str!` 内嵌、没有构建步骤），不算工具链、不在禁列；
+//! 而任何 `.py` 都是第二种语言 —— v3 起仓库里没有"宿主适配器"这个角落了。
 //!
 //! 迁移期由 [`PENDING`] 承载"待退场"的文件，**双向判定**：白名单条目失效（文件已删
 //! 或已不再违规）同样失败，否则这张表会慢慢变成"什么都放行"的垃圾桶。
@@ -24,10 +24,7 @@ use common::{find_dirs, has_word, read_text, report, walk_relative, workspace_ro
 /// （判断逻辑见 `the_migration_whitelist_has_no_stale_entries`：条目失效同样失败）。
 const PENDING: &[&str] = &[];
 
-/// 唯一允许的非 Rust 角落：宿主适配器。这种脚本是**产品代码**，由宿主解释器加载。
-const ADAPTER_PREFIX: &str = "adapters/";
-
-/// Python 工具链的清单文件 —— 哪里都不许有（连适配器也不需要：它是单文件脚本）。
+/// Python 工具链的清单文件 —— 哪里都不许有。
 const PYTHON_MANIFESTS: &[&str] = &[
     "pyproject.toml",
     "setup.cfg",
@@ -65,7 +62,6 @@ struct Scan {
     python: Vec<String>,
     node: Vec<String>,
     call: Vec<String>,
-    adapter: Vec<String>,
     /// 本次真的被 `PENDING` 挡下的条目 —— 用于判白名单是否过期。
     used: Vec<String>,
 }
@@ -82,13 +78,11 @@ fn scan() -> Scan {
     let python = python_face(&root, &files, &mut used);
     let node = node_face(&root, &files, &mut used);
     let call = call_face(&root, &files, &mut used);
-    let adapter = adapter_guard(&files);
     Scan {
         files,
         python,
         node,
         call,
-        adapter,
         used,
     }
 }
@@ -98,14 +92,13 @@ fn python_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>)
     let mut problems = Vec::new();
     for file in files {
         let name = basename(file);
-        let in_adapter = file.starts_with(ADAPTER_PREFIX);
 
-        if (name.ends_with(".py") || name.ends_with(".pyi")) && !in_adapter {
+        if name.ends_with(".py") || name.ends_with(".pyi") {
             if PENDING.contains(&file.as_str()) {
                 used.push(file.clone());
             } else {
                 problems.push(format!(
-                    "{file}: 工具链不许用 Python 写（唯一例外是 `{ADAPTER_PREFIX}` 下的宿主适配器脚本）"
+                    "{file}: 工具链不许用 Python 写（v3：仓库里没有非 Rust 产品代码）"
                 ));
             }
         }
@@ -119,11 +112,9 @@ fn python_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>)
 
     // `__pycache__` 被 walk 跳过（它的内容不是证据），所以单独判存在性。
     for directory in find_dirs(root, &["__pycache__"]) {
-        if !directory.starts_with(ADAPTER_PREFIX) {
-            problems.push(format!(
-                "{directory}: 不许有 Python 字节码缓存目录（工具链跑过 Python 的痕迹）"
-            ));
-        }
+        problems.push(format!(
+            "{directory}: 不许有 Python 字节码缓存目录（工具链跑过 Python 的痕迹）"
+        ));
     }
     problems
 }
@@ -188,8 +179,8 @@ fn is_executable_surface(file: &str) -> bool {
 
 /// 从一层 shell 单词里取出"指向本仓脚本"的路径；不是脚本引用就返回 `None`。
 ///
-/// 之所以按**路径**而不是按"解释器后面跟什么"来判：解释器常常藏在变量里
-/// （解释器由 `$PYTHON` 之类的变量给出），按被引用的脚本路径判才抓得住真实调用点。
+/// 之所以按**路径**而不是按"解释器后面跟什么"来判：解释器常常藏在变量里，
+/// 按被引用的脚本路径判才抓得住真实调用点。
 fn script_reference(token: &str) -> Option<String> {
     let cleaned =
         token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | ';' | '{' | '}'));
@@ -228,50 +219,26 @@ fn call_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -
                     problems.push(format!("{file}:{number}: 可执行面里不许出现 `{phrase}`"));
                 }
             }
-            // `<解释器> -m <工具>`：唯一允许的解释器形态是"解释器 + 适配器脚本路径"。
+            // 解释器调 `-m`：v3 连"跑适配器脚本"这个例外都不存在了。
             for pair in words.windows(2) {
                 if pair[0].contains("python") && pair[1].starts_with("-m") {
-                    problems.push(format!(
-                        "{file}:{number}: 不许用 `-m` 方式调 Python 工具；\
-                         唯一允许的形态是 `<解释器> <适配器脚本路径>`"
-                    ));
+                    problems.push(format!("{file}:{number}: 可执行面不许调用 Python 工具"));
                 }
             }
-            // 被引用的本仓脚本：必须在适配器目录里，或在迁移白名单里。
+            // 被引用的本仓脚本：只允许出现在迁移白名单里（表为空 = 一个都不许）。
             for word in &words {
                 let Some(script) = script_reference(word) else {
                     continue;
                 };
-                if script.starts_with(ADAPTER_PREFIX) {
-                    continue;
-                }
                 if PENDING.contains(&script.as_str()) {
                     used.push(script);
                 } else {
                     problems.push(format!(
-                        "{file}:{number}: 调用了仓库内的脚本 `{script}` —— \
-                         非适配器脚本不许被执行"
+                        "{file}:{number}: 可执行面调用了仓库内的 Python 脚本 `{script}`"
                     ));
                 }
             }
         }
-    }
-    problems
-}
-
-/// R4：反向守卫 —— 适配器角落里必须仍是"单文件、纯标准库"的形态。
-fn adapter_guard(files: &[String]) -> Vec<String> {
-    let mut problems = Vec::new();
-    let scripts: Vec<&String> = files
-        .iter()
-        .filter(|file| file.starts_with(ADAPTER_PREFIX) && file.ends_with(".py"))
-        .collect();
-    if scripts.len() != 1 {
-        problems.push(format!(
-            "{ADAPTER_PREFIX} 下必须恰好一个适配器脚本（它是被宿主加载的产品代码），\
-             实际 {}: {scripts:?}",
-            scripts.len()
-        ));
     }
     problems
 }
@@ -302,17 +269,7 @@ fn r3_executable_surface_never_calls_a_second_toolchain() {
     report(
         "toolchain/r3-call-face",
         scan.call,
-        "可执行面只用 cargo 与宿主适配器".to_string(),
-    );
-}
-
-#[test]
-fn r4_the_adapter_corner_stays_a_single_script() {
-    let scan = scan();
-    report(
-        "toolchain/r4-adapter-guard",
-        scan.adapter,
-        format!("{ADAPTER_PREFIX} 下恰好一个适配器脚本"),
+        "可执行面只用 cargo".to_string(),
     );
 }
 

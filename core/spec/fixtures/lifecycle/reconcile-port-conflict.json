@@ -1,17 +1,16 @@
 {
   "capability": "instance.reconcile",
-  "description": "期望 running 但持久化端口已被别的程序占走 → 标记 port_conflict，不启动、也不静默换端口（换端口是显式动作）",
+  "description": "期望 running、不在跑、持久化端口被别的程序占 → 标记冲突不换端口（已持久化端口是环境的对外身份）",
   "input": {
     "instances": [
-      {
-        "env": "beta",
-        "desired": "running",
-        "record": null,
-        "live": null,
-        "listen_port": 16301
-      }
+      { "env": "beta", "desired": "running", "live": false, "listen_port": 16301 },
+      { "env": "gamma", "desired": "running", "live": false, "listen_port": 16302 }
     ],
     "occupied_by_others": [16301]
   },
-  "expect": { "ok": true, "actions": [["beta", "mark_conflict"]], "warnings": [] }
+  "expect": {
+    "ok": true,
+    "actions": [["beta", "mark_conflict"], ["gamma", "start"]],
+    "warnings": []
+  }
 }

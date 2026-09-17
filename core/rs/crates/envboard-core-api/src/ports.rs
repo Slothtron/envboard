@@ -80,3 +80,17 @@ impl ClockPort for ManualClock {
         self.now.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
+/// 行式日志出口（v3 引擎日志通道）。契约：实现不得把背压回传给调用方 ——
+/// 引擎侧以有界队列 + 丢弃计数保证数据面永不阻塞在写日志上（对齐 v2
+/// 子进程不得阻塞在管道上的教训，实现形态从落盘直写换成内存总线）。
+pub trait LineWriter: std::fmt::Debug + Send + Sync {
+    fn write_line(&self, line: &str);
+}
+
+/// 什么都不做的行出口 —— 测试与无日志形态。
+#[derive(Debug, Default)]
+pub struct NullLineWriter;
+
+impl LineWriter for NullLineWriter {
+    fn write_line(&self, _line: &str) {}
+}

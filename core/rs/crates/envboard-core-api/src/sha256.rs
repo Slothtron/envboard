@@ -135,8 +135,8 @@ mod tests {
             let input = vec![b'a'; length];
             assert_eq!(hex(&input).len(), 64, "length {length}");
         }
-        // 与 Python 参考实现的一致性由实机层端到端验证（真 mitmdump 下同一实例的
-        // 指纹跨进程稳定）；这里至少钉住"同一输入永远同一输出"。
+        // 跨进程一致性靠回执契约钉住（账本与引擎报告的 hash 同源可比）；
+        // 这里至少钉住"同一输入永远同一输出"。
         assert_eq!(hex(b"envboard"), hex(b"envboard"));
     }
 }

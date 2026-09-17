@@ -244,14 +244,14 @@
               <label class="field">
                 <span class="field-label">规则</span>
                 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select>
-                <span class="field-hint">热生效：换绑定后运行中的实例按新规则改写，不必重启；规则文件内容本身也是按 mtime 热重载的</span>
+                <span class="field-hint">热生效：换绑定后运行中的实例<b>立即</b>按新规则改写（同步装配，无轮询），不必重启；规则内容同名导入覆盖同样即时生效</span>
               </label>
               <!-- 按域名放宽上游证书校验：全局放宽开关已随契约一并删除，这里是唯一的
                    放宽入口，所以必须写清"逐条点名、精确匹配、运行中热生效"。 -->
               <label class="field">
                 <span class="field-label">按域名放宽上游证书校验（insecure_hosts）</span>
                 <textarea name="insecure_hosts" id="env-form-insecure-hosts" rows="4" placeholder="365.kdocs.cn" spellcheck="false"></textarea>
-                <span class="field-hint">每行一个<b>完整域名</b>，只做精确匹配：列出的域名才跳过上游证书校验，子域不继承、后缀不匹配，通配符（<code class="mono">*</code> / <code class="mono">?</code>）会被服务端拒绝。没列出的域名仍然严格校验。改动<b>热生效</b> —— 运行中保存后几秒内跟上，不必重启。</span>
+                <span class="field-hint">每行一个<b>完整域名</b>，只做精确匹配：列出的域名才跳过上游证书校验，子域不继承、后缀不匹配，通配符（<code class="mono">*</code> / <code class="mono">?</code>）会被服务端拒绝。没列出的域名仍然严格校验。改动<b>热生效</b> —— 运行中保存即时生效（同步装配，无轮询窗口），不必重启。</span>
               </label>
               <label class="field field-check">
                 <input type="checkbox" name="public" id="env-form-public">
@@ -327,7 +327,7 @@
           </div>
         </form>
         <p class="hint" id="rules-hint">导入是整份覆盖同名文件；改之前先点列表里的「载入」，
-          免得盲覆盖。绑定它的实例按 mtime 热重载，不必重启。</p>
+          免得盲覆盖。同名导入覆盖后，绑定它的实例即时热应用，不必重启。</p>
       </div>
     </section>
 

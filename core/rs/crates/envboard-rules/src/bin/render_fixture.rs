@@ -10,9 +10,8 @@
 //! cargo run -q -p envboard-rules --bin render_fixture -- <fixture.json>
 //! ```
 //!
-//! 对应 Python 侧：注入器自己的 `--render`（同一批 fixture）——
-//! `python3 adapters/mitmproxy/envboard_mitmproxy.py --render --fixture <fixture.json>`。
-//! 两者 stdout 必须完全一致。
+//! 这个入口是规则解析/渲染的唯一实现：golden fixture 的期望正文由它重算，契约测试
+//! 逐例消费（v2 的"与注入器 `--render` 逐字节对拍"随第二份实现一起退场）。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 [package]
 name = "envboard-core-fake"
-description = "envboard 的测试替身 core：只监听端口、回写状态文件，不改写任何流量"
+description = "envboard v3 ProxyEngine 的测试替身：真绑定端口、报告可注入，不代理任何流量"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,5 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 envboard-core-api.workspace = true
-envboard-rules.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }

@@ -46,6 +46,8 @@ const state = {
   selected: null,
   /// 非空 = 表单处于编辑模式，值是**改名前的原名**（PATCH 要打在这个名字上）。
   editing: null,
+  /// 空列表里点「新建环境」：详情区（含表单）要盖过空态可见 —— 否则第一个环境永远建不出来。
+  creating: false,
   view: "environments",
   tab: "overview",
   /// all | running | issues | rules
@@ -450,7 +452,8 @@ function renderDetail(force) {
   const empty = document.getElementById("detail-empty");
   const detail = document.getElementById("detail");
 
-  if (!env) {
+  if (env) state.creating = false;
+  if (!env && !state.creating) {
     empty.hidden = false;
     detail.hidden = true;
     renderTabs();
@@ -458,6 +461,15 @@ function renderDetail(force) {
   }
   empty.hidden = true;
   detail.hidden = false;
+  if (!env) {
+    // 新建模式（还没有选中环境）：头部只留名字，动作行与原因行没有实例可作用。
+    document.getElementById("detail-name").textContent = "新建环境";
+    document.getElementById("detail-badge").hidden = true;
+    document.getElementById("detail-reason").classList.add("is-hidden");
+    document.getElementById("detail-actions").classList.add("is-hidden");
+    renderTabs();
+    return;
+  }
 
   const key = JSON.stringify([
     env,
@@ -491,6 +503,7 @@ function renderDetail(force) {
 
 function renderDetailActions(env) {
   const host = document.getElementById("detail-actions");
+  host.classList.remove("is-hidden"); // 新建模式曾把它藏起来：回到真实环境必须回来
   host.replaceChildren();
 
   // 破坏性操作走就地二次确认：不用原生 confirm（阻塞、样式不可控、且与"禁止原生弹窗"
@@ -1339,10 +1352,8 @@ function markInvalid(form, path, message) {
 // 日志栏
 // --------------------------------------------------------------------------- //
 
-/// 事件类别。**不是按日志级别分类** —— 实例日志由 mitmdump 写出，实测形态是
-///   [11:41:21.457][127.0.0.1:46306] server connect 127.0.0.1:17990
-///   127.0.0.1:46306: GET http://127.0.0.1:17990/ HTTP/1.1
-///        << HTTP/1.0 404 File not found 460b
+/// 事件类别。**不是按日志级别分类** —— 实例日志由 request-log 插件写出，形态是
+///   [11:41:21.457] GET 127.0.0.1:17990/ -> 404 (req 0B resp 46B 3ms)
 /// 行首既没有 INFO/WARN，也没有级别列。所以过滤器按**真正可判别的维度**分：
 /// 请求 / 响应 / 连接 / 运行 / 异常，这五类互斥且能覆盖全部行。
 const LOG_KINDS = [
@@ -1716,6 +1727,7 @@ function wire() {
 
   document.getElementById("env-new").addEventListener("click", () => {
     cancelEdit();
+    state.creating = true;
     state.tab = "config";
     state.moreOpen = false;
     setView("environments");
@@ -1723,6 +1735,7 @@ function wire() {
     field(document.getElementById("env-form"), "name").focus();
   });
   document.getElementById("empty-new").addEventListener("click", () => {
+    state.creating = true;
     state.tab = "config";
     renderDetail(true);
     field(document.getElementById("env-form"), "name").focus();
@@ -1777,6 +1790,7 @@ function wire() {
 
   document.getElementById("env-form-cancel").addEventListener("click", () => {
     cancelEdit();
+    state.creating = false;
     renderDetail(true);
   });
 
@@ -1984,22 +1998,15 @@ function step(label, fn) {
   }
 }
 
-// URL 携带的 token：捕获进 state 后立刻从地址栏抹掉 —— 浏览器历史、截图、复制
-// 分享出去的链接里都不该留着凭据；之后所有请求照旧走 header（SSE 的 EventSource
-// 带不了自定义头，服务端对 `?token=` 一视同仁，这里抹掉不影响已建立的连接）。
+// URL 携带的 token：捕获进 state，**保留在地址栏里**。
+//
+// 曾经的做法是捕获后立刻抹掉（历史/截图更干净），代价是硬刷新必死 ——
+// document 请求本身要带 token（服务端对页面本体不豁免），抹掉 query 之后 F5
+// 只能拿到 401 JSON 页。可用性优先于观感：凭据本就在启动横幅里，换 token
+// 随时可重启。之后所有请求走 header；SSE 用 ?token=。
 {
-  const params = new URLSearchParams(location.search);
-  if (params.has("token")) {
-    const token = params.get("token").trim();
-    if (token) state.token = token;
-    params.delete("token");
-    const rest = params.toString();
-    history.replaceState(
-      null,
-      "",
-      location.pathname + (rest ? `?${rest}` : "") + location.hash,
-    );
-  }
+  const token = new URLSearchParams(location.search).get("token");
+  if (token && token.trim()) state.token = token.trim();
 }
 
 // 给浏览器验收用的显式标记：**JS 真的跑完了**才写它。

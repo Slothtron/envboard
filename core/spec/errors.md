@@ -4,19 +4,19 @@
 `{"error": {"code": ..., "message": ..., "field": ...}}`，`field` 为可选的点分路径
 （如 `environment.listen.port`）。
 
-> **v2 说明**：v2 删除了 DNS 解析层与 Dashboard，因此 `dns_failure`、`disabled`
-> 与 `rcode` 表**已删除**；`upstream_unavailable` 的语义并入 `invalid_config`
-> （缺依赖必须以 `invalid_config` 响亮失败，禁止静默降级）。
-> 新增端口与实例生命周期相关的错误码。
+> **v2 说明**：v2 删除了 DNS 解析层与 Dashboard（`dns_failure`、`disabled`、
+> `rcode` 已删）；`upstream_unavailable` 的语义并入 `invalid_config`。
+> **v3 说明**：`config_mismatch` 从契约删除（热更新同步生效，无"起来了但配置
+> 没生效"的中间态）；错误码枚举里的同名变体仅作兼容占位，随 mitmproxy 面在
+> 收尾阶段移除。
 
 | code | HTTP | 可重试 | 含义 | 触发场景（示例） |
 |---|---|---|---|---|
-| `invalid_config` | 400 | ✗ | 配置非法，**加载即失败** | 环境名不合规；`listen.port` 为 0 或越界；`listen.host` 不是 IP 字面量；`rules` 名含 `/` 或 `..`；未知字段（含 v1 遗留的 `dns_servers` / `hosts` / `color` / `domain_suffix`）；**缺依赖**（`mitmdump` 不在 PATH、`core.python` 缺 mitmproxy、`confdir` 里存在 `config.yaml`） |
+| `invalid_config` | 400 | ✗ | 配置非法，**编译即失败**（v3：含热更被拒 —— 旧快照继续服务并留标记） | 环境名不合规；`listen.port` 为 0 或越界；`listen.host` 不是 IP 字面量；`rules` 名含 `/` 或 `..`；未知字段（含 v1 遗留的 `dns_servers` / `hosts` / `color` / `domain_suffix`）；`proxy_user`/`proxy_password` 不成对；插件链装配校验失败（未注册 id / 缺依赖 / 依赖环）；`max_buffered_body` 为 0 |
 | `not_found` | 404 | ✗ | 目标不存在 | `GET /api/environments/nope`；引用了不存在的规则名 |
 | `conflict` | 409 | ✗ | 状态冲突 | 环境重名；删除被环境绑定的规则文件；改名撞已有环境 |
 | `port_conflict` | 409 | △ | 端口被别的程序占用 | **已持久化**的端口在新环境里被占：**禁止静默重分配**，环境标记为 `port_conflict`，由工作台提示"释放该端口或点『重新分配端口』"；重分配是**显式动作**，并提示同步更新客户端配置 |
 | `port_range_exhausted` | 409 | ✓ | 端口区间内没有可用端口 | 连续 N 次（默认 32）候选都不可用 → 响亮失败，错误信息给出区间、尝试次数，并提示可用 `--port` 显式指定 |
-| `config_mismatch` | 503 | ✓ | 实例已启动，但**生效配置与期望不一致** | 契约回显校验失败（如规则条数不符、`reload_interval` 未生效）。必须显式报出，因为 **mitmdump 对未知/拼错的 `--set` 是静默忽略的**，命令成功不能当作配置生效 |
 | `store_failure` | 500 | ✓ | 状态文件读写失败 | 权限不足、JSON 损坏、磁盘满 |
 | `internal_error` | 500 | ✓ | 未归类的内部错误 | 兜底，不应出现 |
 
@@ -27,7 +27,7 @@
 ## 归一化规则
 
 1. **配置错误与运行错误必须分开**：`invalid_config` 需要改配置，
-   `port_conflict` / `config_mismatch` 是运行态问题、可能自愈或需一次显式动作。
+   `port_conflict` 与被拒绝的配置标记（unhealthy 的成因之一）是运行态问题、可能自愈或需一次显式动作。
    禁止把配置错误伪装成运行错误（反之亦然）。
 2. **禁止静默降级**：出现无法识别的字段、缺依赖、端口被占时都必须响亮失败。
    唯一不算降级的是 `rules = null` —— 那是**显式语义**："本环境不覆盖任何域名"。
@@ -37,19 +37,28 @@
 4. **错误信息必须可行动**：涉及端口的错误要给出端口号与"谁占着/怎么释放"；
    涉及 `core.python` 的错误要给出实际探测到的解释器路径与版本。
 
-## 健康状态（不是错误码，但同样是对外契约）
+## 健康状态（不是错误码，但同样是对外契约；v3）
 
-环境的**实际**状态由探测得出，与期望状态 (`desired`) 解耦：
+环境的**实际**状态来自**内存报告**（引擎线程/运行时状态 + 装配回执），与期望状态
+(`desired`) 解耦；v2 的状态文件、TTL、收敛窗口、探活主判据全部退场：
 
 | 状态 | 含义 |
 |---|---|
-| `stopped` | 实例未运行（期望就是停止，或者进程不在了但没人说得出为什么） |
-| `starting` | 已下发启动，尚未收到可信状态 |
-| `running` | 进程活着、状态文件新鲜、回显配置与期望一致 |
-| `port_conflict` | 端口被占用，无法启动（见上） |
-| `config_mismatch` | 起来了但配置没生效（见上） |
-| `unhealthy` | 进程活着，但状态文件缺失或过期，且探活失败 |
-| `failed` | 进程**自己死了**（退出码/信号），或启动失败（原因在 `health_reason` / `last_error`） |
+| `stopped` | 无登记实例（期望停止，或从未启动/已被停止） |
+| `starting` | 已下发启动，绑定结果未定态 |
+| `running` | 引擎线程存活且 listener 已绑定；配置为装配即生效 |
+| `port_conflict` | 绑定失败（EADDRINUSE）；**不换端口**，见上 |
+| `unhealthy` | 线程存活但监听/装配异常：accept 持续失败，或**配置被 apply 拒绝**（旧快照仍在服务，原因写明 "previous snapshot still serving"） |
+| `failed` | 引擎线程终止（panic；原因在 `health_reason` / `last_error`）→ reconcile 按 desired 自动重启 |
+
+判定次序（视图与权威判定**同一个函数**）：**标记 → desired → 引擎内存报告**。
+两条硬要求：
+
+- **崩溃隔离是任务级**：请求任务 panic 只死那一条连接；引擎线程 panic 才让实例
+  进入 `failed`。release 构建必须保持 unwind（`panic = "abort"` 使任务级隔离失效）
+  —— 属构建契约。
+- **`config_mismatch` 已从契约中删除**：热更新同步生效，"起来了但配置没生效"
+  不再存在中间态；被拒绝的新配置以 `invalid_config` 标记 + `unhealthy` 表达。
 
 判定次序：**先看进程存活，再以状态文件为主、TCP 探活为辅**。代理 listener 先起、注入器
 随后才加载规则，所以"TCP 能连上"不等于"规则已生效"；而"进程已经不在"必须排在状态文件

@@ -1,6 +1,6 @@
 [package]
 name = "envboard-core-api"
-description = "envboard 的 proxy core 抽象：ProxyCore trait、实例契约、错误码"
+description = "envboard v3 编排层共享词汇：引擎接缝与回执、能力表、错误码、端口"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

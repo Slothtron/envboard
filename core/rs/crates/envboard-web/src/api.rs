@@ -83,6 +83,10 @@ pub async fn serve(manager: Arc<Manager>, config: WebConfig) -> Result<(), Error
             "  dashboard: http://{display_host}:{}/?token={token}",
             config.listen.port()
         );
+    } else {
+        // 免鉴权只可能来自回环监听（非回环在 WebConfig::parse 就被拒了）——
+        // 横幅如实说明当前档位，别让运维猜。
+        println!("  auth: disabled (loopback bind; pass --token to enable)");
     }
     println!(
         "  (assets are embedded; CSP has no 'unsafe-inline' — see core/spec/ and src/config.rs)"
@@ -110,6 +114,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/environments/:name/reallocate", post(api_reallocate))
         .route("/api/environments/:name/logs", get(api_logs))
         .route("/api/rules", get(api_rules_list).post(api_rules_import))
+        // 故障注入旋钮（live 断言组 9 的面）：核心不支持注入时如实 400。
+        .route("/api/_fault", post(api_fault))
         .route(
             "/api/rules/:name",
             get(api_rules_read).delete(api_rules_delete),
@@ -313,7 +319,9 @@ async fn api_status(State(state): State<AppState>) -> Response {
                 "listen": capabilities.listen,
                 "dynamic_certs": capabilities.dynamic_certs,
                 "rewrite_upstream": capabilities.rewrite_upstream,
-                "external_processes": capabilities.external_processes,
+                "per_domain_insecure": capabilities.per_domain_insecure,
+                "shared_ca": capabilities.shared_ca,
+                "http1_only": capabilities.http1_only,
             },
             "config": {
                 "state_dir": manager.config().state_dir.display().to_string(),
@@ -405,6 +413,34 @@ struct LogsQuery {
 
 fn default_lines() -> usize {
     200
+}
+
+/// POST /api/_fault {"env": "...", "reason": "..."} —— 把在跑实例置为 failed
+/// （等价于"引擎线程死了"的可观察形态）。只有实现了注入旋钮的核心会成功；
+/// 真引擎与 fake 都实现它，语义是"模拟线程死亡"，不是新造状态机分支。
+async fn api_fault(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let env = body.get("env").and_then(Value::as_str).unwrap_or_default();
+    let reason = body
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("fault injection");
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.manager.inject_fault(env, reason)
+    })) {
+        Ok(true) => Json(serde_json::json!({"injected": true, "env": env})).into_response(),
+        Ok(false) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!(
+                "core does not support fault injection for {env:?} (not running, or unsupported)"
+            ),
+        )
+            .into_response(),
+        Err(_) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            "fault injection failed".to_string(),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_logs(
