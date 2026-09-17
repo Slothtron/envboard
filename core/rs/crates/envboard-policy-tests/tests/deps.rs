@@ -9,7 +9,11 @@
 //! 5. 注册表与磁盘**一一对应**（未登记即失败、登记了但没了也失败）；
 //! 6. **只有测试目标**的 crate 不得有产物依赖（它们不进产物，也不该拖进产物依赖）；
 //! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）；
-//! 8. **每份 manifest 显式声明 `publish = false`** —— 本仓不发布 crate，发布物是二进制；
+//! 8. **工作台 lib 面不认识引擎**：`envboard-web` 的 lib 侧源码（除 `src/main.rs`
+//!    组合根外）禁止出现 `envboard_core` 的引用 —— "只认识管理器的公开 API"这条
+//!    不变量在 CLI 退役、`[[bin]]` 并入本 crate 之后**依旧成立**，只是裁决从边表
+//!    细化到了源文件面（manifest 分不出 lib 与 bin）；
+//! 9. **每份 manifest 显式声明 `publish = false`** —— 本仓不发布 crate，发布物是二进制；
 //!    把这件事写成 manifest 事实，才让默认层"不跑 `cargo package --list`"有据可依。
 
 mod common;
@@ -35,21 +39,18 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
         "envboard-manager",
         &["envboard-core-api", "envboard-domain", "envboard-rules"],
     ),
+    // 工作台 = 唯一宿主入口（lib 的 HTTP 面 + [[bin]] 组合根）。边表里的
+    // envboard-core 只允许 src/main.rs（装配引擎与共享 CA）使用；lib 侧
+    // （api / config / lib.rs）**依旧只认识管理器的公开 API**，由下面的
+    // 源文件面判据把这条不变量钉死 —— "换引擎实现不动工作台"没被搬家稀释。
     (
-        "envboard-cli",
+        "envboard-web",
         &[
             "envboard-core-api",
             "envboard-domain",
-            "envboard-core-fake",
-            "envboard-core",
             "envboard-manager",
-            "envboard-web",
+            "envboard-core",
         ],
-    ),
-    // 工作台：只认识管理器的公开 API，不认识具体 core（换 core 不影响它）
-    (
-        "envboard-web",
-        &["envboard-core-api", "envboard-domain", "envboard-manager"],
     ),
     // v3 纯库引擎。规则解析复用 envboard-rules 的唯一实现（注入器镜像随
     // mitmproxy 一起退场）；"不依赖 axum"由这张边表本身就是判据。
@@ -288,7 +289,7 @@ fn the_rust_layering_holds() {
             }
         }
 
-        // 8. 不发布 crate：显式 publish = false。
+        // 9. 不发布 crate：显式 publish = false。
         let publishes = manifest
             .get("package")
             .and_then(|package| package.get("publish"))
@@ -298,6 +299,40 @@ fn the_rust_layering_holds() {
                 "{name}: 必须在 [package] 里显式写 `publish = false`（本仓不发布 crate，\
                  发布物是 `envboard` 二进制；不写不等于声明了）"
             ));
+        }
+
+        // 8. 工作台 lib 面不认识引擎（CLI 退役后的源文件面判据）。
+        if name == "envboard-web" {
+            let web_src = crate_dir.join("src");
+            let main_rs = web_src.join("main.rs");
+            if !main_rs.exists() {
+                problems.push(
+                    "envboard-web/src/main.rs 缺失：二进制 = 工作台启动器，组合根就在这里"
+                        .to_string(),
+                );
+            }
+            let Ok(entries) = std::fs::read_dir(&web_src) else {
+                problems.push(format!("envboard-web/src 读不了：{web_src:?}"));
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_name().is_some_and(|n| n == "main.rs") {
+                    continue;
+                }
+                let Some(text) = read_text(&path) else {
+                    continue;
+                };
+                if text.contains("envboard_core::") {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    problems.push(format!(
+                        "envboard-web/src/{name} 引用了 envboard_core：lib 面只许认识管理器的公开 API，引擎装配只允许出现在 src/main.rs"
+                    ));
+                }
+            }
         }
 
         // 7. 门禁 crate 不得被依赖。

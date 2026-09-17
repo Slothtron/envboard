@@ -15,8 +15,9 @@
 //!    后不再报 running、原因可见、监听端口真的释放；
 //! 10. **编辑已建环境**：运行中换绑定**热生效**（v3 = 一次同步装配，不重启实例）、
 //!     停止后可改名换端口、新配置真的生效；
-//! 11. **dashboard token 鉴权**：默认启用且自动生成、`--without-token` 在非回环被拒、
-//!     header 与 `?token=` 等效、静态资产豁免、**全部 API 端点无 token 一律 401**；
+//! 11. **dashboard token 鉴权档位**：回环默认免鉴权（组 1-10 全程即此形态）、裸
+//!     `--token` 自动生成、显式 `--token` 下 header 与 `?token=` 等效、静态资产豁免、
+//!     **启用后全部 API 端点无 token 一律 401**、非回环不给 token 拒绝启动；
 //! 12. **代理鉴权**：一等字段下发（无凭据 407、带凭据 200）；12b **凭据 argv 审计**
 //!     （/proc 全量 cmdline 不得出现明文密码 —— v2 靠脱敏契约兜底，v3 结构性成立）；
 //! 13. **对外服务开关**：`listen.host` 换 `0.0.0.0` 并按新地址重启，回环方向照常服务；
@@ -207,6 +208,38 @@ fn api(
 /// 只要状态码（SSE 的响应体永不结束，**不能**读到底）。
 /// token 放在 **URL query** 里的 GET —— 浏览器直接打开工作台时唯一可用的携带
 /// 方式，与 api() 的 header 通道互补（两条都要有断言：query 端到端曾是盲区）。
+/// 铺设（CLI 退役后唯一正途）：导入规则走 POST /api/rules。
+fn seed_rule(port: u16, name: &str, text: &str) {
+    let body = serde_json::json!({"name": name, "text": text}).to_string();
+    let response = api(port, "POST", "/api/rules", None, true, None, Some(&body));
+    assert!(
+        response.status == 201 || response.status == 200,
+        "规则 {name} 导入失败：{} {}",
+        response.status,
+        response.body
+    );
+}
+
+/// 铺设：建环境（端口自动分配）走 POST /api/environments。
+fn seed_env(port: u16, name: &str, rules: &str) {
+    let body = serde_json::json!({"name": name, "rules": rules}).to_string();
+    let response = api(
+        port,
+        "POST",
+        "/api/environments",
+        None,
+        true,
+        None,
+        Some(&body),
+    );
+    assert!(
+        response.status == 201 || response.status == 200,
+        "环境 {name} 创建失败：{} {}",
+        response.status,
+        response.body
+    );
+}
+
 fn api_query(port: u16, path: &str, token: &str) -> u16 {
     let sep = if path.contains('?') { '&' } else { '?' };
     let request = format!(
@@ -467,19 +500,6 @@ impl Workbench {
     }
 }
 
-fn cli(state: &Path, args: &[&str]) -> i32 {
-    Command::new(binary())
-        .arg("--state-dir")
-        .arg(state)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run the CLI")
-        .code()
-        .unwrap_or(-1)
-}
-
 /// 读子进程 stdout 直到出现 `needle`（或超时）。
 fn banner_until(mut child: Child, needle: &str, timeout: Duration) -> (Child, String) {
     let stdout = child.stdout.take().expect("piped stdout");
@@ -551,43 +571,17 @@ fn the_workbench_behaves_on_a_real_host() {
     let mut checks = Checks::new();
 
     // 规则只改 IP、不改端口：两个环境各覆盖**不同域名**，于是"同一 URL 换端口"有判别性。
-    std::fs::write(work.join("alpha.rules"), "127.0.0.1 alpha.test\n").expect("rules");
-    std::fs::write(work.join("beta.rules"), "127.0.0.1 beta.test\n").expect("rules");
-    cli(
-        &state,
-        &[
-            "rules",
-            "import",
-            "alpha",
-            "--file",
-            work.join("alpha.rules").to_str().unwrap(),
-        ],
-    );
-    cli(
-        &state,
-        &[
-            "rules",
-            "import",
-            "beta",
-            "--file",
-            work.join("beta.rules").to_str().unwrap(),
-        ],
-    );
-    cli(&state, &["env", "add", "alpha", "--rules", "alpha"]);
-    cli(&state, &["env", "add", "beta", "--rules", "beta"]);
 
-    // `--without-token`：token 鉴权默认启用（自动生成）。这组断言只管管理器/代理本体，
-    // 显式关掉鉴权免得每个 api() 都要带凭据；默认启用与自动生成在第 11 组单独验。
+    // 回环默认免鉴权：这组断言只管管理器/代理本体，所有 api() 不带凭据直用；
+    // 鉴权档位（显式/裸给/非回环拒启）在第 11 组单独验。
     let mut workbench = Workbench {
         child: spawn_workbench(
             &state,
             &[
                 "--log-dir",
                 logs.to_str().unwrap(),
-                "web",
                 "--listen",
                 &format!("127.0.0.1:{web_port}"),
-                "--without-token",
             ],
         ),
     };
@@ -595,6 +589,22 @@ fn the_workbench_behaves_on_a_real_host() {
         wait_port(web_port, Duration::from_secs(30)),
         "工作台没起来（端口 {web_port}）"
     );
+
+    // 铺设改走 HTTP API（CLI 退役后脚本与工作台同一入口）：先规则、再环境。
+    seed_rule(
+        web_port,
+        "alpha",
+        "127.0.0.1 alpha.test
+",
+    );
+    seed_rule(
+        web_port,
+        "beta",
+        "127.0.0.1 beta.test
+",
+    );
+    seed_env(web_port, "alpha", "alpha");
+    seed_env(web_port, "beta", "beta");
 
     for env in ["alpha", "beta"] {
         let response = api(
@@ -871,10 +881,8 @@ fn the_workbench_behaves_on_a_real_host() {
             &[
                 "--log-dir",
                 logs.to_str().unwrap(),
-                "web",
                 "--listen",
                 &format!("127.0.0.1:{web_port}"),
-                "--without-token",
             ],
         ),
     };
@@ -964,7 +972,7 @@ fn the_workbench_behaves_on_a_real_host() {
 
     // ---- 9 故障注入：实例崩溃的可见性与资源释放 ----
     // v2 这条读状态文件拿 pid、SIGKILL 真子进程、盯 /proc 等僵尸回收；v3 实例
-    // 在进程内，"线程死了"的可观察形态由注入旋钮给出（真引擎与 fake 同构支持）。
+    // 在进程内，"线程死了"的可观察形态由注入旋钮给出（真引擎、真进程、真端口）。
     let fault = api(
         web_port,
         "POST",
@@ -1191,20 +1199,22 @@ fn the_workbench_behaves_on_a_real_host() {
         ),
     );
 
-    // ---- 11 dashboard URL token 鉴权 ----
-    // token 鉴权**默认启用**（自动生成随机值）：不给任何 token 旗标起一个工作台，
-    // 必须无 token 401、带横幅里的 token 200，且横幅打印可点链接。
+    // ---- 11 dashboard token 鉴权档位 ----
+    // 11a：回环默认免鉴权（主工作台全程没带过凭据，这里如实钉死）。
+    let open_api = api(web_port, "GET", "/api/status", None, true, None, None).status;
+    let open_page = api(web_port, "GET", "/", None, true, None, None).status;
+    checks.record(
+        "11a 回环默认免鉴权：页面与 API 不带凭据一律 200",
+        open_api == 200 && open_page == 200,
+        format!("api={open_api} page={open_page}"),
+    );
+
+    // 11a2：裸 `--token`（不给值）自动生成：无 token 401、横幅可点链接、双通道 200。
     let auto_port = free_port();
     let auto_child = Command::new(binary())
         .arg("--state-dir")
         .arg(work.join("state-auto"))
-        .args([
-            "--core",
-            "fake",
-            "web",
-            "--listen",
-            &format!("127.0.0.1:{auto_port}"),
-        ])
+        .args(["--listen", &format!("127.0.0.1:{auto_port}"), "--token"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -1236,7 +1246,7 @@ fn the_workbench_behaves_on_a_real_host() {
     )
     .status;
     checks.record(
-        "11a token 默认启用：自动生成随机 token，启动日志打印可点链接",
+        "11a2 裸 --token：自动生成随机 token，启动日志打印可点链接",
         !auto_token.is_empty()
             && auto_token.len() == 32
             && none_status == 401
@@ -1250,27 +1260,20 @@ fn the_workbench_behaves_on_a_real_host() {
     auto_child.kill().expect("kill auto-token workbench");
     let _ = auto_child.wait();
 
-    // `--without-token` 在非回环监听上必须被拒绝：进程应立即带着错误退出。
+    // 非回环监听没给 token 必须被拒：进程应立即带着 invalid_config 退出。
     let deny = Command::new(binary())
         .arg("--state-dir")
         .arg(work.join("state-deny"))
-        .args([
-            "--core",
-            "fake",
-            "web",
-            "--listen",
-            &format!("0.0.0.0:{}", free_port()),
-            "--without-token",
-        ])
+        .args(["--listen", &format!("0.0.0.0:{}", free_port())])
         .output()
-        .expect("run without-token on a public interface");
+        .expect("run a public bind without a token");
     let deny_output = format!(
         "{}{}",
         String::from_utf8_lossy(&deny.stdout),
         String::from_utf8_lossy(&deny.stderr)
     );
     checks.record(
-        "11b 非回环监听拒绝 --without-token（无鉴权对外不允许）",
+        "11b 非回环无 token 拒绝启动（对外暴露必须显式 --token）",
         !deny.status.success() && deny_output.contains("web.token"),
         format!("exit={:?}", deny.status.code()),
     );
@@ -1280,9 +1283,6 @@ fn the_workbench_behaves_on_a_real_host() {
         .arg("--state-dir")
         .arg(work.join("state-token"))
         .args([
-            "--core",
-            "fake",
-            "web",
             "--listen",
             &format!("127.0.0.1:{token_port}"),
             "--token",
@@ -1762,40 +1762,21 @@ fn the_workbench_behaves_on_a_real_host() {
     let bundle = format!("{key_pem}{crt_pem}");
     std::fs::write(confdir.join("mitmproxy-ca.pem"), &bundle).unwrap();
     std::fs::write(confdir.join("mitmproxy-ca-cert.pem"), &crt_pem).unwrap();
-    std::fs::write(work.join("ca.rules"), "127.0.0.1 ca.test\n").unwrap();
-    assert_eq!(
-        cli(
-            &state_ca,
-            &[
-                "rules",
-                "import",
-                "ca",
-                "--file",
-                work.join("ca.rules").to_str().unwrap(),
-            ],
-        ),
-        0
-    );
-    assert_eq!(
-        cli(&state_ca, &["env", "add", "caenv", "--rules", "ca"],),
-        0
-    );
     let web_ca = free_port();
     let mut wb_ca = Workbench {
-        child: spawn_workbench(
-            &state_ca,
-            &[
-                "web",
-                "--listen",
-                &format!("127.0.0.1:{web_ca}"),
-                "--without-token",
-            ],
-        ),
+        child: spawn_workbench(&state_ca, &["--listen", &format!("127.0.0.1:{web_ca}")]),
     };
     assert!(
         wait_port(web_ca, Duration::from_secs(30)),
         "CA 兼容工作台没起来"
     );
+    seed_rule(
+        web_ca,
+        "ca",
+        "127.0.0.1 ca.test
+",
+    );
+    seed_env(web_ca, "caenv", "ca");
     api(
         web_ca,
         "POST",

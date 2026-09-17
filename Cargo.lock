@@ -321,22 +321,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "envboard-cli"
-version = "0.2.0"
-dependencies = [
- "clap",
- "envboard-core",
- "envboard-core-api",
- "envboard-core-fake",
- "envboard-domain",
- "envboard-manager",
- "envboard-web",
- "libc",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "envboard-contract-tests"
 version = "0.2.0"
 dependencies = [
@@ -431,11 +415,14 @@ name = "envboard-web"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "clap",
+ "envboard-core",
  "envboard-core-api",
  "envboard-core-fake",
  "envboard-domain",
  "envboard-manager",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

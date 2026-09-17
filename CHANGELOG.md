@@ -11,6 +11,36 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Changed（走查后第二轮：鉴权换默认 + CLI 退役，两条 BREAKING）
+
+- **鉴权按绑定地址定档**：回环监听（127.0.0.1 / ::1）**默认免鉴权** —— 本机即本机
+  用户，token 挡不住同机进程、只添摩擦；`--token <T>` 在任何监听上显式启用，裸给
+  `--token`（不带值）自动生成 128 bit 随机值并在启动日志打印可点链接；**非回环监听
+  不给 token 直接拒绝启动**（`invalid_config`，字段 `web.token`）。`--without-token`
+  退役（它的语义成了默认档，选项失去存在理由）。`Host` 校验与 CSRF 头与档位无关、
+  永久在场；多用户共享主机建议回环也上 `--token`（README「工作台鉴权与对外暴露」
+  有取舍说明）。token 不再落盘：`runtime/api.json` 随 CLI 一起退场。
+- **CLI 子命令面整体退役**：`envboard-cli` crate（`status` / `run` / `env` / `rules` /
+  `compare` 子命令、直连模式、瘦客户端 `api_client`）删除，`--core`（含 `fake`）、
+  `--once`、`--json` 一并退役 —— `envboard` 二进制唯一行为 = 启动工作台；`[[bin]]`
+  并入 `envboard-web`（组合根与产品同 crate，一个 crate = 一个发布物）。管理动作
+  统一走工作台 UI 或本地 HTTP API（端点不变，README 有 curl 示例）：判定只在服务端
+  做一次，界面与脚本是两个翻译面，这正是砍掉第三张面孔后仍成立的理由。
+- **测试面随迁**：smoke 重写，钉住"命令面不得再长出子命令"、鉴权四档、非回环
+  拒启（负向守卫）、状态单写者；live 工作台铺设从 `cli()` 改 HTTP（`seed_rule` /
+  `seed_env`，与脚本用户同一条路）；第 11 组按新档位重写（回环默认免鉴权 200、
+  裸 `--token` 自动生成、显式 token 双通道 200 与端面逐个 401 清点、非回环拒启）；
+  `thin_client` 层随功能退场。
+- **升级须知**：实机部署的走查版 0.2.0 属换轨前形态，**不兼容** —— 重装二进制并
+  同步重装 unit（旧 unit 的 `web` 子命令形态会响亮失败，退出码 2）。版本号仍记
+  0.2.0：旧形态从未打过 tag、未对外发布，本条目按轮次记形态。
+
+- **deps 门禁随形态调整（有理由的放宽，负向验证过）**：crate 登记表移除
+  `envboard-cli`；`envboard-web → envboard-core` 边放行，但**只给 `src/main.rs` 组合根用**
+  —— 工作台 lib 面（api / config / lib.rs）新增源文件面判据：出现 `envboard_core::`
+  引用即红（注入探针验证过）。"换引擎实现不动工作台"这条不变量原样在场，只是裁决
+  粒度从 manifest 细化到了文件。
+
 ### Fixed（实机浏览器走查揪出的三个缺口 + 一个测试盲区）
 
 - **空列表里「新建环境」是死的**：renderDetail 在没有选中环境时把含表单的详情区

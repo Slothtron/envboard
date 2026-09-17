@@ -85,21 +85,19 @@ step_contract() {
 # --------------------------------------------------------------------------- #
 
 step_artifact() {
-  run "artifact" cargo test -p envboard-cli --test artifact "${LOCKED[@]}"
+  run "artifact" cargo test -p envboard-web --test artifact "${LOCKED[@]}"
 }
 
 # --------------------------------------------------------------------------- #
 # live 层：真宿主（真网络、真进程起停；仅需 openssl/curl）。默认**不进 all**。
 # --------------------------------------------------------------------------- #
 
-step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-cli --test live_workbench -- --ignored --nocapture; }
+step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-web --test live_workbench -- --ignored --nocapture; }
 step_live_manager()   { cargo test "${LOCKED[@]}" -p envboard-core --test live_manager -- --ignored --nocapture; }
-step_live_thin()      { cargo test "${LOCKED[@]}" -p envboard-cli --test thin_client -- --nocapture; }
 
 step_live() {
   run "live/workbench"   step_live_workbench
   run "live/manager"     step_live_manager
-  run "live/thin-client" step_live_thin
 }
 
 case "$STEP" in

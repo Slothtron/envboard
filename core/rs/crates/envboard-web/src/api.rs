@@ -83,6 +83,10 @@ pub async fn serve(manager: Arc<Manager>, config: WebConfig) -> Result<(), Error
             "  dashboard: http://{display_host}:{}/?token={token}",
             config.listen.port()
         );
+    } else {
+        // 免鉴权只可能来自回环监听（非回环在 WebConfig::parse 就被拒了）——
+        // 横幅如实说明当前档位，别让运维猜。
+        println!("  auth: disabled (loopback bind; pass --token to enable)");
     }
     println!(
         "  (assets are embedded; CSP has no 'unsafe-inline' — see core/spec/ and src/config.rs)"

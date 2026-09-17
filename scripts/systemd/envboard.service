@@ -1,7 +1,7 @@
 # envboard 工作台的用户级服务单元（v3）。
 #
 # 装法（不需要 root；产物是单一二进制，cargo build --release --locked 后取
-# target/release/envboard，或 cargo install --path core/rs/crates/envboard-cli）：
+# target/release/envboard，或 cargo install --path core/rs/crates/envboard-web）：
 #   install -Dm755 target/release/envboard ~/.local/bin/envboard
 #   install -Dm644 scripts/systemd/envboard.service ~/.config/systemd/user/envboard.service
 #   systemctl --user daemon-reload
@@ -16,8 +16,9 @@
 #     必须保持 panic=unwind（禁止 abort），这条写在 core/spec/capabilities.md
 #     的「实例生命周期」，是构建契约不是实现细节。
 #
-# 只监听回环。要让别的机器用，见 README 的「工作台鉴权与对外暴露」：显式改监听
-# 地址 + 开代理鉴权 + 保留 dashboard token，不要裸奔。
+# 只监听回环 —— 回环档默认免鉴权（本机即本机用户）。要让别的机器用：显式改监听
+# 地址并**必须**带 --token（非回环不给 token 会拒绝启动，这是刻意设计），并建议
+# 同时开环境的代理鉴权。见 README「工作台鉴权与对外暴露」。
 
 [Unit]
 Description=envboard — 多环境代理管理器与工作台（进程内 Rust 引擎）
@@ -29,7 +30,7 @@ Type=simple
 # 绝对路径：systemd 用户服务不继承交互 shell 的 PATH。
 ExecStart=%h/.local/bin/envboard \
     --state-dir %h/.envboard \
-    web --listen 127.0.0.1:8900
+    --listen 127.0.0.1:8900
 Restart=on-failure
 RestartSec=2
 # 状态目录私有（实例日志、规则账本、CA 私钥都在里面），权限从 0700 起步。
@@ -45,5 +46,6 @@ StandardError=journal
 [Install]
 WantedBy=default.target
 
-# 无界面常驻（只要引擎在线、不要工作台 HTTP 面）的变体：
-#   ExecStart=%h/.local/bin/envboard --state-dir %h/.envboard run --interval 5
+# 工作台就是唯一的常驻形态（v0.2 起没有无界面的 run 变体）：实例活在进程内，
+# 停服务 = 停工作台 = 停所有实例。要让服务在没有登录会话时也活着：
+#   loginctl enable-linger $USER

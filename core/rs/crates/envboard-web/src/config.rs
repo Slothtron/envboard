@@ -2,14 +2,16 @@
 //!
 //! 三条不可省的约束：
 //!
-//! 1. **token 鉴权默认启用**：未给 `--token` 时自动生成随机 token（启动日志打印
-//!    `dashboard: …/?token=…` 供点击直达）。显式 `--without-token` 才能关掉，且
-//!    **非回环监听拒绝关闭** —— 不允许无鉴权对外。
-//! 2. **校验 `Host` 头**必须等于配置的监听地址 —— 防 DNS rebinding。
+//! 1. **鉴权按绑定地址定档**：回环监听（127.0.0.1/::1）默认**免鉴权** —— 本机即本机
+//!    用户，token 挡不住同机进程，只添摩擦；`--token` 在任何监听上都可显式启用
+//!    （裸给 = 自动生成随机值，启动日志打印 `dashboard: …/?token=…` 可点链接）。
+//!    **非回环监听必须显式给 token，否则启动即 `invalid_config`** —— 工作台能起进程、
+//!    改规则，不允许不知情地把这种能力暴露到网络上。
+//! 2. **校验 `Host` 头**必须等于配置的监听地址 —— 防 DNS rebinding。这道门与 token
+//!    无关，任何档位都不豁免。
 //! 3. **变更类路由必须带自定义头** —— 浏览器跨站简单请求带不了自定义头
-//!    （fetch 会被 preflight 挡下），所以这一条就挡住了 CSRF。
-//!
-//! 这三条不是可选项：工作台能起进程、改规则，等于能改本机流量走向。
+//!    （fetch 会被 preflight 挡下），所以这一条就挡住了 CSRF。回环免鉴权时，
+//!    这是仍然立着的第二道闸：恶意网页能猜中 127.0.0.1:8900，但递不进这条头。
 
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
@@ -19,7 +21,7 @@ use envboard_core_api::Error;
 
 /// 变更类请求必须携带的头（前端统一带）。
 pub const REQUEST_HEADER: &str = "x-envboard-request";
-/// token 头（配置了 token 时才要求）。
+/// token 头（启用鉴权时才要求）。
 pub const TOKEN_HEADER: &str = "x-envboard-token";
 
 /// CSP：**不含任何 `unsafe-inline`** —— 因为资产是外置的 `app.css` / `app.js`。
@@ -32,7 +34,7 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'
 #[derive(Debug, Clone)]
 pub struct WebConfig {
     pub listen: SocketAddr,
-    /// 非本机监听时必填。
+    /// 启用则每个端点（两个静态资产除外）都要过 token；`None` = 免鉴权。
     pub token: Option<String>,
     /// 生成 `proxy_command` 用的状态目录（仅用于展示与日志）。
     pub state_dir: PathBuf,
@@ -41,14 +43,17 @@ pub struct WebConfig {
 impl WebConfig {
     /// 解析 `--listen`（`host:port`）并做安全校验。
     ///
-    /// token 语义：`--token` 显式指定 → 原样使用；未指定且未 `--without-token`
-    /// → **自动生成**随机 token（见 [`generate_token`]）；`--without-token` → 关闭，
-    /// 但非回环监听拒绝（工作台能起进程、改规则，无鉴权对外不设此例）。
-    /// `--token` 与 `--without-token` 同给是配置冲突，加载即失败。
+    /// token 语义（`token` 参数来自 clap 的 `--token [T]`：不给 = `None`，
+    /// 裸给 = `Some("")`，带值 = `Some(T)`）：
+    ///
+    /// * `Some(非空)` → 原样启用（trim 去空白）；
+    /// * `Some(空串)` → 自动生成随机 token 并启用（见 [`generate_token`]）；
+    /// * `None` 且**回环**监听 → 免鉴权（默认）；
+    /// * `None` 且**非回环**监听 → 启动即失败（`invalid_config`，字段 `web.token`）——
+    ///   对外暴露鉴权必须是知情动作，不给"忘了开就裸奔"留路径。
     pub fn parse(
         listen: &str,
         token: Option<String>,
-        without_token: bool,
         state_dir: &std::path::Path,
     ) -> Result<Self, Error> {
         let listen: SocketAddr = listen.parse().map_err(|_| {
@@ -64,42 +69,24 @@ impl WebConfig {
             ));
         }
 
-        let local = is_loopback(listen.ip());
-
-        if token.is_some() && without_token {
-            return Err(Error::invalid_config(
-                "web.token",
-                "--token and --without-token are mutually exclusive: pick one",
-            ));
-        }
-        if without_token {
-            if !local {
+        let token = match token {
+            Some(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+            Some(_) => Some(generate_token()),
+            None if is_loopback(listen.ip()) => None,
+            None => {
                 return Err(Error::invalid_config(
                     "web.token",
                     format!(
-                        "refusing --without-token on a non-loopback listen ({}): the workbench \
-                         can start processes and rewrite rules, so unauthenticated exposure is \
-                         not allowed; bind 127.0.0.1 or keep the token",
+                        "non-loopback listen ({}) requires an explicit token: pass \"--token <T>\"",
                         listen.ip()
                     ),
                 ));
             }
-            return Ok(Self {
-                listen,
-                token: None,
-                state_dir: state_dir.to_path_buf(),
-            });
-        }
-
-        // 默认启用：显式值优先（trim 去空白），否则自动生成随机 token
-        let token = match token {
-            Some(value) if !value.trim().is_empty() => value.trim().to_string(),
-            _ => generate_token(),
         };
 
         Ok(Self {
             listen,
-            token: Some(token),
+            token,
             state_dir: state_dir.to_path_buf(),
         })
     }
@@ -153,69 +140,72 @@ pub fn generate_token() -> String {
 mod tests {
     use super::*;
 
+    fn tmp() -> std::path::PathBuf {
+        std::path::Path::new("/tmp").to_path_buf()
+    }
+
     #[test]
-    fn loopback_default_generates_a_token() {
-        let config =
-            WebConfig::parse("127.0.0.1:8900", None, false, std::path::Path::new("/tmp")).unwrap();
+    fn loopback_is_open_by_default() {
+        // 新默认：回环 + 不给 --token = 免鉴权。
+        let config = WebConfig::parse("127.0.0.1:8900", None, &tmp()).unwrap();
         assert_eq!(config.listen.port(), 8900);
-        // 默认启用：不给 --token 就自动生成（32 hex 字符），且两次生成不同
-        let token = config.token.as_deref().expect("token is default-enabled");
-        assert_eq!(token.len(), 32);
-        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-        let again =
-            WebConfig::parse("127.0.0.1:8900", None, false, std::path::Path::new("/tmp")).unwrap();
-        assert_ne!(config.token, again.token);
+        assert_eq!(config.token, None);
         let hosts = config.allowed_hosts();
         assert!(hosts.contains(&"127.0.0.1:8900".to_string()));
         assert!(hosts.contains(&"localhost:8900".to_string()));
     }
 
     #[test]
-    fn without_token_disables_and_non_loopback_refuses() {
-        // 回环上可以显式关闭
-        let config =
-            WebConfig::parse("127.0.0.1:8900", None, true, std::path::Path::new("/tmp")).unwrap();
-        assert_eq!(config.token, None);
-        // 非回环拒绝关闭：无鉴权对外不允许
-        let error =
-            WebConfig::parse("0.0.0.0:8900", None, true, std::path::Path::new("/tmp")).unwrap_err();
-        assert_eq!(error.field.as_deref(), Some("web.token"));
-        // 两个旗标同给是配置冲突
-        let error = WebConfig::parse(
-            "127.0.0.1:8900",
-            Some("secret".into()),
-            true,
-            std::path::Path::new("/tmp"),
-        )
-        .unwrap_err();
-        assert_eq!(error.field.as_deref(), Some("web.token"));
-    }
-
-    #[test]
-    fn explicit_token_wins_and_non_loopback_needs_one() {
-        let config = WebConfig::parse(
-            "0.0.0.0:8900",
-            Some("secret".into()),
-            false,
-            std::path::Path::new("/tmp"),
-        )
-        .unwrap();
+    fn explicit_token_enables_auth_on_any_bind() {
+        let config = WebConfig::parse("127.0.0.1:8900", Some("secret".into()), &tmp()).unwrap();
+        assert_eq!(config.token.as_deref(), Some("secret"));
+        let config = WebConfig::parse("0.0.0.0:8900", Some("secret".into()), &tmp()).unwrap();
         assert_eq!(config.token.as_deref(), Some("secret"));
         // 非回环时不接受 localhost 这种写法
         assert_eq!(config.allowed_hosts(), vec!["0.0.0.0:8900".to_string()]);
     }
 
     #[test]
+    fn bare_token_autogenerates() {
+        // `--token` 裸给（空串）→ 自动生成 32 hex，且每次不同。
+        let config = WebConfig::parse("127.0.0.1:8900", Some(String::new()), &tmp()).unwrap();
+        let token = config.token.clone().expect("bare --token enables auth");
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        let again = WebConfig::parse("127.0.0.1:8900", Some("  ".into()), &tmp()).unwrap();
+        assert_ne!(config.token, again.token);
+        // 非回环同样认这个形态：显式裸给 = 知情启用
+        assert!(WebConfig::parse("0.0.0.0:8900", Some(String::new()), &tmp()).is_ok());
+    }
+
+    #[test]
+    fn non_loopback_without_token_refuses_to_start() {
+        // 对外暴露必须显式给 token —— 不给就拒启动，错误要指路。
+        for bind in ["0.0.0.0:8900", "192.168.1.7:8900"] {
+            let error = WebConfig::parse(bind, None, &tmp()).unwrap_err();
+            assert_eq!(error.field.as_deref(), Some("web.token"));
+            assert!(error.message.contains("--token"));
+        }
+    }
+
+    #[test]
     fn allowed_hosts_follow_the_configured_port() {
         // 这条是"别硬编码端口"的守门测试：换端口后 Host 校验必须跟着走
-        let config =
-            WebConfig::parse("127.0.0.1:9999", None, true, std::path::Path::new("/tmp")).unwrap();
+        let config = WebConfig::parse("127.0.0.1:9999", None, &tmp()).unwrap();
         assert!(
             config
                 .allowed_hosts()
                 .iter()
                 .all(|host| host.ends_with(":9999"))
         );
+    }
+
+    #[test]
+    fn bad_listen_still_fails_loudly() {
+        let error = WebConfig::parse("nope", None, &tmp()).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("web.listen"));
+        let error = WebConfig::parse("127.0.0.1:0", None, &tmp()).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("web.listen"));
     }
 
     #[test]

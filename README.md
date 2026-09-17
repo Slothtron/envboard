@@ -28,9 +28,9 @@ v3 是一次彻底的形态重构：数据面从"spawn 出去的 mitmproxy 子�
 | 规则库账本（`state.json` 的 `rules[]` 是唯一真相；物化文件可再生；启动对账回填） | ✅ |
 | 期望状态 reconcile（引擎线程 panic → `failed` → 按 desired 自动重启 = 崩溃自愈） | ✅ |
 | 工作台（三视图：环境 / 规则库 / 跨环境对比；详情、可折叠日志栏、SSE 每秒快照） | ✅ |
-| 工作台 URL token 鉴权（默认启用、自动生成；header 优先，`?token=` 等效） | ✅ |
+| 工作台鉴权档位（回环默认免鉴权；非回环必须显式 `--token`；header 与 `?token=` 等效） | ✅ |
 | 对外服务开关（环境监听 `0.0.0.0`，默认 `127.0.0.1`） | ✅ |
-| CLI（本地 API 的瘦客户端；无常驻实例时自己驱动管理器） | ✅ |
+| CLI 子命令面 | ➖ 已退役：一切管理动作 = 工作台 UI / 本地 HTTP API（见「HTTP 端点」） |
 | 单实例锁、状态原子写 + 0600 | ✅ |
 | HTTP/2 客户端（gRPC 等） | ❌ 数据面只实现 HTTP/1.1，见「已知限制」 |
 | PAC / 透明代理 / SOCKS | ❌ 未做 |
@@ -97,8 +97,8 @@ core/rs/crates/
   envboard-core-fake  ProxyEngine 的生命周期替身（真绑定端口、报告可注入）
   envboard-manager    环境 CRUD、端口分配、账本持久化、锁、健康判定、reconcile、
                       规则账本、EngineSpec 编译与热装配接线
-  envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）
-  envboard-cli        envboard 二进制（唯一发布产物）
+  envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）+ envboard
+                      二进制（唯一发布产物；组合根在本 crate 的 src/main.rs）
   envboard-contract-tests   消费全部 66 个契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
 scripts/systemd/      部署工件（用户级 unit）
@@ -116,7 +116,6 @@ API，不认识引擎实现（未来换实现不必动它）。
 ├── logs/<env>.log    实例日志（copytruncate 轮转，保留一份 .1）
 ├── shared/confdir/   共享 CA（mitmproxy-ca.pem / mitmproxy-ca-cert.pem）——
 │                     读的就是 mitmproxy 形状的同名文件，兼容 v2 与已装证书的客户端
-├── runtime/api.json  常驻实例写下的 API 地址与 token（0600，供 CLI 自动发现）
 └── agent/            v2 遗留（注入器目录）：环境删除 / 改名搬迁时被清理，v3 不写入
 ```
 
@@ -128,47 +127,51 @@ API，不认识引擎实现（未来换实现不必动它）。
 cargo build --release --locked --offline      # 产物：target/release/envboard
 export PATH="$PWD/target/release:$PATH"
 
-# 1) 导入一份 hosts 风格规则（会被解析成确定性的规范文件）
-envboard --state-dir ~/.envboard rules import beta --file examples/hosts.sample.txt
+# 1) 起工作台 —— 同一个二进制、唯一行为（管理器 + HTTP API + 内嵌前端 + 进程内引擎）
+envboard --state-dir ~/.envboard
+#    默认监听 127.0.0.1:8900 且回环免鉴权：浏览器直接打开 http://127.0.0.1:8900
+#    要给别的机器用：--listen 0.0.0.0:8900 --token <T>（非回环不给 token 拒绝启动）
 
-# 2) 建环境（不给 --port 就在 16000–16999 里随机分配一个空闲端口）
-envboard --state-dir ~/.envboard env add beta --rules beta
-
-# 3) 起工作台（管理器 + HTTP API + 内嵌前端 + 进程内引擎，同一个二进制）
-envboard --state-dir ~/.envboard web --listen 127.0.0.1:8900
-#    打开启动日志打印的那一行 dashboard: http://127.0.0.1:8900/?token=<自动生成值>
+# 2) 导入规则 + 建环境：工作台「规则库 / 环境」两个视图各点一下即可；
+#    脚本化走同一个本地 HTTP API（变更类请求必须带 CSRF 头）：
+curl -s -X POST localhost:8900/api/rules \
+     -H 'content-type: application/json' -H 'x-envboard-request: 1' \
+     -d '{"name":"beta","text":"127.0.0.1 api.example.com\n"}'
+curl -s -X POST localhost:8900/api/environments \
+     -H 'content-type: application/json' -H 'x-envboard-request: 1' \
+     -d '{"name":"beta","rules":"beta"}'
 
 # 4) 客户端按端口选环境（工作台每行都有可复制的那一行）
 export https_proxy=http://127.0.0.1:16301 http_proxy=http://127.0.0.1:16301
 curl https://api.example.com/
 ```
 
-CLI 在工作台跑着的时候会**自动走本地 HTTP API**（不再抢状态锁），所以两种用法不冲突：
+日常巡检也走同一个本地 HTTP API（工作台界面本就把这些面都摆了出来：概况在顶栏、
+日志在详情面板、对比是一个独立视图）：
 
 ```bash
-envboard --state-dir ~/.envboard env list                  # 有常驻实例 → thin client
-envboard --state-dir ~/.envboard env logs beta             # 实例日志尾部
-envboard --state-dir ~/.envboard compare api.example.com   # 跨环境静态对比（不发请求）
+curl -s localhost:8900/api/status | head -c 400
+curl -s "localhost:8900/api/environments/beta/logs?lines=50"
+curl -s "localhost:8900/api/compare?host=api.example.com"   # 跨环境静态对比（不发请求）
 ```
-
-没有引擎运行条件的机器（比如只要管理器语义）可以用 `--core fake` 跑通全部管理面测试：
-替身真绑定端口、报告可注入（live 层的"实例崩溃"断言就借它），但不代理任何流量。
 
 ### 改一个已经建好的环境
 
 建的时候没绑规则、端口想换一个、描述写错了 —— 都不必删了重建。工作台每行有「编辑」，
-命令行是 `env edit`：
+脚本化则走 PATCH（未提及不动，`null` 表示清空）：
 
 ```bash
-envboard env edit beta --rules beta            # 补绑 / 换绑规则（热的）
-envboard env edit beta --port 16302            # 换端口（需停止）
-envboard env edit beta --rename gamma          # 改名（期望状态、端口归属一起搬过去）
-envboard env edit beta --no-rules              # 解绑，回到「不覆盖」
-envboard env edit beta --description "灰度 v2" # 只改描述
-envboard rules show beta                        # 改规则文件前先取回原文，免得盲覆盖
+curl -s -X PATCH localhost:8900/api/environments/beta \
+     -H 'content-type: application/json' -H 'x-envboard-request: 1' \
+     -d '{"rules":"beta"}'          # 补绑 / 换绑规则（热的）
+#     {"port":16302}    换端口      —— 需先停止（POST .../stop）
+#     {"name":"gamma"}  改名        —— 期望状态、端口归属一起搬过去；需先停止
+#     {"rules":null}    解绑        —— 回到「不覆盖」
+#     {"description":"灰度 v2"}     —— 只改描述（热的）
+curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，免得盲覆盖
 ```
 
-v3 的热 / 停机矩阵（服务端裁决，工作台与 CLI 是同一份语义的两个面）：
+热 / 停机矩阵（服务端裁决，工作台与 HTTP API 是同一份语义的两个面）：
 
 | 改动 | 运行中 | 生效方式 |
 |---|---|---|
@@ -187,51 +190,47 @@ v3 的热 / 停机矩阵（服务端裁决，工作台与 CLI 是同一份语义
 
 ## 配置
 
-### 全局参数（对一切子命令有效）
+### 启动参数（唯一入口 = 工作台）
 
-| CLI 参数 | 默认 | 说明 |
+| 参数 | 默认 | 说明 |
 |---|---|---|
 | `--state-dir <DIR>` | `$ENVBOARD_STATE_DIR`，其次 `~/.envboard` | 账本、锁、规则库、日志、共享 CA 都在它下面 |
 | `--port-range <MIN>-<MAX>` | `16000-16999` | 随机分配区间（避开常见服务端口与系统临时端口段） |
-| `--core <engine\|fake>` | `engine` | `engine` = v3 进程内纯库引擎；`fake` = 生命周期替身（真绑端口、不代理流量） |
-| `--api <ADDR>` | 自动发现 | 本地 API 地址。发现顺序：`--api` → `<state_dir>/runtime/api.json` → 默认 `127.0.0.1:8900`；最后一步只在**没显式给 `--state-dir`** 时才走 —— 否则 `--state-dir /tmp/x` 会被别的状态目录的常驻实例接管 |
-| `--token <TOKEN>` | api.json 里的记录 | 本地 API 访问令牌；显式给值优先 |
+| `--listen <HOST:PORT>` | `127.0.0.1:8900` | 工作台监听。**回环默认免鉴权；非回环必须配 `--token`，否则拒绝启动** |
+| `--token [T]` | 回环可省、非回环必填 | 启用鉴权：带值用给定 token；裸给（不带值）自动生成 128 bit 随机值并在启动日志打印可点链接 |
 | `--log-dir <DIR>` | `<state_dir>/logs` | 实例日志目录 |
 | `--no-log-file` | 关 | 实例日志不落盘：没有文件出口，`env logs` 与日志面板读不到尾部；总线的丢弃量经 `log_drops` 上报告 |
 | `--max-log-bytes <N>` | 8 MiB | 单环境日志上限，超过 copytruncate 轮转（保留一份 `.1`）；`0` = 不轮转；下限 64 KiB |
-| `--json` | 关 | 机器可读输出 |
 
-### 子命令
+### 命令面
 
-```
-envboard status                                  管理器 / 引擎 / 环境概况
-envboard web    [--listen A] [--token T] [--without-token] [--once]
-envboard run    [--once] [--interval N] [--dry-run]
-envboard env    list | show NAME | add NAME [--port P] [--rules R] [--description D]
-                | edit NAME [--rename NEW] [--port P] [--rules R | --no-rules] [--description D]
-                | start NAME | stop NAME | restart NAME | rm NAME
-                | logs NAME [--lines N]            （默认 200）
-envboard rules  import NAME [--file F]             （省略 --file 从 stdin 读）
-                | show NAME
-envboard compare HOST
-```
+没有子命令，也没有直写状态的旁路：`envboard` 就是工作台启动器。建 / 改 / 删环境、
+导入规则、看日志、跨环境对比，全部走工作台 UI 或下面的本地 HTTP API —— 判定只在
+服务端做一次，界面与脚本看到的语义严格同一份（这正是退役 CLI 命令面后仍成立的理由）。
+`smoke` 测试钉着"命令面不得再长出子命令"。
 
-按域名放宽上游证书校验（`insecure_hosts`）与代理凭据**没有 CLI 开关** —— 入口只有
-工作台的「配置」表单。它们是安全控制，做成"随便填个键值对"的文本框会让"配置说开了、
+按域名放宽上游证书校验（`insecure_hosts`）与代理凭据的唯一入口是工作台的「配置」表单。它们是安全控制，做成"随便填个键值对"的文本框会让"配置说开了、
 引擎其实没收到"这种分叉无从排除（任意选项透传通道已经删除）。
 
-错误经 CLI 输出为 `envboard: <错误码>: <消息>`（带字段路径时附 `(field: …)`）；
+启动错误输出为 `envboard: <错误码>: <消息>`（带字段路径时附 `(field: …)`）；
 不可重试错误退出码 2，其余 1。非法配置**加载即失败**并给出字段路径。
 
 ### 工作台鉴权与对外暴露
 
-- **token**：鉴权默认启用 —— 未给 `--token` 时自动生成 128 bit 随机 token，启动日志打印
-  `dashboard: http://<host>:<port>/?token=<值>`（通配监听用 127.0.0.1 展示）。服务端同时
-  接受 header `x-envboard-token`（优先）与 URL `?token=`（EventSource 带不了自定义头）；
-  前端拿到 URL token 后立即 `history.replaceState` 抹掉地址栏。token 写入
-  `<state_dir>/runtime/api.json`（0600），CLI 瘦客户端自动带上。`--without-token`
-  **仅限回环监听**（非回环拒绝关闭 —— 无鉴权对外不允许），与 `--token` 互斥。
-  `/app.css` / `/app.js` 两个内嵌静态资产豁免 token（浏览器子资源请求带不了凭据）。
+- **token 档位**：回环监听（127.0.0.1 / ::1）**默认免鉴权** —— 本机即本机用户，token
+  挡不住同机进程，只添摩擦。`--token <T>` 在任何监听上显式启用；`--token` 裸给（不带
+  值）= 自动生成 128 bit 随机 token，启动日志打印
+  `dashboard: http://<host>:<port>/?token=<值>`（通配监听用 127.0.0.1 展示）供点击直达。
+  **非回环监听必须显式给 `--token`，否则启动即失败**（`invalid_config`，字段
+  `web.token`）—— 对外暴露是知情动作，不给"忘了开就裸奔"留路径；旧 `--without-token`
+  已随新默认退役（它的语义成了默认档）。服务端接受 header `x-envboard-token`（优先）
+  与 URL `?token=`（EventSource 带不了自定义头）两条等效通道；前端捕获 URL token 后
+  **保留在地址栏**（reload 不 401），后续请求走 header。`/app.css` / `/app.js` 两个
+  内嵌静态资产豁免（浏览器子资源请求带不了凭据）。
+- **与 token 无关、任何档位都不豁免的两道门**：`Host` 必须等于监听地址（DNS rebinding
+  防线）；变更类请求必须带 `x-envboard-request: 1`（CSRF 防线）—— 回环免鉴权时，
+  后者就是挡住恶意网页打本机端口的闸。**多用户共享的主机请在回环上也给 `--token`**：
+  免鉴权档下本机任何进程都能读工作台数据（环境名、端口、日志尾部）。
 - **代理访问鉴权**：环境字段 `proxy_user` / `proxy_password` **同生共死**（只有一边 →
   `invalid_config`，错误指向缺失的那一边）。每段非空、不含 `:`、空白或控制字符，
   `proxy_user` ≤64、`proxy_password` ≤128。v3 的 407 门在引擎内存里定长时间比对 ——
@@ -244,8 +243,9 @@ envboard compare HOST
 
 ### HTTP 端点
 
-除两个静态资产外每个端点都要求 token；变更类（非 GET/HEAD）还要求
-`x-envboard-request: 1`（CSRF 防线），且 `Host` 必须等于监听地址（DNS rebinding 防线）。
+启用 token 后，除两个静态资产外每个端点都要求 token（回环默认档无凭据直接放行）；
+变更类（非 GET/HEAD）在任何档位都要求 `x-envboard-request: 1`（CSRF 防线），
+且 `Host` 必须等于监听地址（DNS rebinding 防线）。
 未匹配路径返回 JSON 形状的 404（`{error:{code,message}}`）。
 
 | 方法 | 路径 | 用途 |
@@ -279,10 +279,10 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 | 层 | 手段 | 关键断言 |
 |---|---|---|
 | `policy` | `cargo test -p envboard-policy-tests` | 工具链收敛（toolchain）、命名（naming）、文本自包含（doc_scope）、依赖方向（deps）、注册表三方一致（registry）—— 一文件一门禁，可单跑 |
-| `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测（端口分配、reconcile、锁、健康判定、日志尾部与轮转、CLI 瘦客户端、环境编辑热/停机） |
+| `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测 + 冒烟（鉴权档位、非回环拒启、单写者、命令面不得有子命令；端口分配、reconcile、锁、健康判定、日志尾部与轮转、环境编辑热/停机） |
 | `contract` | `cargo test -p envboard-contract-tests` | 66 个 fixture 的形状与语义都由实现消费；失败用例钉住错误码，成功用例钉归一化字段 |
-| `artifact` | `cargo test -p envboard-cli --test artifact` | 发布工件清单逐项在位、旧代残留为零、二进制里真的带着进程内引擎 |
-| `live` | `cargo test -p envboard-cli --test live_workbench -- --ignored` | 两个环境同时可用且结果不同、规则热重载、热生效时延（PATCH 返回后第一个请求即新配置）、`insecure_hosts` 对照（名单外 502、热加名单后 200、未点名域名仍 502）、既有 CA 零感知（预放 mitmproxy 形状 CA 逐字节不变加载 + 真 curl 验链）、凭据 argv 审计（/proc 全量不得出现明文密码）、407/200 对照、安全（Host / CSRF / 端点逐个无 token 必须 401）、CSP、连打 320 个请求不卡死、注入 failed 后端口真释放、崩溃自愈、编辑后按新配置真的生效 |
+| `artifact` | `cargo test -p envboard-web --test artifact` | 发布工件清单逐项在位、旧代残留为零、二进制里真的带着进程内引擎 |
+| `live` | `cargo test -p envboard-web --test live_workbench -- --ignored` | 两个环境同时可用且结果不同、规则热重载、热生效时延（PATCH 返回后第一个请求即新配置）、`insecure_hosts` 对照（名单外 502、热加名单后 200、未点名域名仍 502）、既有 CA 零感知（预放 mitmproxy 形状 CA 逐字节不变加载 + 真 curl 验链）、凭据 argv 审计（/proc 全量不得出现明文密码）、407/200 对照、安全（Host / CSRF / 鉴权四档：回环默认免鉴权 200、裸 --token 自动生成、显式 --token 下 header 与 ?token= 双通道 200 + 端面逐个无凭据 401 清点、非回环无 token 拒启）、CSP、连打 320 个请求不卡死、注入 failed 后端口真释放、崩溃自愈、编辑后按新配置真的生效 |
 | `live` | `cargo test -p envboard-core --test live_manager -- --ignored` | 引擎直驱三组：预放 CA 加载复用 + 回执如实 + curl 验链；注入 failed 可见、端口释放、重拉回 running；insecure 名单外 502 → 热 apply 第一次请求即 200 |
 
 常用的引擎侧单跑（全部 hermetic，不需要网络与宿主）：
@@ -325,8 +325,8 @@ install -Dm644 scripts/systemd/envboard.service ~/.config/systemd/user/envboard.
 systemctl --user daemon-reload
 systemctl --user enable --now envboard
 systemctl --user status envboard
-export ENVBOARD_STATE_DIR=$HOME/.local/state/envboard   # 命令行操作同一批环境
-envboard env list
+# 看一眼状态：工作台页面，或本地 API
+curl -s localhost:8900/api/status | head -c 400
 ```
 
 关键取舍：
@@ -336,11 +336,12 @@ envboard env list
   命名空间建立时已存在，首次安装必失败（实测 `status=226/NAMESPACE`）。
 - **`ExecStart` 用绝对路径**：systemd 的 PATH 不含 `~/.local/bin`。v3 起不需要
   `--core-bin` —— 引擎就在这个二进制里，
-  `envboard --state-dir %S/envboard web --listen 127.0.0.1:8900` 就是全部。
+  `envboard --state-dir %S/envboard` 就是全部（默认回环监听、免鉴权档）。
 - **`Restart=always` 是安全的**：期望状态（`desired=running`）已持久化，重启后 reconcile
   会把环境重新拉起；主动 `stop` 不会被当成失败再拉起。
-- 只要"环境常驻"不要 UI，把 `ExecStart` 换成 `run` 变体（unit 文件末尾有注释版两行）。
-  想在没有登录会话时也活着：`loginctl enable-linger $USER`。
+- 工作台就是唯一的常驻形态（v0.2 起没有无界面的 `run` 变体）：实例活在进程内，
+  停服务 = 停工作台 = 停所有实例。想让服务在没有登录会话时也活着：
+  `loginctl enable-linger $USER`。
   改配置别动这个文件，用 `systemctl --user edit envboard` 写 drop-in。
 
 工作台界面的视觉令牌、CSP 约束与交互纪律以
@@ -369,9 +370,10 @@ v2（mitmproxy 子进程核心）到 v3（进程内引擎）**数据契约兼容
   ```bash
   pkill -f mitmdump        # 确认没有 v2 实例残留再升级
   ```
-- **CLI 面收窄**：`--core mitmproxy`、`--core-bin`、`--core-python` 已删除
-  （`--core` 的取值面只接受 `engine` / `fake`，旧值在参数解析处就被挡下）。默认 `--core engine`；
-  另有 `fake`（生命周期替身，供管理面测试与无证书环境跑通用）。
+- **CLI 面整体退役**：v2 的 `--core mitmproxy` / `--core-bin` / `--core-python`，以及
+  本版本此前的全部子命令（`status` / `run` / `env` / `rules` / `compare` / `web`）与
+  `--core`、`--once`、`--json`、`--without-token` 全部删除 —— `envboard` 只剩一个行为：
+  启动工作台。旧形态命令行会**响亮失败**（未知参数/子命令，退出码 2），不会静默改道。
 - **行为差异**：热改（`insecure_hosts` / 规则绑定 / 规则内容 / 描述）从"按轮询间隔
   收敛"变成**同步装配、返回即生效**；`config_mismatch` 状态随之从契约删除
   （被拒配置以 `invalid_config` 标记 + `unhealthy` 表达，旧快照继续服务）。
@@ -423,7 +425,7 @@ v2（mitmproxy 子进程核心）到 v3（进程内引擎）**数据契约兼容
 
 ## 版本与发布
 
-发布产物是**单一 `envboard` 二进制**（引擎、管理器、工作台、CLI 全在其中；前端资产
+发布产物是**单一 `envboard` 二进制**（引擎、管理器、工作台全在其中；前端资产
 `include_str!` 内嵌，零构建步骤、零 CDN）。全部 crate 显式 `publish = false` ——
 "不发布 crate"是 manifest 事实，由 `deps` 门禁钉住；发布物内容由 `artifact` 层做
 声明式清单校验（必需文件逐项在位）。当前版本：**0.2.0**。
