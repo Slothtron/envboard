@@ -3,7 +3,7 @@
 //! 为什么需要它：对 clone 本仓的人，指向一份不在仓库里的文档的路径不存在、章节号
 //! 无处可查，那条线索读到就断。规范与契约必须"只看本仓就能完整理解"。
 //!
-//! 本仓的入库文档只有 `README.md` / `CHANGELOG.md` / `core/spec/**` 与各 crate；
+//! 本仓的入库文档是 `README.md` / `CHANGELOG.md` / `core/spec/**` / `docs/**` 与各 crate；
 //! 设计、计划、实机验收等工作材料放在包内一个**不入库**的目录里（见 `.gitignore`）。
 //!
 //! 判据（三条，都可机械验证）：
@@ -64,6 +64,7 @@ const PATH_PREFIXES: &[&str] = &[
     "platforms/",
     "scripts/",
     "ci/",
+    "docs/",
 ];
 const PATH_SUFFIXES: &[&str] = &[
     ".md", ".rs", ".py", ".json", ".js", ".css", ".html", ".toml", ".sh",
@@ -140,6 +141,7 @@ fn path_references(line: &str) -> Vec<String> {
 /// 含 `§` 的行必须出现下列之一（本仓锚点；判据见本文件的模块文档）。
 fn has_anchor(line: &str) -> bool {
     line.contains("core/spec/")
+        || line.contains("docs/")
         || line.contains("README.md")
         || line.contains("CHANGELOG.md")
         || line.contains("capabilities.md")
