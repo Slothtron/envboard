@@ -9,16 +9,19 @@
 //! 标准网络类型（端口语义由 manager 接线时再收口）。
 
 pub mod auth;
+pub mod backend;
 pub mod builtin;
 pub mod ca;
 pub mod config;
 pub mod der;
 pub mod engine;
 pub mod http;
+pub mod logsink;
 pub mod plugin;
 pub mod target;
 pub mod tls;
 
+pub use backend::EngineBackend;
 pub use ca::{CaOutcome, SharedCa};
 pub use config::{CompiledConfig, EngineConfig};
 pub use engine::{EngineInstance, EngineState, EngineStatus};

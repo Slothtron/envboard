@@ -14,6 +14,10 @@
 //! 测试旋钮是**显式的 setter**（`set_status_mode` / `set_bind_fail` / …），
 //! 不再经"每实例选项"传递：那条通道已从契约里删除。
 
+pub mod engine;
+
+pub use engine::FakeEngine;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

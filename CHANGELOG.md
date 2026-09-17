@@ -11,6 +11,27 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Added（v3 重构 M-P4 第一步：ProxyEngine 接缝与双实现）
+
+- core-api 新增 v3 引擎接缝（engine 模块）：EngineSpec（监听/名单/凭据/规则文本/
+  日志线出口——全部一等字段，无透传通道）、EngineHandle（**无进程身份**）、
+  EngineReport（state/config_hash/epoch/last_error/bypass_counts/log_drops，
+  内存读同步报告）、InstanceState（starting/running/stopped/unhealthy/
+  port_conflict/failed；**config_mismatch 消亡**——同步换快照 + hash 回执让
+  "生效不一致"没有存在的形态）。LineWriter 端口进 core-api::ports。
+- config_hash 单一真相：EngineSpec::hashable_json 的 sha256（log 与展示字段
+  不参与）。引擎内部编译哈希只做幂等，绝不作对外回执（两处哈希曾差点成为
+  第二真相，测试把它钉回了同源）。
+- EngineBackend（envboard-core）：ProxyEngine 真实现——簿记 map + 有界日志
+  总线（logsink：try_send 即返回、满则丢弃计数；v2"213 个请求写满 64 KiB
+  管道全体挂死"的教训以新形态继续成立）。start 成功 = 已登记；端口占用是
+  **报告里的状态**而非启动错误（管理面"新建冲突自动重试一次"契约依赖此）。
+- FakeEngine（envboard-core-fake）：同一接口的替身，真绑定端口，故障注入
+  旋钮 inject_state/inject_log_drops（live"实例崩溃"类断言的迁移目标）。
+  迁移期与 v2 FakeCore 并存；Manager 接线完成后 FakeCore 与 ProxyCore 一起退场。
+- 验收：backend 实机 2 组（trait 全生命周期 + 真实转发 + 总线日志 + 幂等
+  stop/NotFound/Conflict），fake 单测 4 条，总线非阻塞单测 1 条。
+
 ### Added（v3 重构 M-P3：插件宿主——阶段管道与能力注册表）
 
 - 三层能力模型落地：内核能力（listen/proxy-auth/tls-policy/mitm-ca/protocol）

@@ -410,18 +410,9 @@ fn invalid(message: String) -> Error {
     Error::new(ErrorCode::InvalidConfig, message)
 }
 
-/// 日志出口：request-log 插件与引擎 WARN 共用的写线抽象。实现必须非阻塞
-/// （引擎侧有界队列的接线在管理面；这里只约定行接口）。
-pub trait LogWriter: Send + Sync + std::fmt::Debug {
-    fn write_line(&self, line: &str);
-}
-
-#[derive(Debug, Default)]
-pub struct NullLogWriter;
-
-impl LogWriter for NullLogWriter {
-    fn write_line(&self, _line: &str) {}
-}
+/// 日志出口就是 core 端口的 LineWriter（契约与 Null 实现收口在
+/// envboard-core-api::ports）；这里保留语义别名给插件面使用。
+pub use envboard_core_api::ports::{LineWriter as LogWriter, NullLineWriter as NullLogWriter};
 // ---- 钩子执行器：阶段过滤、超时、错误档位 ----
 
 use std::time::Duration;
