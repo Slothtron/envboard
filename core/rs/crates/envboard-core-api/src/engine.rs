@@ -93,6 +93,13 @@ impl InstanceState {
     pub fn is_running(&self) -> bool {
         matches!(self, InstanceState::Running)
     }
+    /// 附带原因的状态返回原因文本（视图的 health_reason）。
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            InstanceState::Unhealthy { reason } | InstanceState::Failed { reason } => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 /// 内存健康报告 —— 取代 v2"状态文件 + 探活 + 收敛窗"的整条证据链。
@@ -126,8 +133,10 @@ pub trait ProxyEngine: Send + Sync {
     /// 同名实例已存在 = Conflict，**不**隐式替换。
     async fn start(&self, env: String, spec: EngineSpec) -> Result<EngineHandle, Error>;
 
-    /// 同步热更新：通过 = 新快照已生效并返回新 hash；失败 = 旧快照继续服务。
-    async fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error>;
+    /// 热更新：通过 = 新快照已生效并返回新 hash；失败 = 旧快照继续服务。
+    /// 同步签名是刻意的：装配即生效没有异步语义，也让管理面的同步入口
+    /// （update/import_rules）能直接调用，不必 runtime 套 runtime。
+    fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error>;
 
     /// 优雅停止（幂等；未知句柄 = NotFound）。
     async fn stop(&self, handle: &EngineHandle) -> Result<(), Error>;

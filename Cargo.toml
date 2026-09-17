@@ -21,6 +21,7 @@ envboard-core-api = { path = "core/rs/crates/envboard-core-api" }
 envboard-domain = { path = "core/rs/crates/envboard-domain" }
 envboard-rules = { path = "core/rs/crates/envboard-rules" }
 envboard-core-fake = { path = "core/rs/crates/envboard-core-fake" }
+envboard-core = { path = "core/rs/crates/envboard-core" }
 envboard-manager = { path = "core/rs/crates/envboard-manager" }
 envboard-core-mitmproxy = { path = "core/rs/crates/envboard-core-mitmproxy" }
 envboard-web = { path = "core/rs/crates/envboard-web" }

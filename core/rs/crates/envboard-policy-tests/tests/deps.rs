@@ -41,6 +41,7 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
             "envboard-core-api",
             "envboard-domain",
             "envboard-core-fake",
+            "envboard-core",
             "envboard-core-mitmproxy",
             "envboard-manager",
             "envboard-web",

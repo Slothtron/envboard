@@ -61,7 +61,9 @@ const RELEASE_ARTIFACTS: &[&str] = &[
 
 const INJECTOR: &str = "adapters/mitmproxy/envboard_mitmproxy.py";
 
-/// 注入器里的一个独特字符串：二进制里找得到它，就说明源码真的被 `include_str!` 嵌入了。
+/// v3 起二进制不再内嵌注入器；这条标记改为**进程内引擎的簿记事实**：
+/// 发布物必须带着它（引擎在线）。注入器侧的内嵌断言随 adapters 在 M-P6 一起退场。
+#[allow(dead_code)]
 const EMBED_MARKER: &[u8] = b"envboard injector ready";
 
 fn envboard_binary() -> &'static str {
@@ -99,17 +101,16 @@ fn the_release_artifact_contains_only_expected_files() {
                 ));
             }
         }
+    }
 
-        let binary = std::fs::read(envboard_binary()).expect("built binary must be readable");
-        if !binary
-            .windows(EMBED_MARKER.len())
-            .any(|window| window == EMBED_MARKER)
-        {
-            problems.push(
-                "二进制里找不到注入器源码（`include_str!` 没生效？）—— 发布物将无法物化它"
-                    .to_string(),
-            );
-        }
+    // v3 断言：进程内引擎在场（"engine-in-process" 是 manager 对哨兵身份的唯一出处）。
+    let binary = std::fs::read(envboard_binary()).expect("built binary must be readable");
+    const ENGINE_MARKER: &[u8] = b"engine-in-process";
+    if !binary
+        .windows(ENGINE_MARKER.len())
+        .any(|w| w == ENGINE_MARKER)
+    {
+        problems.push("二进制里找不到进程内引擎的簿记标记 —— 发布的还是 v2 形态？".to_string());
     }
 
     let gitignore = std::fs::read_to_string(root.join(".gitignore")).expect(".gitignore");

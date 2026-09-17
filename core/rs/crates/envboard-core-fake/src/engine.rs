@@ -145,7 +145,7 @@ impl ProxyEngine for FakeEngine {
         })
     }
 
-    async fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error> {
+    fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error> {
         let mut guard = self.entries.lock().unwrap();
         let instance = guard.get_mut(&handle.env).ok_or_else(|| {
             Error::new(
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(report.state, InstanceState::Running);
         assert_eq!(report.epoch, 1);
 
-        let next_hash = engine.apply(&handle, spec(17_401)).await.unwrap();
+        let next_hash = engine.apply(&handle, spec(17_401)).unwrap();
         let after = engine.report(&handle);
         assert_eq!(after.config_hash, next_hash);
         assert_eq!(after.epoch, 2);

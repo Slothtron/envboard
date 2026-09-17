@@ -21,12 +21,10 @@ use clap::{Parser, Subcommand};
 
 mod api_client;
 use api_client::ApiClient;
-use envboard_core_api::{ClockPort, Error, ErrorCode, InstanceHealth, LoggerPort, ProxyCore};
-use envboard_core_fake::FakeCore;
-use envboard_core_mitmproxy::{MitmproxyCore, MitmproxyCoreConfig};
-use envboard_manager::infra::{
-    ProcfsProcessTable, RealFiles, SocketPortProbe, StderrLogger, SystemClock,
-};
+use envboard_core::{CaOutcome, EngineBackend, SharedCa};
+use envboard_core_api::{ClockPort, Error, ErrorCode, InstanceState, LoggerPort, ProxyEngine};
+use envboard_core_fake::FakeEngine;
+use envboard_manager::infra::{RealFiles, SocketPortProbe, StderrLogger, SystemClock};
 use envboard_manager::{EnvView, JsonFileStateRepo, Manager, ManagerConfig, StateRepo};
 
 #[derive(Parser, Debug)]
@@ -47,20 +45,10 @@ struct Cli {
     #[arg(long, global = true)]
     port_range: Option<String>,
 
-    /// 用哪个 proxy core。`fake` 只监听端口（用于无 mitmproxy 的环境与测试），
-    /// `mitmproxy` 才会真正改写上连地址。
-    #[arg(long, global = true, value_parser = ["fake", "mitmproxy"], default_value = "mitmproxy")]
+    /// 用哪个引擎后端。`engine` 是 v3 的进程内纯库引擎（默认）；`fake` 只维护
+    /// 生命周期事实、不改写流量（管理面测试与无证书环境用）。
+    #[arg(long, global = true, value_parser = ["engine", "fake"], default_value = "engine")]
     core: String,
-
-    /// `mitmdump` 路径（默认按 PATH 解析）。
-    #[arg(long, global = true)]
-    core_bin: Option<PathBuf>,
-
-    /// 装有 mitmproxy 的解释器路径（CA 预物化用）。
-    /// **默认不是环境里的 python3**：本机实测默认 python3 没有 mitmproxy，
-    /// 所以默认走"从 core.bin 推导 + 自检"。
-    #[arg(long, global = true)]
-    core_python: Option<PathBuf>,
 
     /// 本地 API 地址。省略时先读 `<state_dir>/runtime/api.json`，再退回 127.0.0.1:8900。
     ///
@@ -264,13 +252,12 @@ fn run(cli: Cli) -> Result<(), Error> {
 
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
     let logger: Arc<dyn LoggerPort> = Arc::new(StderrLogger);
-    let core = build_core(&cli, &config, Arc::clone(&clock))?;
+    let core = build_engine(&cli, &config)?;
 
     let manager = Manager::new(
         config,
         core,
         Arc::new(SocketPortProbe),
-        Arc::new(ProcfsProcessTable),
         Arc::new(RealFiles),
         Arc::clone(&clock),
         logger,
@@ -360,29 +347,39 @@ fn run(cli: Cli) -> Result<(), Error> {
     })
 }
 
-/// 按 `--core` 构造 proxy core。
+/// 按 `--core` 构造 v3 引擎后端。
 ///
-/// **默认 mitmproxy**：它是产品本体。`fake` 只监听端口、不改写任何流量，
-/// 存在的意义是让"没有 mitmproxy 的机器"也能跑管理器与测试。
-fn build_core(
-    cli: &Cli,
-    config: &ManagerConfig,
-    clock: Arc<dyn ClockPort>,
-) -> Result<Arc<dyn ProxyCore>, Error> {
+/// 默认 engine：进程内纯库引擎，共享 CA 在 confdir 就绪（兼容既有 mitmproxy
+/// 生成的 CA 文件，已装证书的客户端零感知）。fake 是生命周期替身。
+/// v2 的 mitmproxy 子进程核心已随 v3 退场（升级与回滚说明见 CHANGELOG）。
+fn build_engine(cli: &Cli, config: &ManagerConfig) -> Result<Arc<dyn ProxyEngine>, Error> {
     match cli.core.as_str() {
-        "fake" => Ok(Arc::new(FakeCore::new(clock))),
-        _ => Ok(Arc::new(MitmproxyCore::new(
-            MitmproxyCoreConfig {
-                core_bin: cli
-                    .core_bin
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("mitmdump")),
-                python: cli.core_python.clone(),
-                agent_dir: config.agent_dir.clone(),
-                startup_timeout_secs: 30,
-            },
-            clock,
-        )?)),
+        "fake" => Ok(Arc::new(FakeEngine::new())),
+        "engine" => {
+            let (ca, outcome) = SharedCa::load_or_create(&config.confdir)?;
+            if let CaOutcome::Regenerated {
+                fingerprint,
+                reason,
+            } = &outcome
+            {
+                // 重新物化 = 已装证书的客户端需要重装：这条消息必须被看见。
+                eprintln!(
+                    "warning: shared CA was regenerated ({reason}); fingerprint {fingerprint}"
+                );
+                eprintln!(
+                    "warning: clients must reinstall the CA from {}",
+                    config.confdir.display()
+                );
+            }
+            Ok(Arc::new(EngineBackend::new(ca)))
+        }
+        other => Err(Error::invalid_config(
+            "core",
+            format!(
+                "core {other:?} does not exist in v3; use engine (in-process Rust engine) \
+                 or fake (lifecycle stand-in)"
+            ),
+        )),
     }
 }
 
@@ -679,12 +676,6 @@ fn status(manager: &Manager, json: bool) -> Result<(), Error> {
         println!("core        : {} {}", core.name, core.version);
         println!("config      : {}", manager.config());
         println!("environments: {} (running: {running})", views.len());
-        if !capabilities.rewrite_upstream {
-            println!(
-                "note        : this core does NOT rewrite upstream addresses — it only listens. \
-                 Use `--core mitmproxy` for real hosts-rule rewriting"
-            );
-        }
     }
     Ok(())
 }
@@ -921,7 +912,7 @@ fn print_view(view: &EnvView, json: bool) -> Result<(), Error> {
             format!(" [{reason}]")
         }
     );
-    if matches!(view.health, InstanceHealth::Running) {
+    if matches!(view.health, InstanceState::Running) {
         println!("  {}", view.proxy_command);
     }
     if view.rules_missing {

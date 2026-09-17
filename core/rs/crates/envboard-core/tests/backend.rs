@@ -139,7 +139,7 @@ async fn backend_lifecycle_through_the_trait_face() {
     // 热更：hash 由 spec 的哈希（core-api 定义），回执一致、epoch+1。
     let report_before = engine.report(&handle);
     let next = spec(proxy_port, Some("10.9.8.7 other.test"));
-    let hash = engine.apply(&handle, next.clone()).await.unwrap();
+    let hash = engine.apply(&handle, next.clone()).unwrap();
     assert_eq!(hash, sha256::hex(next.hashable_json().as_bytes()));
     let report_after = engine.report(&handle);
     assert_eq!(report_after.config_hash, hash);

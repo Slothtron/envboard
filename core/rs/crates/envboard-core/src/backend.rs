@@ -113,7 +113,7 @@ impl ProxyEngine for EngineBackend {
         Ok(handle)
     }
 
-    async fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error> {
+    fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error> {
         let guard = self.entries.lock().unwrap();
         let entry = guard.get(&handle.env).ok_or_else(|| {
             Error::new(

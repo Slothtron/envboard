@@ -325,6 +325,7 @@ name = "envboard-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "envboard-core",
  "envboard-core-api",
  "envboard-core-fake",
  "envboard-core-mitmproxy",

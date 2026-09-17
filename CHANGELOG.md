@@ -11,6 +11,34 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Changed（v3 重构 M-P4 第二步：manager/web/cli 接线到 ProxyEngine）
+
+- Manager 换依赖面：构造参数从 ProxyCore 九件套变成 ProxyEngine 八件套
+  （**ProcessTable 参数删除**——没有外部进程就没有孤儿清理）。启动 =
+  engine.start + 等待绑定定态（running / port_conflict / failed）；端口冲突
+  的"新建自动重试一次、已持久化只标记"契约原样保留。健康判定统一走
+  verdict（标记 → 期望 → 引擎内存报告），**视图与权威判定同一实现**；
+  EnvView.health 升级为 v3 InstanceState（新增 starting 态；config_mismatch
+  随同步装配消亡）。
+- 进程监督层在管理面的用法全部消失：config.json 通道、固定名规则软链、
+  状态文件物化与 TTL/收敛窗、runtime/agent 目录、/proc 身份、信号梯子。
+  规则绑定改为**账本 rendered 直接进 EngineSpec**（账本唯一真相不变，少了
+  整条文件物化-轮询链）。热更新改为对运行中实例的同步 apply：insecure_hosts、
+  rules 绑定、**规则内容**（import_rules 覆盖即热应用）、description；apply
+  失败留 invalid_config 标记（health_reason 可见"旧快照继续服务"），成功清标记。
+  ProxyEngine::apply 改同步签名（装配即生效没有异步语义；管理面同步入口
+  不再 runtime 套 runtime）。
+- CLI：--core 取值 engine|fake（默认 engine），--core-bin/--core-python 随
+  mitmproxy 退场删除；共享 CA 在 confdir 就绪（兼容既有 mitmproxy CA），
+  重新物化时向 stderr 响亮警告"客户端需重装证书"。
+- 产物门禁翻档：删除"二进制内嵌注入器"断言（include_str 链已断），改为
+  断言 v3 进程内引擎簿记标记在场；注入器文件自检保留至 adapters 退场（M-P6）。
+- **v2 测试暂存（断言不减，搬家不丢弃）**：manager_lifecycle.rs（29 条）与
+  core-mitmproxy 的 live_manager.rs（3 条）改名为 *.pending-migration 暂存
+  ——它们断言的机制（状态文件新鲜度/config 哈希回显/收敛窗/软链完整性/
+  mitmdump 子进程）在 v3 已不存在。M-P5 逐条按 v3 语义重实现（引擎直驱、
+  注入状态替代崩溃、epoch/hash 回执替代文件比对），清单即这两份文件本身。
+
 ### Added（v3 重构 M-P4 第一步：ProxyEngine 接缝与双实现）
 
 - core-api 新增 v3 引擎接缝（engine 模块）：EngineSpec（监听/名单/凭据/规则文本/

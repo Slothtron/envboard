@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 envboard-core-api.workspace = true
 envboard-core-fake.workspace = true
+envboard-core.workspace = true
 envboard-domain.workspace = true
 envboard-manager.workspace = true
 envboard-core-mitmproxy.workspace = true
