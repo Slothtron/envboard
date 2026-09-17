@@ -26,6 +26,11 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 - **query token 端到端是测试盲区**：live 的 api() helper 一直用 header 通道，
   "URL 携带 token"这条浏览器唯一路径从未被断言覆盖。补 api_query helper 并把
   11a 扩成 header 与 query 双通道断言（实机验证 query 200 ✓）。
+- **新增内嵌资产完整性门禁**（本轮修复过程自己的事故换来的）：app.js 曾被
+  "读截断 + 写回"弄丢尾部并随 release 部署出去——JS 没有任何编译期检查，默认层
+  全绿而页面卡死。artifact 门禁现在钉住 app.js 最小行数与关键符号（envboardReady/
+  renderDetail/refreshAll/addEventListener）、index.html 关键 id；已负向验证
+  （截断必红、恢复转绿）。
 ### Removed（v3 重构 M-P6：收尾退场，v2 面清零）
 
 - **全部 Python 产品代码退场**：`adapters/mitmproxy/`（注入器）、

@@ -109,6 +109,37 @@ fn the_release_artifact_contains_only_expected_files() {
         }
     }
 
+    // 内嵌资产没有编译期检查 —— 最阴险的坏法是"截断"：头部完好、尾部消失，
+    // 页面白屏或卡死却处处绿灯。钉住两端：最小规模 + 关键符号在场。
+    let app_js = std::fs::read_to_string(root.join("core/rs/crates/envboard-web/assets/app.js"))
+        .expect("内嵌的 app.js 必须存在");
+    if app_js.lines().count() < 1_800 {
+        problems.push(format!(
+            "app.js 只剩 {} 行 —— 疑似截断（基线 2000+ 行）",
+            app_js.lines().count()
+        ));
+    }
+    for marker in [
+        "envboardReady",
+        "function renderDetail(",
+        "refreshAll",
+        "addEventListener",
+    ] {
+        if !app_js.contains(marker) {
+            problems.push(format!("app.js 缺关键符号 {marker:?} —— 被截断或改写了？"));
+        }
+    }
+    let index_html =
+        std::fs::read_to_string(root.join("core/rs/crates/envboard-web/assets/index.html"))
+            .expect("内嵌的 index.html 必须存在");
+    for id in ["env-form", "detail-actions", "panel-config"] {
+        if !index_html.contains(id) {
+            problems.push(format!(
+                "index.html 缺 id {id:?} —— 前端结构变了，门禁与契约要一起更新"
+            ));
+        }
+    }
+
     if !problems.is_empty() {
         println!("artifact FAILED ({} problem(s)):", problems.len());
         for problem in &problems {
