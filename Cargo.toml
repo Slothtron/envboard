@@ -10,7 +10,7 @@ resolver = "3"
 members = ["core/rs/crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
@@ -23,7 +23,6 @@ envboard-rules = { path = "core/rs/crates/envboard-rules" }
 envboard-core-fake = { path = "core/rs/crates/envboard-core-fake" }
 envboard-core = { path = "core/rs/crates/envboard-core" }
 envboard-manager = { path = "core/rs/crates/envboard-manager" }
-envboard-core-mitmproxy = { path = "core/rs/crates/envboard-core-mitmproxy" }
 envboard-web = { path = "core/rs/crates/envboard-web" }
 
 # 外部依赖：版本写在这里，成员一律 `workspace = true`。
@@ -40,7 +39,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-# 成员可以再追加 features（见 envboard-core-mitmproxy 的 `process`）
+# 成员可以再追加 features（如 envboard-core 给 rustls 追加 ring/std）。
 clap = { version = "4.6.6", features = ["derive"] }
 # 只被工程门禁用来解析各 crate 的 Cargo.toml（依赖方向、发布标识）；产品代码不用它。
 toml = "1.1.4"

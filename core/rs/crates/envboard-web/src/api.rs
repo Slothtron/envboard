@@ -315,7 +315,9 @@ async fn api_status(State(state): State<AppState>) -> Response {
                 "listen": capabilities.listen,
                 "dynamic_certs": capabilities.dynamic_certs,
                 "rewrite_upstream": capabilities.rewrite_upstream,
-                "external_processes": capabilities.external_processes,
+                "per_domain_insecure": capabilities.per_domain_insecure,
+                "shared_ca": capabilities.shared_ca,
+                "http1_only": capabilities.http1_only,
             },
             "config": {
                 "state_dir": manager.config().state_dir.display().to_string(),

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use envboard_core_api::{Error, ProcessIdentity};
+use envboard_core_api::Error;
 
 /// 判断某个地址的端口是否空闲。
 ///
@@ -30,16 +30,6 @@ pub trait PortProbe: Send + Sync {
             .collect()
     }
 }
-
-/// 进程表：孤儿清理与"实例是否还活着"的判据来源。
-pub trait ProcessTable: Send + Sync {
-    /// 读取某个 pid 的身份（启动时刻 + cmdline）。进程不在则 `None`。
-    fn identity(&self, pid: i32) -> Option<ProcessIdentity>;
-
-    /// 杀掉一个**已经确认过身份**的进程：先温和，超时再强杀。
-    fn terminate(&self, identity: &ProcessIdentity) -> Result<(), Error>;
-}
-
 /// 状态存储。实现负责原子写与权限（0600）。
 pub trait StateRepo: Send + Sync {
     fn load(&self) -> Result<crate::state::PersistedState, Error>;
@@ -78,44 +68,6 @@ impl PortProbe for MemoryPortProbe {
         !self.occupied.contains(&port)
     }
 }
-
-/// 内存进程表：显式声明"哪些进程活着"，用于精确构造 PID 复用场景。
-#[derive(Debug, Default, Clone)]
-pub struct MemoryProcessTable {
-    alive: Vec<ProcessIdentity>,
-    terminated: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
-}
-
-impl MemoryProcessTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_alive(mut self, identities: impl IntoIterator<Item = ProcessIdentity>) -> Self {
-        self.alive = identities.into_iter().collect();
-        self
-    }
-
-    /// 被要求终止的 pid（断言"没杀不该杀的进程"用）。
-    pub fn terminated(&self) -> Vec<i32> {
-        self.terminated.lock().unwrap().clone()
-    }
-}
-
-impl ProcessTable for MemoryProcessTable {
-    fn identity(&self, pid: i32) -> Option<ProcessIdentity> {
-        self.alive
-            .iter()
-            .find(|identity| identity.pid == pid)
-            .cloned()
-    }
-
-    fn terminate(&self, identity: &ProcessIdentity) -> Result<(), Error> {
-        self.terminated.lock().unwrap().push(identity.pid);
-        Ok(())
-    }
-}
-
 /// 内存状态存储。
 #[derive(Debug, Default)]
 pub struct MemoryStateRepo {

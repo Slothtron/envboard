@@ -3,8 +3,7 @@
 //! 与 v2 抽象（同目录 proxy 模块）的根本差别：**实例在进程内**。
 //! 因此这里没有 PID、没有状态文件、没有 argv 凭据通道、没有收敛窗口 ——
 //! 健康判定是内存读，热更新是同步换快照，退出原因就在报告里。
-//! v2 的 ProxyCore 面在迁移期继续存在（Fake 与旧 live 测试仍在用），
-//! 随管理面接线完成后整体退场。
+//! v2 的 ProxyCore 面已随 v3 重构整体退场：这里就是编排层认识的全部。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,7 +143,7 @@ pub trait ProxyEngine: Send + Sync {
     /// 内存读健康（同步：视图层因此不需要 await 引擎）。
     fn report(&self, handle: &EngineHandle) -> EngineReport;
 
-    /// 故障注入旋钮（live 断言与集成测试用；对齐 v2 FakeCore 的 StatusMode 先例）：
+    /// 故障注入旋钮（live 断言与集成测试用）：
     /// 把已登记实例置为 failed 并释放监听 —— 与"引擎线程 panic 后运行时散掉、
     /// socket 关闭"同构。返回 false = 该实现不支持注入（调用方不得假装成功）。
     /// 生产路径没有任何入口调它；它存在的唯一目的是让"实例崩溃可见、可回收、

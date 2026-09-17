@@ -3,7 +3,7 @@
 //! 当前阶段的内容是**共享 CA 与 TLS 接线**：加载/物化 mitmproxy 兼容的 confdir
 //! CA、按 SNI 现签叶子证书并缓存、产出 MITM 服务侧与上游严格校验客户侧的 rustls
 //! 配置。数据面（CONNECT、HTTP/1.1、鉴权门）、ConnectTarget 与插件管道按
-//! core/spec/capabilities.md 的「ProxyCore 能力矩阵」逐阶段补齐。
+//! core/spec/capabilities.md 的「引擎能力矩阵」。
 //!
 //! 依赖纪律：本 crate 是库，不依赖 axum/web 层；外部世界只经参数注入的路径与
 //! 标准网络类型（端口语义由 manager 接线时再收口）。

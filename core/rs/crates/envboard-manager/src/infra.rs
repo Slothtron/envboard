@@ -6,11 +6,11 @@
 
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use envboard_core_api::{ClockPort, Error, ErrorCode, LogLevel, LoggerPort, ProcessIdentity};
+use envboard_core_api::{ClockPort, Error, ErrorCode, LogLevel, LoggerPort};
 
-use crate::ports::{FilePort, PortProbe, ProcessTable};
+use crate::ports::{FilePort, PortProbe};
 
 /// 用"试绑"判断端口是否空闲。
 ///
@@ -75,84 +75,6 @@ impl FilePort for RealFiles {
         })
     }
 }
-
-/// Linux `/proc` 进程表 —— 孤儿清理的判据来源。
-///
-/// `ProcessIdentity` 里带**启动时刻**不是装饰：cmdline 对同一份配置的实例完全相同，
-/// 只比 PID + cmdline 会在 PID 复用后误杀无关进程。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ProcfsProcessTable;
-
-impl ProcfsProcessTable {
-    /// `/proc/<pid>/stat` 的第 3 个字段（state）与第 22 个字段（starttime，单位 jiffies）。
-    ///
-    /// 解析要小心：第 2 个字段是 `(comm)`，**comm 里可以含空格与括号**，
-    /// 所以必须从**最后一个** `)` 之后开始数字段。
-    fn stat_fields(pid: i32) -> Option<(char, u64)> {
-        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let after_comm = &raw[raw.rfind(')')? + 1..];
-        let mut fields = after_comm.split_whitespace();
-        // `)` 之后的第 1 项是 state（整体第 3 个字段），剩下的从 ppid（整体第 4 个）开始，
-        // 因此 starttime 的偏移是 22 - 4。
-        let state = fields.next()?.chars().next()?;
-        let starttime = fields.nth(18)?.parse().ok()?;
-        Some((state, starttime))
-    }
-
-    fn cmdline(pid: i32) -> Vec<String> {
-        let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-            return Vec::new();
-        };
-        raw.split(|byte| *byte == 0)
-            .filter(|chunk| !chunk.is_empty())
-            .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-            .collect()
-    }
-}
-
-impl ProcessTable for ProcfsProcessTable {
-    fn identity(&self, pid: i32) -> Option<ProcessIdentity> {
-        let (state, starttime) = Self::stat_fields(pid)?;
-        // 僵尸（Z）与正在消亡（X/x）**不算活着**：它们的 /proc 条目还在、starttime 也没变，
-        // 只看这两个量会把一个已经死掉、只等父进程回收的实例判成"在跑"。
-        // 实测：`kill -9` 掉实例后工作台会一直报 health=running（见 core/spec/capabilities.md）。
-        if matches!(state, 'Z' | 'X' | 'x') {
-            return None;
-        }
-        Some(ProcessIdentity {
-            pid,
-            starttime,
-            cmdline: Self::cmdline(pid),
-        })
-    }
-
-    fn terminate(&self, identity: &ProcessIdentity) -> Result<(), Error> {
-        // 先温和。调用方应当把它放在 spawn_blocking 里 —— 这里会短暂阻塞。
-        //
-        // SAFETY: `kill` 只读取入参；pid 来自调用方，且调用方已用
-        // `identity()` 校验过（PID + 启动时刻 + cmdline 三者匹配）才走到这里。
-        unsafe { libc::kill(identity.pid, libc::SIGTERM) };
-
-        for _ in 0..40 {
-            std::thread::sleep(Duration::from_millis(50));
-            if self.identity(identity.pid).as_ref() != Some(identity) {
-                return Ok(());
-            }
-        }
-
-        // SAFETY: 同上。到这一步已经等满 2 秒，退化成强杀。
-        unsafe { libc::kill(identity.pid, libc::SIGKILL) };
-        std::thread::sleep(Duration::from_millis(50));
-        if self.identity(identity.pid).as_ref() == Some(identity) {
-            return Err(Error::new(
-                ErrorCode::InternalError,
-                format!("process {} survived SIGKILL", identity.pid),
-            ));
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,74 +105,5 @@ mod tests {
             "a wildcard listener must make the specific-address probe fail"
         );
         drop(wildcard);
-    }
-
-    #[test]
-    fn current_process_has_an_identity() {
-        let table = ProcfsProcessTable;
-        let identity = table
-            .identity(std::process::id() as i32)
-            .expect("self must be readable");
-        assert_eq!(identity.pid, std::process::id() as i32);
-        assert!(identity.starttime > 0);
-        assert!(!identity.cmdline.is_empty());
-    }
-
-    #[test]
-    fn unknown_pid_has_no_identity() {
-        // pid 上限之外的值必然不存在
-        assert!(ProcfsProcessTable.identity(i32::MAX).is_none());
-    }
-
-    #[test]
-    fn a_zombie_is_not_alive() {
-        // 故意**不** wait()：子进程退出后成为僵尸，/proc 条目仍在且 starttime 未变。
-        // 只看 pid + starttime 的判活会把这种情况误判成"在跑"，所以这里锁住状态位判据。
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .spawn()
-            .expect("spawn sh");
-        let pid = child.id() as i32;
-        std::thread::sleep(Duration::from_millis(500));
-
-        assert!(
-            ProcfsProcessTable.identity(pid).is_none(),
-            "a zombie must not be reported as a live process"
-        );
-        // 证明它确实只是僵尸（而不是被回收/根本没起来）
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("zombie has /proc");
-        let after_comm = &stat[stat.rfind(')').expect("comm") + 1..];
-        assert_eq!(
-            after_comm.split_whitespace().next(),
-            Some("Z"),
-            "the child should still be a zombie here"
-        );
-
-        let _ = child.wait();
-    }
-
-    #[test]
-    fn a_live_process_has_an_identity() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("5")
-            .spawn()
-            .expect("spawn sleep");
-        let pid = child.id() as i32;
-        std::thread::sleep(Duration::from_millis(200));
-
-        let identity = ProcfsProcessTable
-            .identity(pid)
-            .expect("a running process must have an identity");
-        assert_eq!(identity.pid, pid);
-        assert!(identity.starttime > 0);
-        assert!(
-            identity.cmdline.iter().any(|arg| arg == "sleep"),
-            "cmdline should be readable for a live process: {:?}",
-            identity.cmdline
-        );
-
-        let _ = child.kill();
-        let _ = child.wait();
     }
 }

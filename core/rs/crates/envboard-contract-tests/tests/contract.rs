@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use envboard_core_api::{ErrorCode, InstanceHealth};
+use envboard_core_api::{ErrorCode, InstanceState};
 use envboard_domain::{
     Desired, Environment, InstanceRecord, PortRequest, candidate_ports, occupancy_from,
     plan_reconcile, select_port,
@@ -456,17 +456,17 @@ fn every_fixture_pins_the_contract_shape() {
 }
 
 #[test]
-fn manager_can_run_without_any_mitmproxy() {
-    // 一条"架构成立与否"的断言：管理器与它的端口抽象、错误码、状态契约
-    // 完全不依赖具体 core。这里只引用类型，证明编译期就不需要 mitmproxy。
+fn the_orchestration_surface_is_core_neutral() {
+    // 一条"架构成立与否"的断言：管理器的端口抽象、错误码、状态词汇与
+    // 能力表完全不依赖任何具体引擎实现 —— 只引用类型，证明编译期独立性。
     let capabilities = envboard_core_api::CoreCapabilities {
         listen: true,
-        external_processes: true,
+        http1_only: true,
         ..Default::default()
     };
     assert!(capabilities.listen);
     assert_eq!(ErrorCode::PortConflict.as_str(), "port_conflict");
-    assert_eq!(InstanceHealth::Stopped.as_str(), "stopped");
+    assert_eq!(InstanceState::Stopped.as_str(), "stopped");
     let candidates = candidate_ports((16_000, 16_002), &BTreeSet::new(), 7);
     assert_eq!(candidates.len(), 3);
     let _: BTreeMap<String, String> = BTreeMap::new();

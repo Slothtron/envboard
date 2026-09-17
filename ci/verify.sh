@@ -11,14 +11,12 @@
 #   rust     fmt / clippy / check / build / test —— 纯 Rust
 #   contract 契约 fixture 的形状与消费
 #   artifact 发布物与产物纪律
-#   adapter  宿主适配器层（对拍、冒烟）—— 这一层要适配器宿主解释器
-#   live     真 mitmdump + 真网络，默认**不在** all 里
+#   live     实机层（真网络、真进程起停；仅需 openssl/curl），默认**不在** all 里
 #
 # 用法：
-#   bash ci/verify.sh            # 默认层：policy + rust + contract + artifact + adapter
-#   bash ci/verify.sh rust       # 纯 Rust 子集（policy + rust；迁移期仍需要解释器）
+#   bash ci/verify.sh            # 默认层：policy + rust + contract + artifact
+#   bash ci/verify.sh rust       # 纯 Rust 子集（policy + rust）
 #   bash ci/verify.sh live       # 实机层（需要宿主）
-#   PYTHON=... bash ci/verify.sh # 指定适配器宿主的解释器（转发为 ENVBOARD_PYTHON）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,21 +26,6 @@ cd "$ROOT"
 #   --locked   Cargo.lock 必须与 manifest 一致（可复现构建的前提）
 #   --offline  "离线可构建"是验收项；依赖因此必须克制
 LOCKED=(--locked --offline)
-
-# 适配器宿主的解释器。**只用于跑适配器脚本**，探测不到时由 require_interpreter 响亮失败。
-#
-# 探测不到时把变量**赋成空串**而不是留着不定义：`set -u` 下未定义会让 `"$PYTHON" …`
-# 以 "unbound variable" 直接终止整个脚本（实测踩过：默认层跑到 artifact 就没了下文，
-# 连"缺解释器"这句话都来不及打）。空串只会让那一步失败，`run` 照旧继续往下走。
-PYTHON="${PYTHON:-}"
-if [[ -z "$PYTHON" ]]; then
-  if command -v python3 >/dev/null 2>&1; then
-    PYTHON=python3
-  elif command -v python >/dev/null 2>&1; then
-    PYTHON=python
-  fi
-fi
-export PYTHONDONTWRITEBYTECODE=1
 
 STEP="${1:-all}"
 FAILED=0
@@ -60,19 +43,6 @@ run() {
 }
 
 # 缺解释器**响亮失败**，并给出两条出路；不静默跳过（跳过等于护栏消失）。
-require_interpreter() {
-  if [[ -n "$PYTHON" ]]; then
-    return 0
-  fi
-  echo ""
-  echo "!!! 这一层需要一个 Python 解释器来跑宿主适配器脚本，但 PATH 上没有 python3 / python。"
-  echo "    两条出路："
-  echo "      1) 装适配器宿主（mitmproxy 自带一个解释器），或用 PYTHON=<路径> 指定；"
-  echo "      2) 跑不吃解释器的子集：bash ci/verify.sh rust"
-  FAILED=1
-  return 1
-}
-
 # --------------------------------------------------------------------------- #
 # policy 层：仓库纪律
 # --------------------------------------------------------------------------- #
@@ -119,23 +89,7 @@ step_artifact() {
 }
 
 # --------------------------------------------------------------------------- #
-# adapter 层：宿主适配器（对拍 + 冒烟）
-#
-# 对拍是两份 hosts 解析实现（Rust 与注入器）一致性的唯一护栏，所以它留在默认层；
-# 它需要解释器，而且解释器缺失时要**响亮失败**，不静默跳过。
-# --------------------------------------------------------------------------- #
-
-# 把本脚本探测到的解释器**转发**给对拍测试（`ENVBOARD_PYTHON` 是那个测试认的开关），
-# 这样 `PYTHON=<路径> bash ci/verify.sh` 一个旋钮就同时管住探测与测试。
-step_dual() { ENVBOARD_PYTHON="$PYTHON" cargo test -p envboard-rules --test dual_impl "${LOCKED[@]}" -- --ignored; }
-
-step_adapter() {
-  require_interpreter || return 0
-  run "adapter/dual" step_dual
-}
-
-# --------------------------------------------------------------------------- #
-# live 层：真宿主（真 mitmdump + 真网络）。默认**不进 all**。
+# live 层：真宿主（真网络、真进程起停；仅需 openssl/curl）。默认**不进 all**。
 # --------------------------------------------------------------------------- #
 
 step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-cli --test live_workbench -- --ignored --nocapture; }
@@ -149,16 +103,15 @@ step_live() {
 }
 
 case "$STEP" in
-  all)      step_policy; step_rust; step_contract; step_artifact; step_adapter ;;
+  all)      step_policy; step_rust; step_contract; step_artifact ;;
   policy)   step_policy ;;
   rust)     step_policy; step_rust ;;
   contract) step_contract ;;
   artifact) step_artifact ;;
-  adapter)  step_adapter ;;
   live)     step_live ;;
   *)
     echo "unknown step: $STEP" >&2
-    echo "可选：all（默认）/ policy / rust / contract / artifact / adapter / live" >&2
+    echo "可选：all（默认）/ policy / rust / contract / artifact / live" >&2
     exit 2
     ;;
 esac

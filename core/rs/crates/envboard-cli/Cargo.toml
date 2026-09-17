@@ -20,7 +20,6 @@ envboard-core-fake.workspace = true
 envboard-core.workspace = true
 envboard-domain.workspace = true
 envboard-manager.workspace = true
-envboard-core-mitmproxy.workspace = true
 envboard-web.workspace = true
 clap.workspace = true
 serde_json.workspace = true

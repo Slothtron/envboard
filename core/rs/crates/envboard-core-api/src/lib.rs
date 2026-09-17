@@ -16,9 +16,5 @@ pub use ports::{
     ClockPort, FixedClock, LineWriter, LogLevel, LoggerPort, ManualClock, NullLineWriter,
     NullLogger,
 };
-pub use proxy::{
-    CONFIG_FILE_NAME, CoreCapabilities, CoreInfo, DEFAULT_LISTEN_HOST, InstanceHandle,
-    InstanceHealth, InstanceSpec, Listen, ProcessIdentity, ProxyCore, RULES_LINK_NAME,
-    StatusReport, redact_cmdline,
-};
+pub use proxy::{CoreCapabilities, CoreInfo, DEFAULT_LISTEN_HOST, Listen};
 pub use text::{is_ip_literal, parse_ip_literal, strip_brackets};

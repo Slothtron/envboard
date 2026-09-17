@@ -1,11 +1,10 @@
 //! FakeEngine：v3 ProxyEngine 的测试替身。
 //!
-//! 与 v2 FakeCore 的分工一致，但形态对齐 v3：**只维护内存里的生命周期事实**。
+//! **只维护内存里的生命周期事实**。
 //! 它真的绑定端口（port_conflict 是实测的，不是编造的），不代理任何流量；
 //! 故障注入用旋钮直写报告（live 断言里"实例崩溃"类用例从 SIGKILL 改到这里，
 //! 是契约迁移的一部分）。
 //!
-//! 迁移期与 v2 的 FakeCore 并存；Manager 接线到 ProxyEngine 后 FakeCore 退场。
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

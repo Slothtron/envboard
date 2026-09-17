@@ -1,100 +1,49 @@
-# envboard 用户级 systemd 服务 —— 常驻管理器 + 工作台。
+# envboard 工作台的用户级服务单元（v3）。
 #
-# 装法（不需要 root）：
+# 装法（不需要 root；产物是单一二进制，cargo build --release --locked 后取
+# target/release/envboard，或 cargo install --path core/rs/crates/envboard-cli）：
 #   install -Dm755 target/release/envboard ~/.local/bin/envboard
 #   install -Dm644 scripts/systemd/envboard.service ~/.config/systemd/user/envboard.service
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now envboard
-#   systemctl --user status envboard
 #
-# 状态目录是 `~/.local/state/envboard`（由 systemd 创建，0700）。命令行想操作**同一批**
-# 环境就带上它 —— 或者把它设成默认值，省得每次敲：
-#   export ENVBOARD_STATE_DIR=$HOME/.local/state/envboard
-#   envboard env list        # 会自动发现服务写的 runtime/api.json，走瘦客户端
+# v3 的形态：envboard 是**单个进程** —— 管理器、引擎实例（每环境一个线程 +
+# 一个监听）与工作台 HTTP 面都在这一个进程里。没有子进程、没有第二运行时：
+#   * cgroup 里看到的就是全部；停服务 = 停工作台 = 停所有实例（引擎随进程一起
+#     退出，端口即刻释放，不存在"孤儿代理"）；
+#   * 崩溃隔离是任务级的（请求任务 panic 只死那一条连接）；引擎线程 panic 会
+#     把该实例记为 failed，reconcile 按期望状态自动重拉 —— 因此 release 构建
+#     必须保持 panic=unwind（禁止 abort），这条写在 core/spec/capabilities.md
+#     的「实例生命周期」，是构建契约不是实现细节。
 #
-# 为什么是**用户级**而不是系统级：
-#   * envboard 只监听回环（工作台默认 127.0.0.1:8900），实例是当前用户的 mitmdump
-#     子进程，状态目录在 $HOME 下 —— 没有一处需要 root；
-#   * 系统级服务会把"某个用户的代理"变成系统共享件，权限面只增不减。
-#   * 想在**没有登录会话**时也活着：`loginctl enable-linger $USER`（本机已是 yes）。
-#
-# 只想让环境常驻、不要工作台 UI 时，把 ExecStart 换成文件末尾注释里的 headless 变体。
+# 只监听回环。要让别的机器用，见 README 的「工作台鉴权与对外暴露」：显式改监听
+# 地址 + 开代理鉴权 + 保留 dashboard token，不要裸奔。
 
 [Unit]
-Description=envboard — 多环境代理管理器与工作台
-# 只监听回环，不需要等网络就绪。用 network.target 足够；**不要**用
-# network-online.target —— 那会让启动去等 DHCP/连接就绪，而这个服务根本不需要。
-After=network.target
-# 拿不到状态锁（conflict）时不要无限重启：那说明另一个 envboard 进程在写状态
-# （手动跑的 CLI，或另一个工作台），重启再多次也没用 —— 停下来让人看见。
-StartLimitIntervalSec=60
-StartLimitBurst=3
+Description=envboard — 多环境代理管理器与工作台（进程内 Rust 引擎）
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-# 为什么 ExecStart 里全是**绝对路径**：
-#   * 二进制：systemd 的默认 PATH 不含 `~/.local/bin`，写裸命令名会 "No such file"；
-#   * `--core-bin`：同理。裸 `mitmdump` 在服务里解析不到（本机它是 uv tool 的 shim），
-#     而给绝对路径还有个附带好处 —— 管理器能从它的 shebang 推出 core.python
-#     （本机是 `~/.local/share/uv/tools/mitmproxy/bin/python`）。
+# 绝对路径：systemd 用户服务不继承交互 shell 的 PATH。
 ExecStart=%h/.local/bin/envboard \
-    --state-dir %S/envboard \
-    --core-bin %h/.local/bin/mitmdump \
+    --state-dir %h/.envboard \
     web --listen 127.0.0.1:8900
-
-# 期望状态优先：重启后 reconcile 会把 `desired=running` 的环境重新拉起来，
-# 所以 `always` 是安全的（手动 stop 不会被当成"失败"再拉起来）。
-Restart=always
+Restart=on-failure
 RestartSec=2
-
-# 实例（mitmdump）与主进程在同一个 cgroup 里：
-#   * 主进程退出时，实例靠 PR_SET_PDEATHSIG 一起走；
-#   * 万一有漏网的，systemd 在 TimeoutStopSec 之后对整个 cgroup 补 SIGKILL。
-# **不要**用 KillMode=process —— 那会留下孤儿实例继续占着端口。
-KillMode=mixed
-TimeoutStopSec=20
-
-# 代理的连接数可以很高，而 systemd 默认的 soft limit 常常只有 1024。
-LimitNOFILE=8192
-
-SyslogIdentifier=envboard
+# 状态目录私有（实例日志、规则账本、CA 私钥都在里面），权限从 0700 起步。
+RuntimeDirectory=envboard
+NoNewPrivileges=true
+# 签证书与放宽名单都是库内行为，不需要任何特权位。
+ProtectSystem=full
+ProtectControlGroups=true
+# 引擎自己的运行日志进 journald；代理流水在 <state-dir>/logs/<env>.log，两轨互不干扰。
 StandardOutput=journal
 StandardError=journal
 
-# ---- 收敛面（保持克制：出问题先怀疑这几行，而不是先给它 root）----
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=read-only
-# 状态目录交给 systemd 建（`%S/envboard` = `~/.local/state/envboard`）：
-#   * 上面几条把整个文件系统挂成只读，唯一要写的地方就是这个目录；
-#   * 而 `ReadWritePaths=` 要求在**挂载命名空间建立时**该路径已存在 —— 首次安装时
-#     它并不存在，服务会以 `status=226/NAMESPACE` 启动失败（实测踩到）。
-#     `StateDirectory=` 由 systemd 负责创建，正好绕开这个先有鸡还是先有蛋；
-#   * 权限收成 0700：状态目录里有共享 CA 的**私钥**。
-StateDirectory=envboard
-StateDirectoryMode=0700
-# 新建文件一律收紧（状态文件/日志/CA 都不给同机其他用户看）。
-UMask=0077
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictSUIDSGID=yes
-# **不加** SystemCallFilter：实例是 Python（mitmproxy）进程，系统调用面很宽，
-# 收紧它换来的安全性远小于"某个调用被拦掉后实例起不来"的排查成本。
-# 需要单独的覆盖时用 drop-in：`systemctl --user edit envboard`（保持本文件原样）。
-
 [Install]
-# 用户级服务的启动目标是 default.target（不是系统的 multi-user.target）。
 WantedBy=default.target
 
-# --------------------------------------------------------------------------- #
-# headless 变体（不要 UI，只要"环境常驻 + 健康刷新"）—— 替换上面的 ExecStart：
-#
-#   ExecStart=%h/.local/bin/envboard \
-#       --state-dir %S/envboard \
-#       --core-bin %h/.local/bin/mitmdump \
-#       run
-#
-# 两者的差别：`web` 额外起工作台的 HTTP + SSE（<state_dir>/runtime/api.json 会被写下，
-# 于是命令行 `envboard env list` 自动走瘦客户端）；`run` 只有管理器与实例。
-# 一个 unit 只能有一条 ExecStart（Type=simple），所以二选一 —— 不要两条都留。
-# --------------------------------------------------------------------------- #
+# 无界面常驻（只要引擎在线、不要工作台 HTTP 面）的变体：
+#   ExecStart=%h/.local/bin/envboard --state-dir %h/.envboard run --interval 5

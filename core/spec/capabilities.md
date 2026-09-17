@@ -290,36 +290,25 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
   - 引擎线程终止后**不会留活口**：实例随线程消失，不存在 v2 的"孤儿清理"面；
     升级说明负责一次性清掉 v2 遗留的 mitmdump 进程。
 
-## 实例日志（`instance.logs`）
+## 实例日志（instance.logs）
 
-代理核心是**外部进程**，它的 stdout/stderr 归管理器管。这里有一条硬约束：
+引擎在管理进程的**进程内**；日志链路的硬约束不变，载体换了：
 
-- **绝不能让子进程阻塞在写日志上**。管道容量是 64 KiB（本机实测 `F_GETPIPE_SZ`），
-  而 mitmproxy 默认详细度约 307 字节/请求 → **约 213 个请求就能写满**；写满之后子进程会
-  阻塞在自己的事件循环里，**所有客户端一起挂住**（不是"日志丢了"，而是代理停止服务）。
-  实测：不读管道时第 212 个请求开始失败，读走 65116 字节后下一个请求立刻恢复 200。
-- **默认形态是文件直写**：子进程的 stdout/stderr 直接接 `<state_dir>/logs/<env>.log`
-  （`log_dir`，可用 `--log-dir` 改，`--no-log-file` 关掉）。内核负责写盘，我们进程
-  **不在链路上**，所以上面那条路径从设计上不存在。
-  - 每次启动写一行运行标记（`--- envboard: env=… listen=… started=… ---`），追加而非截断：
-    跨重启的历史要留着，标记负责分段；
-  - `PYTHONUNBUFFERED=1` 在两种形态下都必须设：Python 对**非 TTY 的管道与文件都是块缓冲**，
-    不设这个变量，日志会攒到几 KB 才吐一次，工作台长期读到空；
-  - `log_dir = None`（`--no-log-file`）时退回"管道 + 内存有界环形缓冲"。这条路径
-    **必须**持续把管道读走，且要防三件事：单行长度无上限会吃光内存；写盘是阻塞调用，
-    不得压在 async worker 上；锁中毒不得 `unwrap()` —— 一个读线程 panic 会连带把另一个
-    也弄死，管道就再没人读了。
-- **体积必须封顶**：`max_log_bytes`（默认 8 MiB；`0` = 不轮转；下限 64 KiB，低于它等于
-  静默丢日志）。轮转**只能是 copytruncate**：把尾部搬去 `<env>.log.1`，再把原文件截断为 0。
-  - **禁止用 rename 轮转**：子进程还持着这个 inode 的 fd 在写，改名之后它会继续写那个
-    已经被移走的文件，新文件永远是空的。
-- **读尾部必须是有界的**：只从文件末尾读一个窗口（256 KiB）再切行，并允许跨 `.1`
-  往前拼；**禁止**整个文件 `read_to_string`（日志一大就会把管理器拖住）。
-- 实例崩溃或被停止之后日志**仍然可读**：崩溃现场正是最需要日志的时刻。
-- 日志文件按**环境名**命名，所以改名会让新名字从新文件开始写（旧文件留在原处，
-  历史不丢、也不合并）—— 改名是"搬迁环境"，不是"搬迁它的输出"。
-- 检查/轮转的触发点：实例启动前一次，加上常驻循环（工作台 30 秒、`run` 每次刷新）
-  一次；都是"每环境一次 `stat`"，只有超上限才真正动手。
+- **数据面永不阻塞在写日志上**。v2 的实测教训（64 KiB 管道写满 → 子进程事件循环挂住 →
+  所有客户端一起停服，约 213 个请求即可复现）是这条约束存在的理由；v3 从结构上排除：
+  request-log 插件在 log 阶段把单行摘要投递进**有界总线**（容量 1024 行），投递是
+  try_send —— 满了就地**丢弃并计数**（EngineReport.log_drops 可见），专用泵线程把行落盘。
+  请求路径上没有管道、没有同步磁盘 IO。
+- **文件形态**：每环境一份 <log_dir>/<env>.log（默认 <state_dir>/logs，--log-dir 可改，
+  --no-log-file 关闭）。每次启动写一行运行标记，追加不截断 —— 跨重启的历史要留着，
+  标记负责分段。
+- **体积必须封顶**：max_log_bytes（默认 8 MiB；0 = 不轮转；下限 64 KiB，低于它等于静默
+  丢日志）。轮转**只能是 copytruncate**：尾部搬去 <env>.log.1，原文件截断为 0。
+  **禁止 rename 轮转** —— 写方还持着旧 inode 的 fd，改名后新文件永远是空的。
+- **读尾部必须是有界的**：只从文件末尾读一个窗口（256 KiB）再切行，允许跨 .1；
+  API 的 /logs?lines=N 靠它，不给"整文件读进内存"留路径。
+- **行内容由 request-log 插件定义**（单行、机器可扫）：时间、方法、host+path、状态码、
+  请求/响应字节、耗时，附"改写命中 / 证书放宽 / 错误"的标记。
 
 ## v3 插件与能力注册表（envboard-core）
 
@@ -335,7 +324,7 @@ id 是装配错误。
 | kernel:listen | kernel | startup | — | listen.host/port；绑定即真相，EADDRINUSE → port_conflict（不换端口、不试绑） |
 | kernel:proxy-auth | kernel | startup | — | proxy_user/proxy_password 的 407 门；凭据只在内存，定长时间比对 |
 | kernel:tls-policy | kernel | connect | — | insecure_hosts → ConnectTarget.tls_policy 两档；无全局关校验 |
-| kernel:mitm-ca | kernel | startup | — | confdir 共享 CA 的加载/物化（已装客户端零感知判据见代码与 ProxyCore 矩阵） |
+| kernel:mitm-ca | kernel | startup | — | confdir 共享 CA 的加载/物化（已装客户端零感知判据见代码与「引擎能力矩阵」） |
 | kernel:protocol | kernel | request | — | HTTP/1.1 协议面与引擎侧超时常量；101 透传 |
 | hosts-rules | builtin | connect | — | 消费环境 rules 字段（hosts 文本）；只改 resolved_addr |
 | request-log | builtin | log | — | 默认启用；终局记录写日志通道；on_error = bypass |

@@ -4,12 +4,37 @@ All notable changes to `slothtron-envboard` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-17
 
 v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多环境管理器**
 （一个环境 = 一个独立代理实例 + 一个独立端口，附 Rust 工作台），落地分支
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
+
+### Removed（v3 重构 M-P6：收尾退场，v2 面清零）
+
+- **全部 Python 产品代码退场**：`adapters/mitmproxy/`（注入器）、
+  `envboard-core-mitmproxy` crate（子进程监督 + 内嵌 + 状态文件读侧）、
+  FakeCore/StatusMode（v2 替身）、dual_impl 对拍与 `--render` 跨语言入口文档
+  ——一次删净。工具链收敛门禁的适配器例外整套翻正：`.py`/`__pycache__`/适配器
+  脚本调用现在是**无条件违规**（PENDING 白名单机制保留，表已空 = 收敛完成）；
+  artifact 门禁把"注入器自包含"检查换成 v3 反向断言（adapters/ 不得存在 +
+  引擎线程名标记在场），并做了负向验证（塞入 .py 必红）。
+- ProxyCore-v2 抽象面删除（InstanceSpec/InstanceHandle/InstanceHealth/StatusReport/
+  ProcessIdentity/redact_cmdline/config.json 与软链常量）；core-api 的 proxy 模块
+  只剩 v3 共享词汇：Listen、CoreInfo、能力表（六项：listen/dynamic_certs/
+  rewrite_upstream/per_domain_insecure/shared_ca/http1_only，全部在线声明）。
+- 状态面剪枝：PersistedState 不再携带 records/config_seals；ManagerConfig 删
+  status_ttl_secs/reload_interval_secs/annotate 与 confdir config.yaml 防线；
+  cli 删 `--reload-interval`；reconcile 规划保留**占用探测**（MarkConflict 判据），
+  启动路径以绑定为唯一真相。**新增升级契约测试**：v2 的 state.json（含旧键）
+  直接加载成立，再保存时旧键整体消失、环境数据原样搬过来。
+- 契约文档收口：capabilities.md「实例日志」按 v3 总线形态重写（有界 1024 行 +
+  丢弃计数 + copytruncate + 有界尾读，v2 的 64 KiB 管道实测教训作为约束来历保留）。
+- README 全量重写为 v3（架构/能力矩阵/已知限制/从 v2 升级/验证分层）；
+  systemd 单元同步 v3（去 `--core-bin`/mitmdump/PDEATHSIG 叙述；单进程语义：
+  停服务即停一切、无孤儿代理）。
+- 版本 0.1.0 → **0.2.0**（v2 多环境形态与 v3 纯 Rust 引擎随本版一并发布）。
 
 ### Changed（v3 重构 M-P5 第三步：live 层迁移——一条不减）
 
@@ -645,24 +670,3 @@ mitmproxy，本条目记录的是独立库面的落地。
   | `package.json` | 删除（它的唯一作用是转发 `npm run verify`） |
 
 - **新增门禁「工具链收敛」**（`envboard-policy-tests` 的 `toolchain`）：文件面不许有
-  Python / Node / TS 的工具链痕迹、调用面不许出现 `npm` / `pip` / `mypy` / `<解释器> -m`、
-  反向守卫 `adapters/` 仍是单文件注入器。迁移期由一张**双向**白名单承载待退场文件
-  （条目失效同样失败），**现已清空 = 收敛完成**。
-- **`ci/verify.sh` 收缩为纯编排**：分层（`policy` / `rust` / `contract` / `artifact` /
-  `adapter` / `live`）、顺序、依赖探测与响亮失败；判据一律搬进测试，脚本里不再有断言。
-  `bash ci/verify.sh rust` 现在是**零第二种语言运行时**的子集（不需要 Python / Node）。
-- **子进程/依赖前提变化**：默认层需要适配器宿主的解释器（跑注入器对拍），缺了**响亮
-  失败**并给出两条出路，不再静默跳过；fmt / clippy 随 toolchain 一起来，因此成为必需
-  步骤（此前缺失时打印 SKIPPED 继续跑）。新增依赖 `toml`，只被门禁解析 `Cargo.toml` 用。
-- **全部 crate 显式 `publish = false`**：本仓不发布 crate，发布物是 `envboard` 二进制；
-  发布工件清单（二进制 + 5 个必需文件 + systemd unit）由 `artifact` 门禁逐项校验。
-- **实质改进**：实机套件改裸 TCP 直连代理（不再 spawn `curl`，320 次请求 2.85s → 0.44s，
-  整套 17.5s → 12.9s）；`dual` / `artifact` / 实机测试改用 `CARGO_BIN_EXE_<bin>` 取被测
-  二进制，cargo 保证构建次序，去掉"必须先 `cargo build`"的顺序依赖。
-- **文档**：设计文档、开发计划、实机验收转录不再入库（改为包内本机工作材料）；
-  入库文本只保留 `README.md` / `CHANGELOG.md` / `core/spec/**`。
-
-## [0.1.0] - 2026-09-15
-
-### Added
-- Multi-environment registry: name + DNS servers + domain suffix + static host

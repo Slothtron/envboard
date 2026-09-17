@@ -12,7 +12,7 @@
 //!              ports（trait） + infra（真实实现）
 //! ```
 //!
-//! 管理器只依赖 [`ProxyCore`](envboard_core_api::ProxyCore) 抽象，不认识 mitmproxy。
+//! 管理器只依赖 [`ProxyEngine`](envboard_core_api::ProxyEngine) 抽象，不认识任何具体引擎实现。
 
 pub mod agent;
 pub mod infra;
@@ -21,13 +21,9 @@ pub mod manager;
 pub mod ports;
 pub mod state;
 
-pub use agent::{AGENT_CONFIG_VERSION, AgentConfig};
 pub use manager::{EnvView, Manager, ReconcileReport};
-pub use ports::{
-    FilePort, MemoryFiles, MemoryPortProbe, MemoryProcessTable, MemoryStateRepo, PortProbe,
-    ProcessTable, StateRepo,
-};
+pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};
 pub use state::{
-    ConfigSeal, InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION,
-    StoredError, StoredRules,
+    InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION, StoredError,
+    StoredRules,
 };

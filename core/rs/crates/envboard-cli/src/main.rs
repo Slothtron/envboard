@@ -8,7 +8,7 @@
 //!
 //! 1. **状态只有一个写者**：本进程通过 flock 拿锁；拿不到就响亮失败（说明有别的
 //!    envboard 在跑），而不是"先改了再说"。
-//! 2. **实例的存活期由谁负责**，如实告诉用户：进程内的 core（FakeCore）实例随本进程
+//! 2. **实例的存活期由谁负责**，如实告诉用户：进程内的引擎（engine/fake）实例随本进程
 //!    退出而结束，所以要让环境常驻必须用 `envboard run`；这也是为什么 `env` 子命令
 //!    只改期望状态、真正的拉起交给 resident 循环。
 
@@ -78,10 +78,6 @@ struct Cli {
     /// 单个环境日志文件的轮转上限（字节，`0` = 不轮转）。
     #[arg(long, global = true)]
     max_log_bytes: Option<u64>,
-
-    /// 注入器检查规则文件 mtime 的间隔（秒）。越小越灵敏，越大越省 CPU。
-    #[arg(long, global = true)]
-    reload_interval: Option<u64>,
 
     /// 机器可读输出（JSON）。
     #[arg(long, global = true)]
@@ -614,9 +610,6 @@ fn build_config(cli: &Cli) -> Result<ManagerConfig, Error> {
     if let Some(bytes) = cli.max_log_bytes {
         config.max_log_bytes = bytes;
     }
-    if let Some(seconds) = cli.reload_interval {
-        config.reload_interval_secs = seconds.max(1);
-    }
     if let Some(raw) = &cli.port_range {
         let (min, max) = raw.split_once('-').ok_or_else(|| {
             Error::invalid_config("port_range", format!("expected <min>-<max>, got {raw:?}"))
@@ -663,9 +656,9 @@ fn status(manager: &Manager, json: bool) -> Result<(), Error> {
                     "listen": capabilities.listen,
                     "dynamic_certs": capabilities.dynamic_certs,
                     "rewrite_upstream": capabilities.rewrite_upstream,
-                    "external_processes": capabilities.external_processes,
-                    "reports_rules_count": capabilities.reports_rules_count,
                     "per_domain_insecure": capabilities.per_domain_insecure,
+                    "shared_ca": capabilities.shared_ca,
+                    "http1_only": capabilities.http1_only,
                 },
                 "config": manager.config().to_string(),
                 "environments": views.len(),

@@ -96,11 +96,8 @@ pub fn capabilities_v3() -> CoreCapabilities {
         rewrite_upstream: true,
         per_domain_insecure: true,
         shared_ca: true,
-        // v3 的每请求注解走 request-log 插件（日志通道），不再由 core 能力位表达。
-        flow_annotation: false,
-        reports_rules_count: true,
-        // 引擎在进程内：没有可清理的外部进程。
-        external_processes: false,
+        // 已知限制：数据面 v1 只有 HTTP/1.1（ALPN 只协商 h1）。
+        http1_only: true,
     }
 }
 

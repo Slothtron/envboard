@@ -10,7 +10,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, ErrorCode, ProcessIdentity};
+use envboard_core_api::{DEFAULT_LISTEN_HOST, Error, ErrorCode};
 use envboard_domain::{DEFAULT_MAX_ATTEMPTS, DEFAULT_PORT_RANGE, Desired};
 use serde::{Deserialize, Serialize};
 
@@ -62,17 +62,6 @@ pub struct StoredRules {
     pub imported_at: u64,
 }
 
-/// 某环境当前**期望生效**的那份 `config.json` 的指纹与写入时刻。
-///
-/// 存在状态里而不是内存里：管理器重启后实例还在跑，判定"它是不是还在追这份配置"
-/// 必须仍然成立。`written_at` 只在这份期望内容**变化时**更新 —— 每轮 reconcile 都刷新
-/// 的话，一个永远读不进新配置的实例会被无限期当成"收敛中"。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigSeal {
-    pub hash: String,
-    pub written_at: u64,
-}
-
 /// 持久化状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedState {
@@ -88,9 +77,6 @@ pub struct PersistedState {
     pub rules: Vec<StoredRules>,
     #[serde(default)]
     pub desired: BTreeMap<String, Desired>,
-    /// 上次启动记录下来的进程身份（孤儿清理的判据：PID + 启动时刻 + cmdline）。
-    #[serde(default)]
-    pub records: BTreeMap<String, ProcessIdentity>,
     /// 端口是否由管理器**自动分配**。
     ///
     /// 这条决定了启动失败时的行为差异（两条规则不得混用）：自动分配的端口
@@ -98,12 +84,9 @@ pub struct PersistedState {
     /// **禁止**静默重分配。
     #[serde(default)]
     pub auto_port: BTreeMap<String, bool>,
-    /// 需要跨重启保留的异常标记（`port_conflict` / `config_mismatch`）。
+    /// 需要跨重启保留的异常标记（`port_conflict` / `invalid_config` 等：上一次动作留下的事实）。
     #[serde(default)]
     pub marks: BTreeMap<String, StoredError>,
-    /// 每个环境"期望生效的配置"指纹（收敛判定的基准）。
-    #[serde(default)]
-    pub config_seals: BTreeMap<String, ConfigSeal>,
 }
 
 impl Default for PersistedState {
@@ -113,10 +96,8 @@ impl Default for PersistedState {
             environments: Vec::new(),
             rules: Vec::new(),
             desired: BTreeMap::new(),
-            records: BTreeMap::new(),
             auto_port: BTreeMap::new(),
             marks: BTreeMap::new(),
-            config_seals: BTreeMap::new(),
         }
     }
 }
@@ -157,12 +138,6 @@ pub struct ManagerConfig {
     pub listen_host: IpAddr,
     pub port_range: (u16, u16),
     pub max_attempts: usize,
-    /// 状态文件的"新鲜度"窗口：`now - updated_at > ttl` 即视为不健康。
-    pub status_ttl_secs: u64,
-    /// 注入器热重载的轮询间隔（写进 `config.json`，也是收敛窗口的基数）。
-    pub reload_interval_secs: u64,
-    /// 是否给流加注解（写进 `config.json`）。
-    pub annotate: bool,
 }
 
 impl ManagerConfig {
@@ -180,13 +155,10 @@ impl ManagerConfig {
             listen_host: DEFAULT_LISTEN_HOST,
             port_range: DEFAULT_PORT_RANGE,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
-            status_ttl_secs: 15,
-            reload_interval_secs: 5,
-            annotate: true,
         }
     }
 
-    /// 某个环境的 agent 目录（注入器 + `config.json` + 规则软链）。
+    /// 某个环境的 agent 目录（v2 遗留工件的去处；remove 时整目录清扫）。
     ///
     /// 环境名已在 domain 层过白名单校验，所以这里的拼接不会逃出 `agent_dir`。
     pub fn env_agent_dir(&self, env: &str) -> PathBuf {
@@ -201,7 +173,7 @@ impl ManagerConfig {
         self.state_dir.join("lock")
     }
 
-    /// 某个环境的日志文件绝对路径（与 [`Self::status_file`] 同款纪律：白名单 + 固定父目录）。
+    /// 某个环境的日志文件绝对路径（白名单名字 + 固定父目录）。
     pub fn log_file(&self, env: &str) -> Option<PathBuf> {
         self.log_dir
             .as_ref()
@@ -219,10 +191,6 @@ impl ManagerConfig {
         self.rules_dir.join(envboard_rules::file_name_for(name))
     }
 
-    pub fn status_file(&self, env: &str) -> PathBuf {
-        self.runtime_dir.join(format!("{env}.status.json"))
-    }
-
     /// 非法配置**加载即失败**，附字段路径。
     pub fn validate(&self) -> Result<(), Error> {
         let (min, max) = self.port_range;
@@ -238,12 +206,6 @@ impl ManagerConfig {
                 "max_attempts must be >= 1",
             ));
         }
-        if self.status_ttl_secs == 0 {
-            return Err(Error::invalid_config(
-                "status_ttl_secs",
-                "status_ttl_secs must be >= 1",
-            ));
-        }
         // 轮转上限要么关掉（0），要么大到能放下一次崩溃现场；太小的值会让日志
         // 还没读到就轮转掉，等于静默丢日志。
         if self.max_log_bytes != 0 && self.max_log_bytes < MIN_MAX_LOG_BYTES {
@@ -255,19 +217,8 @@ impl ManagerConfig {
                 ),
             ));
         }
-        // confdir 归管理器独占：里面若存在 config.yaml，mitmproxy 会把它加载进**每个**
-        // 实例，等于让用户在契约之外注入任意选项。
-        let stray = self.confdir.join("config.yaml");
-        if stray.exists() {
-            return Err(Error::invalid_config(
-                "confdir",
-                format!(
-                    "{} exists: the confdir is owned by envboard; a config.yaml there would \
-                     be loaded by every instance and override the launch contract",
-                    stray.display()
-                ),
-            ));
-        }
+        // confdir 归引擎独占（CA 材料）。v2 的 config.yaml 防线随注入器退场
+        // —— 引擎不读任何 confdir 里的用户配置文件。
         Ok(())
     }
 }
@@ -401,10 +352,41 @@ mod tests {
             PathBuf::from("/tmp/envboard-test/rules/beta.rules")
         );
         assert_eq!(config.lock_file(), PathBuf::from("/tmp/envboard-test/lock"));
-        assert_eq!(
-            config.status_file("beta"),
-            PathBuf::from("/tmp/envboard-test/runtime/beta.status.json")
-        );
+    }
+
+    #[test]
+    fn a_v2_state_file_loads_and_rewrites_without_process_channels() {
+        // v2 的 state.json 里有 records/config_seals（进程身份与配置封印）这些键。
+        // v3 结构不认识它们：加载必须成立（serde 忽略未知键），再保存时旧键整体
+        // 消失、环境数据原样搬过来 —— 这就是"直接读旧状态文件升级"的契约测试。
+        let sample = r#"{
+  "version": 1,
+  "environments": [
+    {"name": "beta", "description": "", "listen": {"host": "127.0.0.1", "port": 16440},
+     "insecure_hosts": ["api.example.com"], "proxy_user": null, "proxy_password": null,
+     "rules": "beta"}
+  ],
+  "rules": [],
+  "desired": {"beta": "running"},
+  "records": {"beta": {"pid": 4242, "starttime": 999, "cmdline": ["mitmdump"]}},
+  "auto_port": {"beta": false},
+  "marks": {},
+  "config_seals": {"beta": {"hash": "deadbeef", "written_at": 1000}}
+}"#;
+        let dir = std::env::temp_dir().join(format!("envboard-v2state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, sample).unwrap();
+        let repo = JsonFileStateRepo::new(&path);
+        let state = crate::ports::StateRepo::load(&repo).unwrap();
+        assert_eq!(state.environments.len(), 1);
+        assert_eq!(state.desired_of("beta"), Desired::Running);
+        crate::ports::StateRepo::save(&repo, &state).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("records"), "进程身份通道不得回写");
+        assert!(!text.contains("config_seals"), "配置封印不得回写");
+        assert!(text.contains("\"beta\""), "环境数据原样搬过来");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
