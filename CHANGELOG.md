@@ -11,6 +11,34 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Added（v3 重构 M-P3：插件宿主——阶段管道与能力注册表）
+
+- 三层能力模型落地：内核能力（listen/proxy-auth/tls-policy/mitm-ca/protocol）
+  保持原生快路径；内置插件 hosts-rules 与 request-log 走与扩展插件完全相同的
+  接口（产品功能自举验证）。阶段模型写死：connect → request_head →
+  request_body →（上游）→ response_head → response_body → log。
+- 能力注册表（envboard-core/src/plugin.rs 的 CAPABILITIES，静态只读）：
+  只参与装配期校验与自省，不参与请求路径查找。契约表在
+  core/spec/capabilities.md 的「v3 插件与能力注册表」；三方一致性
+  （契约表 ↔ 静态注册表 ↔ 内置实现）由新增 policy 门禁判定
+  （envboard-policy-tests/tests/registry.rs，负向样本双向验证过会红）。
+- 装配期校验：id 未注册 / 内核冒充插件 / 缺依赖 / 依赖环 → invalid_config
+  点名双方；执行序 = 声明序，依赖约束 > 声明序（同层同依赖保持声明序）。
+  明确不采纳"静默等待依赖"语义。
+- 错误契约两档：connect/改写钩子 Err → fail-closed 502（正文带插件名与
+  原因）；显式 bypass（request-log 即此档）→ 跳过 + 强制 WARN + 逐插件
+  计数（EngineInstance::bypass_counts）；每钩子超时（connect/head 1s、
+  body 5s）按 Err；on_log 在类型上就不可外溢（同步、返回 unit）。
+- Flow::Early 短路语义（mock 类插件的接缝）：request_head 可整条替换响应，
+  response_head 可重写上游响应；两者都不触碰上游连接。
+- max_buffered_body 从编译期常量升级为快照字段（EngineConfig 可选，默认
+  8 MiB）；超限 413/502 而非静默流式。
+- 测试/故障注入旋钮 debug-inject（Extension 层，注册表在册——注入路径走
+  真实装配校验，不是旁路后门；产品链恒为空，对齐 envboard-core-fake 先例）。
+- 验收：单测 7 条（拓扑与注册表拒绝面）+ tests/plugins.rs 实机 6 条
+  （fail-closed 带名、bypass+WARN+计数、钩子超时、Early 不触上游、
+  connect 阶段失败、未注册 id 启动即拒）。
+
 ### Added（v3 重构 M-P2：数据面——进程内引擎实例）
 
 - envboard-core::engine：**引擎实例 = 一个 OS 线程 + 一个 current-thread

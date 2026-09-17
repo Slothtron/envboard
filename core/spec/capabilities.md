@@ -357,6 +357,39 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 - 检查/轮转的触发点：实例启动前一次，加上常驻循环（工作台 30 秒、`run` 每次刷新）
   一次；都是"每环境一次 `stat`"，只有超上限才真正动手。
 
+## v3 插件与能力注册表（envboard-core）
+
+引擎三层能力模型：**内核能力**（原生快路径）/ **内置插件** / **扩展插件**。
+注册表是静态只读清单（core/rs/crates/envboard-core/src/plugin.rs 的
+CAPABILITIES）：只参与装配期校验，不参与请求路径查找；热路径走装配后的
+扁平链，避免与 ArcSwap 快照形成第二真相。内核条目登记在此是为了可见性
+（能力清单有唯一出处），它们的实现必须保持原生 —— 插件链里出现内核
+id 是装配错误。
+
+| id | layer | phase | depends_on | 语义与载体 |
+|---|---|---|---|---|
+| kernel:listen | kernel | startup | — | listen.host/port；绑定即真相，EADDRINUSE → port_conflict（不换端口、不试绑） |
+| kernel:proxy-auth | kernel | startup | — | proxy_user/proxy_password 的 407 门；凭据只在内存，定长时间比对 |
+| kernel:tls-policy | kernel | connect | — | insecure_hosts → ConnectTarget.tls_policy 两档；无全局关校验 |
+| kernel:mitm-ca | kernel | startup | — | confdir 共享 CA 的加载/物化（已装客户端零感知判据见代码与 ProxyCore 矩阵） |
+| kernel:protocol | kernel | request | — | HTTP/1.1 协议面与引擎侧超时常量；101 透传 |
+| hosts-rules | builtin | connect | — | 消费环境 rules 字段（hosts 文本）；只改 resolved_addr |
+| request-log | builtin | log | — | 默认启用；终局记录写日志通道；on_error = bypass |
+| debug-inject | extension | request | — | 测试/故障注入旋钮（对齐 envboard-core-fake 先例）：行为由持有者指定，产品装配路径恒为空 |
+
+**装配与错误契约**
+
+- 插件执行序 = 配置声明序；**依赖约束 > 声明序**（同层同依赖内保持声明序）。
+- 装配期校验：id 未注册、内核冒充插件、缺依赖、依赖环 → invalid_config，
+  消息点名双方。**没有**"静默等待依赖"的语义 —— 缺依赖必须当场可见。
+- 错误档位：connect/改写钩子 Err → fail-closed 502（带插件名）；显式声明
+  bypass 的插件跳过并强制 WARN + 逐插件计数；每钩子超时（connect/head 1s、
+  body 5s）按 Err 处理；on_log 错误永不外溢（类型即契约：同步、返回 unit）。
+- 热更新：配置编译通过 → ArcSwap 原子换入新的插件集快照；任一插件构建/校验
+  失败 → 整套拒绝（invalid_config），旧快照继续服务。
+- 门禁：注册表 ↔ 内置插件实现 ↔ 本节表格一一对应，由 policy 层的注册表
+  门禁判定（core/rs/crates/envboard-policy-tests/tests/registry.rs）。
+
 ## ProxyCore 能力矩阵（换核心时要重新满足的清单）
 
 | 能力 | mitmproxy 实现方式 | 自研核心必须提供 |

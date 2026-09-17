@@ -297,16 +297,18 @@ pub fn response_framing(request_method: &str, status: u16, message: &Message) ->
     Framing::UntilClose
 }
 
-/// 读体（含 chunked 解码）；reader 正指向体。
+/// 读体（含 chunked 解码）；reader 正指向体。max_bytes 来自环境快照
+/// （CompiledConfig.max_buffered_body），超限即 BodyTooBig —— 不是静默截断。
 pub async fn read_body<R: AsyncReadExt + Unpin>(
     reader: &mut BufReader<R>,
     framing: Framing,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, HttpError> {
     let mut body = Vec::new();
     match framing {
         Framing::Empty => {}
         Framing::Length(length) => {
-            if length > MAX_BODY_BYTES as u64 {
+            if length > max_bytes as u64 {
                 return Err(HttpError::BodyTooBig);
             }
             body.resize(length as usize, 0);
@@ -340,7 +342,7 @@ pub async fn read_body<R: AsyncReadExt + Unpin>(
                 }
                 break;
             }
-            if (body.len() as u64) + size > MAX_BODY_BYTES as u64 {
+            if (body.len() as u64) + size > max_bytes as u64 {
                 return Err(HttpError::BodyTooBig);
             }
             let mut chunk = vec![0u8; size as usize];
@@ -368,7 +370,7 @@ pub async fn read_body<R: AsyncReadExt + Unpin>(
                 if read == 0 {
                     break;
                 }
-                if (body.len() + read) > MAX_BODY_BYTES {
+                if (body.len() + read) > max_bytes {
                     return Err(HttpError::BodyTooBig);
                 }
                 body.extend_from_slice(&buf[..read]);
@@ -555,7 +557,9 @@ mod tests {
         let mut message = read_head(&mut reader).await.unwrap().unwrap();
         let framing = request_framing("GET", &message).unwrap();
         assert_eq!(framing, Framing::Length(2));
-        message.body = read_body(&mut reader, framing).await.unwrap();
+        message.body = read_body(&mut reader, framing, MAX_BODY_BYTES)
+            .await
+            .unwrap();
         assert_eq!(message.body, b"hi");
         assert_eq!(message.first, "GET http://svc.test/a?x=1 HTTP/1.1");
         assert_eq!(message.header("host"), Some("svc.test"));
@@ -582,7 +586,9 @@ mod tests {
         let message = read_head(&mut reader).await.unwrap().unwrap();
         let framing = request_framing("POST", &message).unwrap();
         assert_eq!(framing, Framing::Chunked);
-        let body = read_body(&mut reader, framing).await.unwrap();
+        let body = read_body(&mut reader, framing, MAX_BODY_BYTES)
+            .await
+            .unwrap();
         assert_eq!(body, b"abcde");
     }
 

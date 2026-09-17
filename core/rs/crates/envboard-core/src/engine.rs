@@ -2,13 +2,16 @@
 //! 一个监听端口。崩溃隔离是任务级的：请求任务 panic 只死这一条连接（tokio
 //! 逐任务捕获），引擎线程整体 panic 才让实例进入 failed。
 //!
-//! 数据流（与 core/spec/capabilities.md 的 ProxyCore 能力矩阵对齐）：
-//! 客户端 →（CONNECT 或 absolute-URI）→ 鉴权门（407）→ MITM（按 SNI 现签）
-//! → 构造 ConnectTarget（基础配置播种：规则改写 + insecure 名单命中）→
-//! 上游建连（TLS 依 tls_policy）→ h1 缓冲转发 → 终局透传/保活。
+//! 请求管线（阶段模型；插件链与内核快路径的分工见 core/spec/capabilities.md
+//! 的「v3 插件与能力注册表」）：
 //!
-//! v2 的进程监督概念（PID、状态文件、收敛窗口、试绑）在这里全部不存在：
-//! 绑定即真相（EADDRINUSE → port_conflict），apply_config 同步换快照即生效。
+//! 1. 鉴权门（内核）：CONNECT 与 absolute-URI 同一道门，不过即 407。
+//! 2. 隧道/直连分流：CONNECT → MITM 按 SNI 现签；absolute-URI → 明文上游。
+//! 3. 每请求取环境快照 → ConnectTarget 播种（内核）→ 插件 connect 链修订
+//!    → 内核按最终地址做 insecure 判定 → 上游建连（TLS 依 tls_policy）。
+//! 4. request_head/body → 上游 → response_head/body 插件链（Early 短路给
+//!    mock 类插件；错误按 fail-closed/Bypass 两档）。
+//! 5. 终局 LogRecord 扇出给 log 阶段（request-log 默认启用）。
 
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
@@ -16,7 +19,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
@@ -32,6 +35,7 @@ use crate::auth;
 use crate::ca::SharedCa;
 use crate::config::{self, CompiledConfig, EngineConfig};
 use crate::http::{self, HttpError, Message};
+use crate::plugin::{self, Flow, LogRecord, RequestView};
 use crate::target::{ConnectTarget, TlsPolicy};
 use crate::tls;
 
@@ -51,7 +55,7 @@ pub enum EngineState {
     Starting,
     Running,
     Stopped,
-    /// 绑定失败即端口被占：**不换端口**（v2 契约），等一次显式动作。
+    /// 绑定失败即端口被占：不换端口（v2 契约），等一次显式动作。
     PortConflict {
         port: u16,
     },
@@ -66,7 +70,7 @@ pub enum EngineState {
 }
 
 impl EngineState {
-    /// 契约里的状态字面量（v3 健康表；M-P5 同步进 core/spec/errors.md）。
+    /// 契约里的状态字面量（v3 健康表）。
     pub fn as_str(&self) -> &'static str {
         match self {
             EngineState::Starting => "starting",
@@ -93,8 +97,8 @@ pub struct EngineStatus {
     pub last_error: Option<String>,
 }
 
-/// 上游连接的两种形态。手写双分发的 AsyncRead/AsyncWrite，避免装箱与泛型
-/// 在调用点发散。
+/// 上游连接的两种形态（absolute 明文 / CONNECT 隧道 TLS）。手写双分发实现
+/// AsyncRead/AsyncWrite，避免装箱在热路径扩散。
 enum Upstream {
     Plain(TcpStream),
     Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
@@ -199,8 +203,7 @@ impl EngineInstance {
     }
 
     /// 同步热更新：编译通过即整套换入，返回新 config_hash；编译失败即 Err，
-    /// 线上旧快照继续服务（v2"失败保留旧快照 + config_error"的语义在此延续，
-    /// 差别只剩"旧快照"在内存里）。listen 是停机字段，改它必须先重启实例。
+    /// 线上旧快照继续服务。listen 是停机字段，改它必须先重启实例。
     pub fn apply_config(&self, config: EngineConfig) -> Result<String, Error> {
         let compiled = config::compile(&config)?;
         if compiled.listen != self.shared.bound {
@@ -223,6 +226,21 @@ impl EngineInstance {
 
     pub fn status(&self) -> EngineStatus {
         self.shared.status.lock().unwrap().clone()
+    }
+
+    /// 当前链上各插件的 bypass 计数（工作台状态视图的接线点在管理面）。
+    pub fn bypass_counts(&self) -> Vec<(&'static str, u64)> {
+        let cfg = self.shared.configs.load_full();
+        cfg.plugins
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.descriptor.id,
+                    cfg.plugins.bypass_count(entry.descriptor.id).unwrap_or(0),
+                )
+            })
+            .collect()
     }
 
     /// 等实例离开 starting（绑定成功或冲突/失败都是"定态"）。
@@ -266,6 +284,14 @@ impl Drop for EngineInstance {
         let _ = self.shared.shutdown.send(true);
         // 不阻塞 join：持有者析构不是停机命令的规范入口（那是 stop()）。
         let _ = self.join.lock().unwrap().take();
+    }
+}
+
+impl std::fmt::Debug for EngineInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineInstance")
+            .field("status", &self.status())
+            .finish_non_exhaustive()
     }
 }
 
@@ -330,8 +356,8 @@ async fn engine_main(shared: Arc<Shared>) {
             return;
         }
     };
-    // 绑定即 running：v2 的"状态文件 TTL + 收敛窗口"整条链路不再存在。
     let mut shutdown = shared.shutdown.subscribe();
+    // 绑定即 running：v2 的"状态文件 TTL + 收敛窗口"整条链路不再存在。
     set_state(&shared, EngineState::Running, None);
     loop {
         tokio::select! {
@@ -348,9 +374,15 @@ async fn engine_main(shared: Arc<Shared>) {
                         });
                     }
                     Err(error) => {
-                        // 持续 accept 错误（fd 耗尽等）：标记 unhealthy，继续等；
-                        // stop()/重启由管理面决策（M-P4 的 reconcile）。
-                        set_state(&shared, EngineState::Unhealthy { reason: format!("accept: {error}") }, Some(error.to_string()));
+                        // 持续 accept 错误（fd 耗尽等）：标记 unhealthy 并继续等；
+                        // 重启决策属于管理面。
+                        set_state(
+                            &shared,
+                            EngineState::Unhealthy {
+                                reason: format!("accept: {error}"),
+                            },
+                            Some(error.to_string()),
+                        );
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
@@ -379,9 +411,9 @@ async fn handle_client(mut socket: TcpStream, shared: Arc<Shared>) -> Result<(),
         return Ok(());
     }
     if method == "CONNECT" {
-        connect_flow(socket, &head, &shared, &cfg).await
+        connect_flow(socket, &head, &shared).await
     } else {
-        absolute_flow(socket, head, &shared, &cfg).await
+        absolute_flow(socket, head, &shared).await
     }
 }
 
@@ -395,12 +427,7 @@ fn credentials_ok(cfg: &CompiledConfig, head: &Message) -> bool {
     }
 }
 
-async fn connect_flow(
-    socket: TcpStream,
-    head: &Message,
-    shared: &Shared,
-    cfg: &CompiledConfig,
-) -> Result<(), HttpError> {
+async fn connect_flow(socket: TcpStream, head: &Message, shared: &Shared) -> Result<(), HttpError> {
     let mut socket = socket;
     let authority = head.uri().unwrap_or("");
     let Some((host, port)) = http::split_authority(authority, 443) else {
@@ -420,23 +447,9 @@ async fn connect_flow(
         conn.server_name().map(str::to_string)
     };
     let mut io = BufReader::new(tls);
-    inner_loop(&mut io, shared, cfg, &host, port, client_sni.as_deref()).await
-}
-
-/// 隧道内的 h1 循环：逐请求取当前配置快照（热更新下一次请求即生效），
-/// 一问一答上游（不复用上游连接 —— 见 http 模块文档）。
-async fn inner_loop<W: AsyncRead + AsyncWrite + Unpin>(
-    io: &mut BufReader<W>,
-    shared: &Shared,
-    cfg_root: &CompiledConfig,
-    authority_host: &str,
-    authority_port: u16,
-    client_sni: Option<&str>,
-) -> Result<(), HttpError> {
     loop {
         let cfg = shared.configs.load_full();
-        let _ = cfg_root;
-        let head = match tokio::time::timeout(HEAD_READ_TIMEOUT, http::read_head(io)).await {
+        let head = match tokio::time::timeout(HEAD_READ_TIMEOUT, http::read_head(&mut io)).await {
             Err(_) => return Ok(()),
             Ok(Err(error)) => {
                 let _ = write_status(io.get_mut(), error.status(), &error.reason()).await;
@@ -461,49 +474,13 @@ async fn inner_loop<W: AsyncRead + AsyncWrite + Unpin>(
             let _ = io.get_mut().write_all(auth::challenge()).await;
             return Ok(());
         }
-        let path = origin_path(&head);
-        let mut target = ConnectTarget::seed(authority_host, authority_port);
-        if let Some(ip_text) = cfg.target_for(authority_host) {
-            match parse_ip_literal(ip_text) {
-                Some(ip) => target.resolved_addr = Some(SocketAddr::new(ip, authority_port)),
-                // 导入侧只接受 IP 字面量；真走到这里说明规则表被旁路塞了脏数据 ——
-                // 响亮失败而不是按名连接。
-                None => {
-                    let _ = write_status(
-                        io.get_mut(),
-                        502,
-                        &format!("rule target {ip_text:?} is not an IP literal"),
-                    )
-                    .await;
-                    return Ok(());
-                }
-            }
-        }
-        let matched = {
-            let address = target
-                .resolved_addr
-                .map(|addr| addr.ip().to_string())
-                .unwrap_or_else(|| authority_host.to_string());
-            cfg.is_insecure(client_sni, Some(&address))
+        let origin = RequestOrigin {
+            host: host.clone(),
+            port,
+            sni: client_sni.clone(),
+            with_tls: true,
         };
-        target.apply_insecure_match(matched);
-
-        let upstream = match connect_upstream(shared, &target, true).await {
-            Ok(upstream) => upstream,
-            Err(fault) => {
-                let _ = write_status(io.get_mut(), 502, &fault).await;
-                return Ok(());
-            }
-        };
-
-        let forwarded = forward_one(io, upstream, &head, &method_of(&head), &path).await?;
-        if forwarded.upgrade {
-            return Ok(()); // 透传已结束这条连接的一切事务。
-        }
-        if head
-            .header("connection")
-            .is_some_and(|value| value.eq_ignore_ascii_case("close"))
-        {
+        if serve_request(&mut io, shared, &cfg, head, &origin).await? {
             return Ok(());
         }
     }
@@ -513,7 +490,6 @@ async fn absolute_flow(
     socket: TcpStream,
     first: Message,
     shared: &Shared,
-    _cfg: &CompiledConfig,
 ) -> Result<(), HttpError> {
     let mut io = BufReader::new(socket);
     let mut head = Some(first);
@@ -536,7 +512,8 @@ async fn absolute_flow(
             let _ = write_status(io.get_mut(), 405, "use a plain TCP connection for CONNECT").await;
             return Ok(());
         }
-        let Some((host, port, path)) = message.uri().and_then(http::parse_absolute_http_uri) else {
+        let Some((host, port, _path)) = message.uri().and_then(http::parse_absolute_http_uri)
+        else {
             let _ = write_status(
                 io.get_mut(),
                 400,
@@ -545,48 +522,332 @@ async fn absolute_flow(
             .await;
             return Ok(());
         };
-        if cfg.auth_required() && !credentials_ok(&cfg, &message) {
-            let _ = io.get_mut().write_all(auth::challenge()).await;
-            // 不断连：下一条请求带着凭据来是合法的。
-            continue;
-        }
-        let mut target = ConnectTarget::seed(&host, port);
-        if let Some(ip_text) = cfg.target_for(&host)
-            && let Some(ip) = parse_ip_literal(ip_text)
-        {
-            target.resolved_addr = Some(SocketAddr::new(ip, port));
-        }
-        let address = target
-            .resolved_addr
-            .map(|addr| addr.ip().to_string())
-            .unwrap_or(host.clone());
-        target.apply_insecure_match(cfg.is_insecure(None, Some(&address)));
-        // absolute-URI 是明文代理语义：直连上游，不存在可关的 TLS 校验。
-        let upstream = match connect_upstream(shared, &target, false).await {
-            Ok(upstream) => upstream,
-            Err(fault) => {
-                let _ = write_status(io.get_mut(), 502, &fault).await;
-                return Ok(());
-            }
+        // absolute-URI 形态：authority 取 URI 本身，Host 头只透传不改写。
+        let origin = RequestOrigin {
+            host,
+            port,
+            sni: None,
+            with_tls: false,
         };
-        let forwarded = forward_one(&mut io, upstream, &message, &method, &path).await?;
-        if forwarded.upgrade {
-            return Ok(());
-        }
-        if message
-            .header("connection")
-            .is_some_and(|value| value.eq_ignore_ascii_case("close"))
-        {
+        if serve_request(&mut io, shared, &cfg, message, &origin).await? {
             return Ok(());
         }
     }
 }
 
-fn method_of(head: &Message) -> String {
-    head.method().unwrap_or("GET").to_ascii_uppercase()
+/// 请求的来源形态：CONNECT 隧道（tls）或 absolute-URI（明文）。
+struct RequestOrigin {
+    host: String,
+    port: u16,
+    sni: Option<String>,
+    with_tls: bool,
 }
 
-/// inner（隧道内）请求的 origin-form 路径；absolute-form 也归一化。
+/// 每请求管线。返回 true = 这条连接到此为止（错误、透传或显式 close）。
+async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut BufReader<W>,
+    shared: &Shared,
+    cfg: &Arc<CompiledConfig>,
+    head: Message,
+    origin: &RequestOrigin,
+) -> Result<bool, HttpError> {
+    let started_ms = unix_ms();
+    let clock = std::time::Instant::now();
+    let method = head.method().unwrap_or("GET").to_ascii_uppercase();
+    let path = origin_path(&head);
+    let authority = format!("{}:{}", origin.host, origin.port);
+    let keep_alive = !head
+        .header("connection")
+        .is_some_and(|value| value.to_ascii_lowercase().contains("close"));
+
+    // 内核播种 → 插件 connect 修订 → 内核按最终地址做 insecure 判定。
+    let mut target = ConnectTarget::seed(&origin.host, origin.port);
+    let seed_addr = target.resolved_addr;
+    if let Err(fault) = plugin::run_connect(&cfg.plugins, &cfg.log_writer, &mut target).await {
+        return fail(
+            cfg,
+            io,
+            started_ms,
+            clock,
+            &method,
+            &authority,
+            &path,
+            &target,
+            seed_addr,
+            &fault.to_report(),
+        )
+        .await;
+    }
+    let address_text = target
+        .resolved_addr
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| origin.host.clone());
+    target.apply_insecure_match(cfg.is_insecure(origin.sni.as_deref(), Some(&address_text)));
+
+    // 请求体：分帧 + 缓冲上限（快照值，不是编译期常量）。
+    let request_bytes = match http::request_framing(&method, &head) {
+        Err(error) => {
+            let _ = write_status(io.get_mut(), error.status(), &error.reason()).await;
+            return Ok(true);
+        }
+        Ok(framing) => {
+            match tokio::time::timeout(
+                BODY_READ_TIMEOUT,
+                http::read_body(io, framing, cfg.max_buffered_body),
+            )
+            .await
+            {
+                Err(_) => {
+                    let _ = write_status(io.get_mut(), 408, "request body read timed out").await;
+                    return Ok(true);
+                }
+                Ok(Err(error)) => {
+                    let _ = write_status(io.get_mut(), error.status(), &error.reason()).await;
+                    return Ok(true);
+                }
+                Ok(Ok(body)) => body,
+            }
+        }
+    };
+
+    // request 阶段插件链（head → 可能 Early；body 改写）。
+    let mut request_body = request_bytes;
+    let early = {
+        let view = RequestView {
+            target: &target,
+            method: &method,
+            path: &path,
+            headers: &head.headers,
+            client_sni: origin.sni.as_deref(),
+        };
+        match plugin::run_request_head(&cfg.plugins, &cfg.log_writer, &view).await {
+            Err(fault) => {
+                return fail(
+                    cfg,
+                    io,
+                    started_ms,
+                    clock,
+                    &method,
+                    &authority,
+                    &path,
+                    &target,
+                    seed_addr,
+                    &fault.to_report(),
+                )
+                .await;
+            }
+            Ok(Flow::Early(planned)) => Some(planned),
+            Ok(Flow::Continue) => None,
+        }
+    };
+    if early.is_none()
+        && let Err(fault) =
+            plugin::run_request_body(&cfg.plugins, &cfg.log_writer, &mut request_body).await
+    {
+        return fail(
+            cfg,
+            io,
+            started_ms,
+            clock,
+            &method,
+            &authority,
+            &path,
+            &target,
+            seed_addr,
+            &fault.to_report(),
+        )
+        .await;
+    }
+
+    let mut status;
+    let mut response_headers;
+    let mut response_body;
+    if let Some(planned) = early {
+        status = planned.status;
+        response_headers = planned.headers;
+        response_body = planned.body;
+    } else {
+        let upstream = match connect_upstream(shared, &target, origin.with_tls).await {
+            Err(fault) => {
+                return fail(
+                    cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr,
+                    &fault,
+                )
+                .await;
+            }
+            Ok(upstream) => upstream,
+        };
+        match exchange(io, upstream, &head, &method, &path, &request_body).await {
+            Err(fault) => {
+                return fail(
+                    cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr,
+                    &fault,
+                )
+                .await;
+            }
+            Ok(Exchange::Tunneled) => {
+                // 101 的响应写出与双向透传都在 exchange 内完成（缓冲的 WS
+                // 帧要跟着走）。这里只补终局记录。
+                record(
+                    cfg,
+                    started_ms,
+                    clock,
+                    &method,
+                    &authority,
+                    &path,
+                    101,
+                    &request_body,
+                    &[],
+                    &target,
+                    seed_addr,
+                );
+                return Ok(true);
+            }
+            Ok(Exchange::Parts(part)) => {
+                status = part.0;
+                response_headers = part.1;
+                response_body = part.2;
+            }
+        }
+    }
+
+    // response 阶段插件链（head 可整条替换；body 可改写）。
+    let replacement = match plugin::run_response_head(
+        &cfg.plugins,
+        &cfg.log_writer,
+        &method,
+        &authority,
+        status,
+        &mut response_headers,
+    )
+    .await
+    {
+        Err(fault) => {
+            return fail(
+                cfg,
+                io,
+                started_ms,
+                clock,
+                &method,
+                &authority,
+                &path,
+                &target,
+                seed_addr,
+                &fault.to_report(),
+            )
+            .await;
+        }
+        Ok(replacement) => replacement,
+    };
+    if let Some(planned) = replacement {
+        status = planned.status;
+        response_headers = planned.headers;
+        response_body = planned.body;
+    }
+    if let Err(fault) =
+        plugin::run_response_body(&cfg.plugins, &cfg.log_writer, &mut response_body).await
+    {
+        return fail(
+            cfg,
+            io,
+            started_ms,
+            clock,
+            &method,
+            &authority,
+            &path,
+            &target,
+            seed_addr,
+            &fault.to_report(),
+        )
+        .await;
+    }
+
+    let first = format!("HTTP/1.1 {status} {}", reason_for_status(status));
+    http::write_message(
+        io.get_mut(),
+        &first,
+        &response_headers,
+        &response_body,
+        !(100..200).contains(&status),
+    )
+    .await?;
+    record(
+        cfg,
+        started_ms,
+        clock,
+        &method,
+        &authority,
+        &path,
+        status,
+        &request_body,
+        &response_body,
+        &target,
+        seed_addr,
+    );
+    Ok(!keep_alive)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record(
+    cfg: &CompiledConfig,
+    timestamp: u64,
+    clock: std::time::Instant,
+    method: &str,
+    authority: &str,
+    path: &str,
+    status: u16,
+    request_body: &[u8],
+    response_body: &[u8],
+    target: &ConnectTarget,
+    seed_addr: Option<SocketAddr>,
+) {
+    let event = LogRecord {
+        timestamp_unix_ms: timestamp,
+        method: method.to_string(),
+        authority: authority.to_string(),
+        path: path.to_string(),
+        status,
+        request_bytes: request_body.len(),
+        response_bytes: response_body.len(),
+        duration_ms: clock.elapsed().as_millis() as u64,
+        rewritten: seed_addr != target.resolved_addr,
+        insecure: matches!(target.tls_policy, TlsPolicy::Insecure),
+        error: None,
+    };
+    plugin::run_log(&cfg.plugins, Arc::new(event));
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fail<W: AsyncRead + AsyncWrite + Unpin>(
+    cfg: &CompiledConfig,
+    io: &mut BufReader<W>,
+    timestamp: u64,
+    clock: std::time::Instant,
+    method: &str,
+    authority: &str,
+    path: &str,
+    target: &ConnectTarget,
+    seed_addr: Option<SocketAddr>,
+    reason: &str,
+) -> Result<bool, HttpError> {
+    let event = LogRecord {
+        timestamp_unix_ms: timestamp,
+        method: method.to_string(),
+        authority: authority.to_string(),
+        path: path.to_string(),
+        status: 502,
+        request_bytes: 0,
+        response_bytes: 0,
+        duration_ms: clock.elapsed().as_millis() as u64,
+        rewritten: seed_addr != target.resolved_addr,
+        insecure: matches!(target.tls_policy, TlsPolicy::Insecure),
+        error: Some(reason.to_string()),
+    };
+    plugin::run_log(&cfg.plugins, Arc::new(event));
+    let _ = write_status(io.get_mut(), 502, reason).await;
+    Ok(true)
+}
+
 fn origin_path(head: &Message) -> String {
     let uri = head.uri().unwrap_or("/");
     if let Some((_, _, path)) = http::parse_absolute_http_uri(uri) {
@@ -598,11 +859,17 @@ fn origin_path(head: &Message) -> String {
     format!("/{uri}")
 }
 
-/// 按描述符建上游：地址（改写后优先/按名解析）+ TLS（依策略）。
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// 按描述符建上游：地址（插件链修订后的终值）+ TLS（依策略）。
 ///
-/// `with_tls` 由流量形态决定：CONNECT 隧道内必然 TLS（MITM 之后要再对上游
-/// 起 TLS）；absolute-URI 是 http scheme 的明文代理语义，没有 TLS 可言。
-/// TLS 校验档位则始终由 `target.tls_policy` 决定。
+/// with_tls 由流量形态决定：CONNECT 隧道内必然 TLS；absolute-URI 是 http
+/// scheme 的明文代理语义。校验档位始终由 target.tls_policy 决定。
 async fn connect_upstream(
     shared: &Shared,
     target: &ConnectTarget,
@@ -668,80 +935,67 @@ fn server_name_for(
         .map_err(|_| format!("host {host:?} is not a legal TLS server name"))
 }
 
-struct Forwarded {
-    upgrade: bool,
+enum Exchange {
+    /// 101：透传已结束这条上游连接上的一切事务。
+    Tunneled,
+    /// (status, headers, body)
+    Parts((u16, Vec<(String, String)>, Vec<u8>)),
 }
 
-/// 一问一答：转发请求、缓冲响应、写回客户端。101 走透传后结束。
-async fn forward_one<W: AsyncRead + AsyncWrite + Unpin>(
+/// 一问一答的转发内核（插件链包裹在外层 serve_request 里）。
+async fn exchange<W: AsyncRead + AsyncWrite + Unpin>(
     io: &mut BufReader<W>,
     mut upstream: Upstream,
     head: &Message,
     method: &str,
     path: &str,
-) -> Result<Forwarded, HttpError> {
-    let framing = http::request_framing(method, head)?;
-    let body = match tokio::time::timeout(BODY_READ_TIMEOUT, http::read_body(io, framing)).await {
-        Err(_) => return Err(HttpError::Io("body read timed out".to_string())),
-        Ok(Ok(body)) => body,
-        Ok(Err(error)) => {
-            let _ = write_status(io.get_mut(), error.status(), &error.reason()).await;
-            return Err(error);
-        }
-    };
+    request_body: &[u8],
+) -> Result<Exchange, String> {
     let first = format!("{method} {path} HTTP/1.1");
     let mut headers = http::forward_request_headers(head);
     if !head.is_upgrade_request() {
         headers.push(("connection".to_string(), "close".to_string()));
     }
-    // 写到上游：直接对 Upstream（实现 AsyncWrite）。
-    http::write_message(&mut upstream, &first, &headers, &body, true).await?;
+    http::write_message(&mut upstream, &first, &headers, request_body, true)
+        .await
+        .map_err(|e| format!("upstream write failed: {}", e.reason()))?;
 
     let mut reader = BufReader::new(&mut upstream);
-    let response = match tokio::time::timeout(BODY_READ_TIMEOUT, http::read_head(&mut reader)).await
-    {
-        Err(_) => return Err(HttpError::Io("upstream response timed out".to_string())),
-        Ok(Err(error)) => return Err(error),
-        Ok(Ok(None)) => {
-            return Err(HttpError::BadBody(
-                "upstream closed without a response".to_string(),
-            ));
-        }
-        Ok(Ok(Some(response))) => response,
+    let response = match http::read_head(&mut reader).await {
+        Err(error) => return Err(format!("upstream response head: {}", error.reason())),
+        Ok(None) => return Err("upstream closed without a response".to_string()),
+        Ok(Some(response)) => response,
     };
     let status = response.status().unwrap_or(505);
     let framing = http::response_framing(method, status, &response);
-    let body = http::read_body(&mut reader, framing).await?;
-    std::mem::drop(reader); // 释放对 upstream 的借用，透传路径要用它。
-    let is_101 = status == 101 && head.is_upgrade_request();
-    let response_headers = http::forward_response_headers(&response);
-    http::write_message(
-        io.get_mut(),
-        &response.first,
-        &response_headers,
-        &body,
-        !is_informational(status),
-    )
-    .await?;
-    if is_101 {
-        // 透传：先冲掉客户端读侧已缓冲的 WS 帧，然后裸字节互抄。
+    let body = http::read_body(&mut reader, framing, usize::MAX)
+        .await
+        .map_err(|e| format!("upstream response body: {}", e.reason()))?;
+    std::mem::drop(reader);
+
+    if status == 101 && head.is_upgrade_request() {
+        // 先冲掉客户端读侧已缓冲的 WS 帧，写出 101，再裸字节互抄。
         let pending = io.buffer().to_vec();
-        let client = io.get_mut();
         if !pending.is_empty() {
             let _ = upstream.write_all(&pending).await;
         }
+        let headers = http::forward_response_headers(&response);
+        http::write_message(io.get_mut(), &response.first, &headers, &body, false)
+            .await
+            .map_err(|e| format!("client write failed: {}", e.reason()))?;
+        let client = io.get_mut();
         let _ = tokio::io::copy_bidirectional(client, &mut upstream).await;
-        return Ok(Forwarded { upgrade: true });
+        return Ok(Exchange::Tunneled);
     }
-    Ok(Forwarded { upgrade: false })
+    Ok(Exchange::Parts((
+        status,
+        http::forward_response_headers(&response),
+        body,
+    )))
 }
 
-fn is_informational(status: u16) -> bool {
-    (100..200).contains(&status)
-}
-
-/// 我们自产的错误响应（无 body 依赖）。
-async fn write_status<W: tokio::io::AsyncWriteExt + Unpin>(
+/// 我们自产的错误响应。
+async fn write_status<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     status: u16,
     reason: &str,
@@ -768,8 +1022,11 @@ async fn write_status<W: tokio::io::AsyncWriteExt + Unpin>(
 
 fn reason_for_status(status: u16) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         400 => "Bad Request",
         405 => "Method Not Allowed",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
         502 => "Bad Gateway",

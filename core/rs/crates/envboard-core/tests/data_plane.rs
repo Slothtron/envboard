@@ -24,10 +24,7 @@ use envboard_core::http::Message;
 fn localhost_config(port: u16) -> EngineConfig {
     EngineConfig {
         listen: envboard_core_api::proxy::Listen::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-        insecure_hosts: Vec::new(),
-        proxy_user: None,
-        proxy_password: None,
-        rules_text: None,
+        ..Default::default()
     }
 }
 
@@ -88,7 +85,7 @@ async fn serve_echo<S: AsyncRead + AsyncWrite + Unpin>(mut io: S) {
     };
     let framing = http::request_framing(head.method().unwrap_or("GET"), &head)
         .unwrap_or(http::Framing::Empty);
-    let Ok(body) = http::read_body(&mut reader, framing).await else {
+    let Ok(body) = http::read_body(&mut reader, framing, http::MAX_BODY_BYTES).await else {
         return;
     };
     drop(reader);
@@ -162,8 +159,12 @@ async fn absolute_get(
         .expect("a response");
     let status = response.status().unwrap_or(0);
     let framing = http::response_framing("GET", status, &response);
-    let body =
-        String::from_utf8_lossy(&http::read_body(&mut reader, framing).await.unwrap()).into_owned();
+    let body = String::from_utf8_lossy(
+        &http::read_body(&mut reader, framing, http::MAX_BODY_BYTES)
+            .await
+            .unwrap(),
+    )
+    .into_owned();
     (status, body, response)
 }
 
@@ -211,8 +212,12 @@ async fn connect_get(
         .expect("inner response");
     let status = response.status().unwrap_or(0);
     let framing = http::response_framing("GET", status, &response);
-    let body =
-        String::from_utf8_lossy(&http::read_body(&mut io, framing).await.unwrap()).into_owned();
+    let body = String::from_utf8_lossy(
+        &http::read_body(&mut io, framing, http::MAX_BODY_BYTES)
+            .await
+            .unwrap(),
+    )
+    .into_owned();
     (200, status, body)
 }
 
@@ -421,9 +426,13 @@ async fn tunnel_keepalive_serves_sequential_requests() {
             .unwrap();
         let response = http::read_head(&mut io).await.unwrap().unwrap();
         assert_eq!(response.status(), Some(200), "round {round}");
-        let body = http::read_body(&mut io, http::response_framing("GET", 200, &response))
-            .await
-            .unwrap();
+        let body = http::read_body(
+            &mut io,
+            http::response_framing("GET", 200, &response),
+            http::MAX_BODY_BYTES,
+        )
+        .await
+        .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("path=/ka"));
     }
     engine.stop();

@@ -9,11 +9,13 @@
 //! 标准网络类型（端口语义由 manager 接线时再收口）。
 
 pub mod auth;
+pub mod builtin;
 pub mod ca;
 pub mod config;
 pub mod der;
 pub mod engine;
 pub mod http;
+pub mod plugin;
 pub mod target;
 pub mod tls;
 

@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 envboard-core-api.workspace = true
+async-trait.workspace = true
 envboard-rules.workspace = true
 arc-swap.workspace = true
 rcgen.workspace = true

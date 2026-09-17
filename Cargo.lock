@@ -351,6 +351,7 @@ name = "envboard-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "envboard-core-api",
  "envboard-rules",
  "rcgen",
