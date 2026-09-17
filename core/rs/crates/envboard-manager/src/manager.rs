@@ -539,7 +539,22 @@ impl Manager {
             });
         }
 
-        let plan: ReconcilePlan = plan_reconcile(&records, &BTreeSet::new());
+        // 占用探测**只服务于规划**（MarkConflict 的判据，v2 契约保留）：
+        // 启动路径自身不探测 —— 绑定才是真相。没有它，reconcile 会把"端口被占、
+        // 期望运行"的自动端口环境直接换端口拉走（静默重分配，契约禁止）。
+        let mut occupied = BTreeSet::new();
+        for raw in &state.environments {
+            let environment = Environment::from_json(raw)?;
+            let name = environment.name();
+            if state.desired_of(name) != Desired::Running || self.is_live(name) {
+                continue;
+            }
+            let listen = environment.listen();
+            if !self.probe.is_free(listen.host, listen.port) {
+                occupied.insert(listen.port);
+            }
+        }
+        let plan: ReconcilePlan = plan_reconcile(&records, &occupied);
         let report = ReconcileReport {
             actions: plan
                 .actions

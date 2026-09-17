@@ -11,6 +11,29 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
 `feat/rust-multi-env-manager`（从 `v0.1.0` 切出）。以下是**已经落地的契约层改动**——
 它们先于实现改动，因为契约是两份实现的裁定依据。
 
+### Changed（v3 重构 M-P5 第二步：manager 行为测试按 v3 语义重实现）
+
+- manager_lifecycle.rs 以 v3 形态重写（28 条全绿），暂存件删除；v2 的 29 条
+  逐条对账，**机制退场者目的由等价断言接替**：
+  - stale/missing 状态文件 → unhealthy/failed **来自引擎内存报告**
+    （inject_state 旋钮；"TCP 可连≠在跑"反转为"报告是唯一真相，期望保持
+    running 等 reconcile 拉回"）；
+  - 配置回显比对 / 收敛窗口 / config_error → apply 被拒三连：旧快照继续服务、
+    invalid_config 标记进健康原因、修复后标记自动清除；同步生效留痕
+    "hot-applied configuration"；
+  - 软链断 = 不覆盖 → 账本缺条目 = rules_missing（legacy 状态场景），
+    补导入即在跑实例热应用；
+  - 孤儿清理 / PID 复用绝不杀 → 结构上不存在可误杀的进程：reconcile 在
+    现实与期望一致时保持安静（keep / 无动作）；上一代重启 → **failed 引擎
+    被 reconcile 拉回 running**；
+  - reconcile 的 MarkConflict：占用探测**只保留在规划路径**（没有它，
+    自动端口环境会在 reconcile 里被静默换端口——契约禁止）；启动路径仍以
+    绑定为唯一真相。
+- FakeEngine 注入语义补强：非 running/starting 的报告**同时释放监听**
+  （与真引擎"线程死→运行时散→socket 关"同构），否则 failed-自愈路径测不出来。
+- 测试脚手架换共享 RecordingLogger 的 standalone()：单一写者纪律下，
+  "改状态文件再观察"的 legacy 场景必须经新管理器读取（这正是纪律的演习）。
+
 ### Changed（v3 重构 M-P5 第一步：契约改写与对拍退役）
 
 - 实例生命周期契约改写为 v3（capabilities.md 的「实例生命周期」与「配置下发与热
@@ -646,30 +669,3 @@ mitmproxy，本条目记录的是独立库面的落地。
   One rules file is **bound per environment**, so switching environment switches
   the rules file. `Environment.hosts` still wins over the bound rules file.
 - `examples/hosts.sample.txt`, a sanitized import sample (the real
-  `examples/hosts.txt` is gitignored — it carries internal IPs and hostnames).
-- 16 `envboard.*` mitmproxy commands giving full CLI/console parity with the
-  dashboard (5 new: `rules.list` / `rules.import` / `rules.show` / `rules.bind`
-  / `rules.remove`).
-- `ci/verify.sh` verification entrypoint: compile-check, dependency-lint,
-  unit tests, contract golden fixtures, best-effort mypy, pack-check and a smoke
-  test. Reachable as `npm run verify`.
-- `scripts/verify_live.sh` end-to-end check against a real mitmweb instance.
-
-### Fixed
-- `Environment.hosts` keys were stored **un-normalized**, so `API.Example.COM.`
-  or `*.wild.example.com` never matched the normalized lookup host — a silent
-  no-op, and contrary to what `core/spec/capabilities.md` promised. Hosts keys
-  are now normalized on construction (`*.` prefix stripped, per the contract),
-  and two keys collapsing to the same host is now a loud `invalid_config`.
-- The dashboard's JavaScript was inline in `index.html`, which mitmweb's CSP
-  (`default-src 'self'`, no `script-src`) makes browsers **refuse to execute**.
-  The page still returned 200 and rendered, so the curl-based live check passed
-  while the dashboard was in fact inert in a real browser (no data loaded, no
-  button worked). The script now lives in `web/app.js`, served by a same-origin
-  `AssetHandler`; `pack_check.py` rejects any inline `<script>` and
-  `verify_live.sh` asserts the external asset is served.
-
-### Known limitations
-- `mypy` is not vendored; `typecheck` degrades to a skip with an explicit notice
-  when it is unavailable.
-- `envboard.resolve` is an asynchronous command implemented as "schedule + read

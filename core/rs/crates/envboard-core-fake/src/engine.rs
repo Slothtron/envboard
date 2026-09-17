@@ -28,6 +28,8 @@ struct FakeInstance {
 #[derive(Debug, Default)]
 pub struct FakeEngine {
     entries: Mutex<BTreeMap<String, FakeInstance>>,
+    /// 注入旋钮：让 apply 以指定原因失败（错误契约两档的测试面）。
+    apply_failure: Mutex<Option<String>>,
 }
 
 impl FakeEngine {
@@ -53,11 +55,23 @@ impl FakeEngine {
             Some(instance) => {
                 let reason = state.reason_text();
                 instance.report.state = state;
+                // 与真引擎语义同构：线程终止后运行时消失，监听 socket 一并释放。
+                if !matches!(
+                    instance.report.state,
+                    InstanceState::Running | InstanceState::Starting
+                ) {
+                    instance._listener = None;
+                }
                 instance.report.last_error = reason;
                 true
             }
             None => false,
         }
+    }
+
+    /// 让后续 apply 全部失败（None 恢复成功）。失败原因进管理器的标记。
+    pub fn set_apply_failure(&self, reason: Option<&str>) {
+        *self.apply_failure.lock().unwrap() = reason.map(str::to_string);
     }
 
     /// 故障注入：伪造日志丢弃计数。
@@ -146,6 +160,12 @@ impl ProxyEngine for FakeEngine {
     }
 
     fn apply(&self, handle: &EngineHandle, spec: EngineSpec) -> Result<String, Error> {
+        if let Some(reason) = self.apply_failure.lock().unwrap().clone() {
+            return Err(Error::new(
+                envboard_core_api::ErrorCode::InvalidConfig,
+                reason,
+            ));
+        }
         let mut guard = self.entries.lock().unwrap();
         let instance = guard.get_mut(&handle.env).ok_or_else(|| {
             Error::new(
