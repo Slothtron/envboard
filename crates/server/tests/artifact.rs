@@ -26,8 +26,6 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("..")
-        .join("..")
         .canonicalize()
         .expect("repo root")
 }
@@ -40,12 +38,12 @@ const REQUIRED: &[&str] = &[
     "CHANGELOG.md",
 ];
 
-/// 这几条**故意**不存在：它们断言 v1 的产物已清干净。
+/// 这几条**故意**不存在：它们断言 v1 的产物已清干净（v1 的 Python `tests/`
+/// 目录已由 crates/ 与 tests/ 的 Rust crate 取代，故不再列）。
 const REMOVED_IN_V2: &[&str] = &[
     "src",
     "addons",
     "pyproject.toml",
-    "tests",
     "scripts/pack_check.py", // doc-scope-lint: allow —— v1 的发布物校验脚本，路径故意不存在
 ];
 
@@ -54,10 +52,10 @@ const REMOVED_IN_V2: &[&str] = &[
 /// clone 必红"的事故（测试到 master 上 NotFound）。全局 ignore 管得着仓库想留的
 /// 文件，所以入库判据必须由门禁自己钉。
 const REPO_TEST_ASSETS: &[&str] = &[
-    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat/mitmproxy-ca.pem",
-    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat/mitmproxy-ca-cert.pem",
-    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat-alt/mitmproxy-ca.pem",
-    "core/rs/crates/envboard-core/tests/fixtures/mitmproxy-compat-alt/mitmproxy-ca-cert.pem",
+    "crates/engine/tests/fixtures/mitmproxy-compat/mitmproxy-ca.pem",
+    "crates/engine/tests/fixtures/mitmproxy-compat/mitmproxy-ca-cert.pem",
+    "crates/engine/tests/fixtures/mitmproxy-compat-alt/mitmproxy-ca.pem",
+    "crates/engine/tests/fixtures/mitmproxy-compat-alt/mitmproxy-ca-cert.pem",
 ];
 
 /// 发布工件清单（二进制另由 [`envboard_binary`] 校验）。
@@ -99,7 +97,7 @@ fn the_release_artifact_contains_only_expected_files() {
         problems.push("v3 不再有任何 adapters/ 目录 —— 引擎在仓库内部，没有宿主接线层".to_string());
     }
 
-    // v3 断言：进程内引擎在场（引擎线程名是 envboard-core 运行时的必然足迹）。
+    // v3 断言：进程内引擎在场（引擎线程名是引擎运行时的必然足迹）。
     let binary = std::fs::read(envboard_binary()).expect("built binary must be readable");
     const ENGINE_MARKER: &[u8] = b"envboard-engine-";
     if !binary

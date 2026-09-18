@@ -63,20 +63,6 @@ const PURE_MODULE_PREFIXES: &[&str] = &[
 ];
 const PURE_FORBIDDEN_TOKENS: &[&str] = &["tokio", "libc", "rcgen", "rustls", "axum"];
 
-/// 纯逻辑 crate 禁止出现的运行时 / 系统依赖。
-const IMPURE_DEPS: &[&str] = &[
-    "tokio",
-    "libc",
-    "axum",
-    "hyper",
-    "hyper-util",
-    "reqwest",
-    "tower",
-    "tower-http",
-    "mio",
-    "socket2",
-];
-
 /// 只有测试目标的 crate：它们的价值是 `cargo test` 的断言，不该有任何产物依赖。
 const TEST_ONLY_CRATES: &[&str] = &["envboard-contract-tests", "envboard-policy-tests"];
 
