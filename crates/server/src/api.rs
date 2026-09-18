@@ -138,6 +138,10 @@ pub fn router(state: AppState) -> Router {
             "/api/environments/:name/captures/:request_id",
             get(api_capture),
         )
+        .route("/api/debug", get(api_debug).post(api_debug_start))
+        .route("/api/debug/stop", post(api_debug_stop))
+        .route("/api/har", get(api_har_list).post(api_har_import))
+        .route("/api/har/:id", get(api_har_get).delete(api_har_delete))
         .route(
             "/api/environments/:name/capture/clear",
             post(api_capture_clear),
@@ -641,6 +645,83 @@ async fn api_trajectory_stream(
         }
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+}
+
+/// POST /api/debug {"env": "..."} —— 开启/切换调试会话（工作区级单例；
+/// 原目标环境抓包停止并清空）。
+async fn api_debug_start(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let Some(env) = body.get("env").and_then(Value::as_str) else {
+        return error_response(Error::invalid_config("env", "env is required"));
+    };
+    match state.manager.start_debug(env) {
+        Ok(view) => Json(serde_json::to_value(view).unwrap_or(Value::Null)).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// POST /api/debug/stop —— 停止并清空调试会话。
+async fn api_debug_stop(State(state): State<AppState>) -> Response {
+    match state.manager.stop_debug() {
+        Ok(stopped) => Json(json!({"ok": stopped})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// GET /api/debug —— 当前调试会话视图。
+async fn api_debug(State(state): State<AppState>) -> Response {
+    match state.manager.debug_view() {
+        Some(view) => Json(serde_json::to_value(view).unwrap_or(Value::Null)).into_response(),
+        None => Json(json!({"env": null})).into_response(),
+    }
+}
+
+/// POST /api/har/import —— 导入 HAR 会话（body = HAR 1.2 JSON；name 走查询参数）。
+async fn api_har_import(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let name = params
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| "imported.har".to_string());
+    match state.manager.har_import(&name, &body) {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// GET /api/har —— 导入会话列表。
+async fn api_har_list(State(state): State<AppState>) -> Response {
+    Json(json!({ "sessions": state.manager.har_list() })).into_response()
+}
+
+/// GET /api/har/:id?limit=N —— 导入会话条目窗口。
+async fn api_har_get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Ok(id) = id.parse::<u64>() else {
+        return not_found_response(&id);
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 5000);
+    match state.manager.har_get(id, limit) {
+        Some(view) => Json(view).into_response(),
+        None => not_found_response(&id.to_string()),
+    }
+}
+
+/// DELETE /api/har/:id —— 删除导入会话。
+async fn api_har_delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let Ok(id) = id.parse::<u64>() else {
+        return not_found_response(&id);
+    };
+    Json(json!({"ok": state.manager.har_delete(id)})).into_response()
 }
 
 /// GET /api/history?name=<env>&limit=N —— 控制面审计事件（只读、拉取式）。

@@ -34,6 +34,7 @@ use envboard_engine::{
     CaptureView as EngineCaptureView, ClockPort, CoreCapabilities, EngineHandle, EngineSpec, Error,
     ErrorCode, InstanceState, LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine,
 };
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::events::ControlEventLog;
@@ -87,6 +88,13 @@ impl EnvView {
     }
 }
 
+/// 调试会话视图：目标环境 + 其抓包会话。
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugView {
+    pub env: String,
+    pub capture: EngineCaptureView,
+}
+
 /// reconcile 的执行结果。
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileReport {
@@ -124,6 +132,10 @@ pub struct Manager {
     events: ControlEventLog,
     /// 账本代次：每次 commit +1（SSE 客户端用它跳过未变更的快照轮询）。
     generation: AtomicU64,
+    /// 调试会话目标（工作区级单例）：同一时刻至多一个环境在抓包。
+    debug_target: Mutex<Option<String>>,
+    /// 导入的 HAR 会话库（只读、进程生命周期、多会话并存）。
+    har_library: crate::har::HarLibrary,
 }
 
 /// 环境日志的文件写线（引擎经有界总线投递到这里；写失败只丢行，不回流）。
@@ -195,6 +207,8 @@ impl Manager {
             handles: Mutex::new(BTreeMap::new()),
             events,
             generation: AtomicU64::new(1),
+            debug_target: Mutex::new(None),
+            har_library: crate::har::HarLibrary::default(),
         };
         for message in manager.reconcile_rules()? {
             manager.logger.log(LogLevel::Info, &message);
@@ -1256,6 +1270,98 @@ impl Manager {
     pub fn clear_capture(&self, name: &str) -> Result<bool, Error> {
         self.require(name)?;
         Ok(self.engine.clear_capture(name))
+    }
+
+    // ---- 调试会话（工作区级单例）：切换即换代 —— 停旧、清旧、开新 ---- //
+
+    /// 把某环境的 capture 字段设为给定值（热字段；经 commit 走账本与审计事件）。
+    fn set_capture_field(&self, name: &str, enabled: bool) -> Result<(), Error> {
+        let raw = self.require(name)?;
+        let environment = Environment::from_json(&raw)?;
+        if environment.capture() == enabled {
+            return Ok(());
+        }
+        let patch = json!({ "capture": enabled });
+        self.update(name, &patch)?;
+        Ok(())
+    }
+
+    /// 开启/切换调试会话。原目标环境的抓包**停止并清空**。
+    pub fn start_debug(&self, env: &str) -> Result<DebugView, Error> {
+        self.require(env)?;
+        if !self.is_live(env) {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                format!("environment {env:?} is not running; start it before debugging"),
+            ));
+        }
+        let previous = self.debug_target.lock().unwrap().clone();
+        if let Some(old) = previous.as_ref().filter(|old| *old != env) {
+            let _ = self.engine.clear_capture(old);
+            let _ = self.set_capture_field(old, false);
+        }
+        self.set_capture_field(env, true)?;
+        *self.debug_target.lock().unwrap() = Some(env.to_string());
+        self.events.emit(
+            self.clock.now_unix_ms(),
+            ControlEvent::Custom {
+                kind: "debug/switched".to_string(),
+                payload: json!({ "env": env, "previous": previous }),
+            },
+        );
+        self.debug_view().ok_or_else(|| {
+            Error::new(
+                ErrorCode::InternalError,
+                "debug session vanished immediately".to_string(),
+            )
+        })
+    }
+
+    /// 停止调试会话：停记录 + 清空记录（不留痕迹）。
+    pub fn stop_debug(&self) -> Result<bool, Error> {
+        let Some(target) = self.debug_target.lock().unwrap().clone() else {
+            return Ok(false);
+        };
+        let _ = self.engine.clear_capture(&target);
+        let _ = self.set_capture_field(&target, false);
+        *self.debug_target.lock().unwrap() = None;
+        self.events.emit(
+            self.clock.now_unix_ms(),
+            ControlEvent::Custom {
+                kind: "debug/stopped".to_string(),
+                payload: json!({ "env": target }),
+            },
+        );
+        Ok(true)
+    }
+
+    /// 当前调试会话视图（目标环境不存在/没在跑 → None）。
+    pub fn debug_view(&self) -> Option<DebugView> {
+        let target = self.debug_target.lock().unwrap().clone()?;
+        let capture = self.engine.capture_view(&target, 500)?;
+        Some(DebugView {
+            env: target,
+            capture,
+        })
+    }
+
+    // ---- 导入会话（HAR；只读、多会话并存） ---- //
+
+    pub fn har_import(&self, name: &str, body: &Value) -> Result<Value, Error> {
+        let imported = crate::har::parse_session(self.har_library.next_id(), name, body)?;
+        self.har_library.admit(imported)
+    }
+
+    pub fn har_list(&self) -> Vec<Value> {
+        self.har_library.list()
+    }
+
+    pub fn har_get(&self, id: u64, limit: usize) -> Option<Value> {
+        self.har_library.get(id, limit)
+    }
+
+    pub fn har_delete(&self, id: u64) -> bool {
+        self.har_library.delete(id)
     }
 
     fn require(&self, name: &str) -> Result<Value, Error> {

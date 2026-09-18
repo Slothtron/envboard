@@ -16,6 +16,7 @@
 
 pub mod agent;
 pub mod events;
+pub mod har;
 pub mod infra;
 pub mod logs;
 pub mod manager;

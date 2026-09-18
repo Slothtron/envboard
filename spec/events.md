@@ -91,6 +91,17 @@ request/end | custom`
 - 消费：`GET .../captures?limit=`、`GET .../captures/:request_id`、
   `GET .../captures/export?format=har|jsonl`（HAR 1.2，对齐 mitmproxy savehar 形状）。
 
+## 会话双轨：调试会话（live）与导入会话（HAR）
+
+- **调试会话是工作区级单例**：`POST /api/debug {"env": ...}` 开启/切换目标；
+  **切换即换代 —— 原目标环境的抓包停止并清空**（capture=false + 清缓冲），新环境开启。
+  `POST /api/debug/stop` 停止并清空；`GET /api/debug` 返回当前会话视图。
+  环境字段 `capture` 仍是 per-env 开关（API 用户可用），调试页经 debug 端点驱动它。
+- **导入会话（HAR）**：`POST /api/har/import`（HAR 1.2）——多个并存、只读、
+  进程生命周期内易失；entries 反向映射成抓包记录形状（与调试会话同一渲染组件）。
+  有界：最多 8 个会话 / 总量 256 MiB，超限**拒收**（显式动作拒绝比静默淘汰合适）。
+  畸形 HAR → `invalid_config` 响亮拒绝。
+
 ## 消费面
 
 - 控制面：`GET /api/history?name=<env>&limit=N`（拉取式只读）；

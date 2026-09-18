@@ -26,6 +26,9 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   （`--capture-budget`，默认 256 MiB），body 超 256 KiB 标 omitted（缺失而非截断）；
   `GET .../captures` 详情/清空/导出（HAR 1.2 / JSONL）+ 工作台轨迹页点开详情与导出。
   设计参考 mitmproxy（成对落盘、raw/decoded 分离、缺失而非截断、View.clear）。
+- **调试页 + 会话双轨**：抓包独立为「调试」视图；调试会话是**工作区级单例**，
+  切换环境 = 原环境抓包停止并清空 + 新环境开启（`POST /api/debug`）；支持导入
+  HAR 会话（`POST /api/har/import`，多个并存只读，最多 8 个 / 256 MiB，超限拒收）。
 - **数据面请求轨迹**：`trajectories/<env>.jsonl`（request/start→upstream→
   body→response/head→end，`request_id` 贯穿；正文与头部不入轨迹）；独立有界
   总线 + `EngineReport.trajectory_drops`；`GET /api/environments/:name/trajectory`

@@ -1701,7 +1701,6 @@ async function loadTrajectory(env) {
     renderTrajectory(true);
   }
   startTrajectoryStream(env.name);
-  await refreshCaptureSession(env.name);
 }
 
 async function exportCapture() {
@@ -1825,45 +1824,122 @@ function rowFromEnvelope(envelope) {
   };
 }
 
-// ---- 抓包会话（易失：会话 = 实例生命周期；清空/导出走显式动作） ---- //
+// ---- 调试页：抓包会话（工作区级单例）+ 导入会话（HAR，多个并存） ---- //
 
-const captureState = { env: null, records: new Map(), session: null };
-
-async function refreshCaptureSession(env) {
-  if (state.trajEnv !== env) return;
-  try {
-    const data = await get(`${environmentPath(env)}/captures?limit=500`);
-    captureState.env = env;
-    captureState.session = data.session || null;
-    captureState.records = new Map((data.records || []).map((r) => [r.request_id, r]));
-    renderCaptureBar(data);
-  } catch { /* 实例不在跑：会话不存在，条隐藏 */ }
+function renderDebugView() {
+  const select = document.getElementById("debug-env");
+  const candidates = state.environments.filter((env) => env.health === "running");
+  select.replaceChildren(
+    ...candidates.map((env) => {
+      const option = document.createElement("option");
+      option.value = env.name;
+      option.textContent = `${env.name} (${env.listen.host}:${env.listen.port})`;
+      return option;
+    }),
+  );
 }
 
-function renderCaptureBar(view) {
-  const count = document.getElementById("traj-count");
-  if (!count || !captureState.session) return;
-  const dropped = view.dropped ? `，已淘汰 ${view.dropped} 条（更早记录已被挤出）` : "";
-  count.textContent =
-    `抓包会话 #${captureState.session.id} · gen ${captureState.session.generation} · ` +
-    `已捕获 ${view.captured} 条${dropped}`;
-}
-
-async function showCaptureDetail(env, requestId) {
-  const panel = document.getElementById("capture-detail");
+async function refreshDebug() {
+  if (state.view !== "debug") return;
+  renderDebugView();
   try {
-    const data = await get(`${environmentPath(env)}/captures?limit=500`);
-    const record = (data.records || []).find((r) => r.request_id === requestId);
-    if (!record) {
-      panel.hidden = false;
-      panel.textContent = `#${requestId} 的抓包不在当前会话窗口里（可能已被淘汰或未开抓包）。`;
+    const view = await get("/api/debug?limit=500");
+    const bar = document.getElementById("debug-count");
+    if (!view.env) {
+      bar.textContent = "当前没有调试会话 —— 选一个运行中的环境开启。";
+      document.getElementById("debug-records").replaceChildren();
       return;
     }
-    panel.hidden = false;
-    panel.textContent = JSON.stringify(record, null, 2);
-  } catch (error) {
-    reportError(error);
+    const dropped = view.capture.dropped
+      ? `，已淘汰 ${view.capture.dropped} 条（更早记录已被挤出）`
+      : "";
+    bar.textContent =
+      `抓包会话 #${view.capture.session.id} · ${view.env} · gen ${view.capture.session.generation} · ` +
+      `已捕获 ${view.capture.captured} 条${dropped}`;
+    if (view.capture.session) selectDebugTarget(view.env);
+    renderDebugRecords(view.capture.records || []);
+  } catch { /* 无会话 */ }
+}
+
+function selectDebugTarget(env) {
+  const select = document.getElementById("debug-env");
+  for (const option of select.options) option.selected = option.value === env;
+}
+
+async function renderDebugRecordDetail(requestId) {
+  const view = await get("/api/debug?limit=500");
+  const record = (view.capture?.records || []).find((r) => r.request_id === requestId);
+  const panel = document.getElementById("debug-records");
+  if (record) {
+    panel.replaceChildren(el("pre", "traj-row mono", JSON.stringify(record, null, 2)));
+  } else {
+    panel.replaceChildren(el("div", "empty-inline", `#${requestId} 的记录已被淘汰。`));
   }
+}
+
+function renderDebugRecords(records) {
+  const view = document.getElementById("debug-records");
+  if (!records.length) {
+    view.replaceChildren(el("div", "empty-inline", "还没有抓包记录。请求经过目标环境后这里会出现。"));
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const record of records) {
+    const request = record.request || {};
+    const response = record.response || {};
+    const node = el("div", "traj-row");
+    node.style.borderLeftColor = groupColor(record.request_id ?? 0);
+    node.style.cursor = "pointer";
+    node.title = "点击查看请求/响应详情";
+    node.textContent =
+      `${request.method} ${request.authority}${request.path} → ${response.status}` +
+      ` (#${record.request_id}${response.body?.omitted ? "，正文超限未记" : ""})`;
+    node.addEventListener("click", () => {
+      renderDebugRecordDetail(record.request_id).catch(reportError);
+    });
+    fragment.appendChild(node);
+  }
+  view.replaceChildren(fragment);
+}
+
+// ---- 导入会话（HAR） ---- //
+
+async function refreshHarList() {
+  const data = await get("/api/har");
+  const list = document.getElementById("har-list");
+  const count = document.getElementById("har-count");
+  const sessions = data.sessions || [];
+  count.textContent = `${sessions.length} 个导入会话`;
+  if (!sessions.length) {
+    list.replaceChildren(el("div", "empty-inline", "还没有导入会话。选择一个 HAR 文件导入（可同时打开多个，只读）。"));
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const session of sessions) {
+    const node = el("div", "traj-row");
+    node.style.borderLeftColor = groupColor(session.id);
+    node.style.cursor = "pointer";
+    node.title = "点击查看条目";
+    node.textContent = `#${session.id} ${session.name} · ${session.entries} 条`;
+    const del = el("button", "btn icon-btn sm", "×");
+    del.setAttribute("aria-label", `删除会话 ${session.name}`);
+    del.addEventListener("click", (event) => {
+      event.stopPropagation();
+      mutate(`/api/har/${session.id}`, "DELETE")
+        .then(() => refreshHarList())
+        .catch(reportError);
+    });
+    node.appendChild(del);
+    node.addEventListener("click", () => {
+      get(`/api/har/${session.id}?limit=500`).then((view) => {
+        const panel = document.getElementById("har-records");
+        panel.hidden = false;
+        panel.textContent = JSON.stringify(view.records || [], null, 2);
+      }).catch(reportError);
+    });
+    fragment.appendChild(node);
+  }
+  list.replaceChildren(fragment);
 }
 
 /// 渲染轨迹时间线：同一 request_id 的事件用同色左边线归组，一眼可读。
@@ -1887,13 +1963,6 @@ function renderTrajectory(force) {
     node.style.borderLeftColor = groupColor(row.requestId ?? 0);
     const time = new Date(row.time).toLocaleTimeString();
     node.textContent = `${time} #${row.requestId ?? "—"} ${row.dot} ${row.text}`;
-    if (state.trajEnv && row.kind === "custom" && row.text.startsWith("capture/saved")) {
-      node.title = "点击查看抓包详情";
-      node.style.cursor = "pointer";
-      node.addEventListener("click", () => {
-        showCaptureDetail(state.trajEnv, row.requestId).catch(reportError);
-      });
-    }
     fragment.appendChild(node);
   }
   const previousTop = view.scrollTop;
@@ -2077,6 +2146,10 @@ function setView(view) {
   document.getElementById("side-rules").classList.toggle("is-hidden", view !== "rules");
   if (view === "rules") renderRuleSidebar(true);
   if (view === "activity") loadActivity();
+  if (view === "debug") {
+    refreshDebug().catch(reportError);
+    refreshHarList().catch(reportError);
+  }
   // 规则数计数 chip 跟着视图亮起来（计数 chip 的激活态定义见 app.css 的 .count.is-active）
   document.getElementById("rules-count").classList.toggle("is-active", view === "rules");
 }
@@ -2365,8 +2438,37 @@ function wire() {
   document.getElementById("activity-refresh").addEventListener("click", () => {
     loadActivity().catch(reportError);
   });
-  document.getElementById("capture-export").addEventListener("click", () => {
-    exportCapture().catch(reportError);
+  document.getElementById("debug-start").addEventListener("click", () => {
+    const env = document.getElementById("debug-env").value;
+    if (!env) { toast("没有运行中的环境可调试。", "info"); return; }
+    mutate("/api/debug", "POST", { env }).then(refreshDebug).catch(reportError);
+  });
+  document.getElementById("debug-stop").addEventListener("click", () => {
+    mutate("/api/debug/stop", "POST").then(refreshDebug).catch(reportError);
+  });
+  document.getElementById("debug-clear").addEventListener("click", () => {
+    const env = document.getElementById("debug-env").value;
+    if (!env) return;
+    mutate(`/api/environments/${encodeURIComponent(env)}/capture/clear`, "POST")
+      .then(refreshDebug).catch(reportError);
+  });
+  document.getElementById("debug-export").addEventListener("click", () => {
+    const env = document.getElementById("debug-env").value;
+    if (!env) return;
+    window.open(`/api/environments/${encodeURIComponent(env)}/captures/export?format=har`, "_blank");
+  });
+  document.getElementById("har-file").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const body = JSON.parse(await file.text());
+      await mutate(`/api/har/import?name=${encodeURIComponent(file.name)}`, "POST", body);
+      await refreshHarList();
+      toast("HAR 会话已导入。", "ok");
+    } catch (error) {
+      reportError(error);
+    }
+    event.target.value = "";
   });
   document.getElementById("log-clear").addEventListener("click", clearLogs);
 

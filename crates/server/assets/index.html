@@ -95,6 +95,9 @@
       <button type="button" class="nav-btn" data-view="activity" aria-pressed="false">
         <svg class="ic" aria-hidden="true"><use href="#i-refresh"></use></svg><span>活动</span>
       </button>
+      <button type="button" class="nav-btn" data-view="debug" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg><span>调试</span>
+      </button>
       <button type="button" class="nav-btn" data-view="settings" aria-pressed="false">
         <svg class="ic" aria-hidden="true"><use href="#i-gear"></use></svg><span>设置</span>
       </button>
@@ -373,13 +376,11 @@
             <div class="log-filters" role="group" aria-label="轨迹操作">
               <span class="log-count mono" id="traj-count">—</span>
               <div class="log-actions">
-                <button type="button" class="btn sm" id="capture-export" title="导出当前抓包会话（易失：停止/重启实例即丢弃）">导出抓包</button>
                 <button type="button" class="btn icon-btn sm is-active" id="traj-follow" aria-pressed="true" title="暂停跟随：暂停后轨迹视图不再实时刷新，便于读现场" aria-label="暂停跟随">
                   <svg class="ic ic-sm" aria-hidden="true"><use href="#i-pause"></use></svg>
                 </button>
               </div>
             </div>
-            <div class="log-view mono" id="capture-detail" hidden></div>
             <div class="log-view mono" id="trajectory" role="log" aria-live="off" tabindex="0"></div>
           </div>
         </div>
@@ -456,6 +457,39 @@
             <span class="log-count mono" id="activity-count">—</span>
           </div>
           <div class="log-view mono" id="activity" role="log" aria-live="off" tabindex="0"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：调试（抓包会话双轨：live 单例 + HAR 导入） ---------- -->
+    <section class="view is-hidden" id="view-debug" aria-label="调试视图">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-play"></use></svg><span>调试</span>
+          </h2>
+          <span class="badge settings-chip">抓包会话是易失的：切换环境/停止/重启即丢弃，导出才是持久化</span>
+        </div>
+        <div class="form-body">
+          <div class="log-filters" role="group" aria-label="调试会话">
+            <select id="debug-env" class="mono" aria-label="调试目标环境"></select>
+            <div class="log-actions">
+              <button type="button" class="btn sm" id="debug-start">开启 / 切换</button>
+              <button type="button" class="btn sm" id="debug-stop">停止并清空</button>
+              <button type="button" class="btn sm" id="debug-clear">清空本会话</button>
+              <button type="button" class="btn sm" id="debug-export">导出 HAR</button>
+            </div>
+          </div>
+          <span class="log-count mono" id="debug-count">—</span>
+          <div class="log-view mono" id="debug-records" role="log" aria-live="off" tabindex="0"></div>
+
+          <div class="form-head"><span class="form-title">导入会话（HAR）</span></div>
+          <div class="log-filters" role="group" aria-label="导入会话">
+            <input type="file" id="har-file" accept=".har,application/json" aria-label="选择 HAR 文件">
+            <span class="log-count mono" id="har-count">—</span>
+          </div>
+          <div class="log-view mono" id="har-list" role="list" tabindex="0"></div>
+          <div class="log-view mono" id="har-records" role="log" tabindex="0" hidden></div>
         </div>
       </div>
     </section>
