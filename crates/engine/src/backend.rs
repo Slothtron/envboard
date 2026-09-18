@@ -109,10 +109,7 @@ impl ProxyEngine for EngineBackend {
             .clone()
             .unwrap_or_else(|| Arc::new(crate::NullLineWriter));
         let pump = BoundedLinePump::start(sink);
-        let trajectory_pump = spec
-            .trajectory
-            .clone()
-            .map(|writer| BoundedLinePump::start(writer));
+        let trajectory_pump = spec.trajectory.clone().map(BoundedLinePump::start);
         let engine = EngineInstance::start(
             spec_to_config(&spec, Some(pump.writer())),
             Arc::clone(&self.ca),

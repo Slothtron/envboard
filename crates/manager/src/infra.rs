@@ -130,6 +130,29 @@ impl EventStorePort for RealEventStore {
         })
     }
 
+    fn read_from(&self, path: &Path, offset: u64) -> Result<Option<(u64, String)>, Error> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return Ok(None);
+        };
+        let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let offset = offset.min(len);
+        file.seek(SeekFrom::Start(offset)).map_err(|error| {
+            Error::new(ErrorCode::InternalError, format!("seek failed: {error}"))
+        })?;
+        let budget = (len - offset).min(256 * 1024);
+        let mut text = String::new();
+        file.take(budget)
+            .read_to_string(&mut text)
+            .map_err(|error| {
+                Error::new(ErrorCode::InternalError, format!("read failed: {error}"))
+            })?;
+        // 半行截断：只交付完整行，残端留给下一次读。
+        let complete = text.rfind('\n').map(|at| at + 1).unwrap_or(0);
+        text.truncate(complete);
+        Ok(Some((offset + complete as u64, text)))
+    }
+
     fn read_tail(&self, path: &Path, max_bytes: u64) -> Result<String, Error> {
         use std::io::{Read, Seek, SeekFrom};
         let Ok(mut file) = std::fs::File::open(path) else {

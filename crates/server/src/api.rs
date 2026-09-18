@@ -19,7 +19,7 @@ use envboard_manager::Manager;
 use futures_util::stream::Stream;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::IntervalStream;
+use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 
 use crate::config::{CONTENT_SECURITY_POLICY, REQUEST_HEADER, TOKEN_HEADER, WebConfig};
 
@@ -129,6 +129,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/environments/:name/reallocate", post(api_reallocate))
         .route("/api/environments/:name/logs", get(api_logs))
         .route("/api/environments/:name/trajectory", get(api_trajectory))
+        .route(
+            "/api/environments/:name/trajectory/stream",
+            get(api_trajectory_stream),
+        )
         .route("/api/rules", get(api_rules_list).post(api_rules_import))
         // 故障注入旋钮（live 断言组 9 的面）：核心不支持注入时如实 400。
         .route("/api/_fault", post(api_fault))
@@ -369,6 +373,60 @@ async fn api_trajectory(
         Ok(events) => Json(json!({ "events": events })).into_response(),
         Err(error) => error_response(error),
     }
+}
+
+/// GET /api/environments/:name/trajectory/stream —— SSE 实时轨迹。
+/// 连接即发 `baseline`（尾部窗口 + 游标），此后按 500ms 轮询文件增量发 `events`；
+/// 断线重连由前端带 `?cursor=` 从断点续传。
+async fn api_trajectory_stream(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let manager = state.manager.clone();
+    let name = name.clone();
+    let cursor = params
+        .get("cursor")
+        .and_then(|value| value.parse::<u64>().ok());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+    tokio::spawn(async move {
+        let encode = |event: &str, value: &serde_json::Value| {
+            Ok(Event::default().event(event).data(value.to_string()))
+        };
+        // 基线：cursor 提供则从断点续传，否则发尾部窗口。
+        let mut offset = match cursor {
+            Some(offset) => offset,
+            None => {
+                let baseline = manager.trajectory(&name, 200).unwrap_or_default();
+                let payload = json!({ "events": baseline });
+                if tx.send(encode("baseline", &payload)).await.is_err() {
+                    return;
+                }
+                0
+            }
+        };
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match manager.trajectory_since(&name, offset) {
+                Ok((new_offset, events)) if !events.is_empty() => {
+                    offset = new_offset;
+                    let payload = json!({ "events": events, "cursor": offset });
+                    if tx.send(encode("events", &payload)).await.is_err() {
+                        return;
+                    }
+                }
+                Ok((new_offset, _)) => offset = new_offset,
+                Err(error) => {
+                    let payload = json!({"ok": false, "error": {"code": error.code.as_str(), "message": error.message}});
+                    let _ = tx.send(encode("error", &payload)).await;
+                    return;
+                }
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 /// GET /api/history?name=<env>&limit=N —— 控制面审计事件（只读、拉取式）。

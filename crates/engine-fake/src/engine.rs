@@ -232,6 +232,7 @@ mod tests {
             rules_text: None,
             rules_source: None,
             log: None,
+            trajectory: None,
         }
     }
 

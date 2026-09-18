@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -118,6 +119,8 @@ pub struct Manager {
     handles: Mutex<BTreeMap<String, EngineHandle>>,
     /// 控制面审计事件日志（E-B：权威仍是 state.json，事件是观察）。
     events: ControlEventLog,
+    /// 账本代次：每次 commit +1（SSE 客户端用它跳过未变更的快照轮询）。
+    generation: AtomicU64,
 }
 
 /// 环境日志的文件写线（引擎经有界总线投递到这里；写失败只丢行，不回流）。
@@ -188,6 +191,7 @@ impl Manager {
             state: Mutex::new(state),
             handles: Mutex::new(BTreeMap::new()),
             events,
+            generation: AtomicU64::new(1),
         };
         for message in manager.reconcile_rules()? {
             manager.logger.log(LogLevel::Info, &message);
@@ -212,7 +216,49 @@ impl Manager {
     fn commit(&self, state: &PersistedState, event: ControlEvent) -> Result<(), Error> {
         self.repo.save(state)?;
         self.events.emit(self.clock.now_unix_ms(), event);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
+    }
+
+    /// 账本代次（每次控制面写入 +1）。
+    pub fn state_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// 轨迹增量读取（SSE 跟随）：从 `offset` 起的完整事件行。
+    /// 文件被轮转/截断（offset > size）→ 从头重发基线。
+    pub fn trajectory_since(&self, name: &str, offset: u64) -> Result<(u64, Vec<Value>), Error> {
+        self.require(name)?;
+        let Some(path) = self.config.trajectory_file(name) else {
+            return Ok((offset, Vec::new()));
+        };
+        let store = crate::infra::RealEventStore;
+        let Some((file_len, _)) = store.size(&path).map(|size| (size, ())) else {
+            return Ok((0, Vec::new()));
+        };
+        let offset = if offset > file_len { 0 } else { offset };
+        let Some((new_offset, text)) = store.read_from(&path, offset)? else {
+            return Ok((offset, Vec::new()));
+        };
+        if text.is_empty() {
+            return Ok((new_offset, Vec::new()));
+        }
+        let events = envboard_events::parse_log::<envboard_events::DataEvent>(&format!(
+            "{}\n{}",
+            envboard_events::header_line(),
+            text
+        ))
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::InternalError,
+                format!("trajectory log is unreadable: {error}"),
+            )
+        })?;
+        let values = events
+            .into_iter()
+            .map(|entry| serde_json::to_value(&entry.envelope).unwrap_or(Value::Null))
+            .collect();
+        Ok((new_offset, values))
     }
 
     /// 事件累计丢弃数（`/api/status` 暴露；磁盘故障的可见面）。

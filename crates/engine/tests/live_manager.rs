@@ -200,6 +200,7 @@ fn spec(port: u16, rules: Option<&str>, insecure: &[&str]) -> EngineSpec {
         rules_text: rules.map(str::to_string),
         rules_source: None,
         log: None,
+        trajectory: None,
     }
 }
 

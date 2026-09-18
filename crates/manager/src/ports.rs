@@ -52,6 +52,9 @@ pub trait EventStorePort: Send + Sync {
     fn rotate(&self, path: &Path) -> Result<(), Error>;
     /// 有界尾读（历史查询与 seq 恢复共用，不给"整文件读进内存"留路径）。
     fn read_tail(&self, path: &Path, max_bytes: u64) -> Result<String, Error>;
+    /// 从 `offset` 增量读取（SSE 跟随用）。None = 文件不存在。
+    /// 返回 (新 offset, 文本)；文本以整行结尾（半行留在下一次）。
+    fn read_from(&self, path: &Path, offset: u64) -> Result<Option<(u64, String)>, Error>;
 }
 
 // --------------------------------------------------------------------------- //
@@ -179,6 +182,15 @@ impl EventStorePort for MemoryEventStore {
             files.insert(rotated, text);
         }
         Ok(())
+    }
+
+    fn read_from(&self, path: &Path, offset: u64) -> Result<Option<(u64, String)>, Error> {
+        let files = self.files.lock().unwrap();
+        let Some(text) = files.get(path) else {
+            return Ok(None);
+        };
+        let offset = (offset as usize).min(text.len());
+        Ok(Some((text.len() as u64, text[offset..].to_string())))
     }
 
     fn read_tail(&self, path: &Path, max_bytes: u64) -> Result<String, Error> {

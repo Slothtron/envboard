@@ -46,9 +46,9 @@ impl TrajectoryRecorder {
     pub fn record(&self, event: DataEvent) {
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
         let envelope = Envelope::new(seq, crate::engine::unix_ms(), event);
-        match serde_json::to_string(&envelope) {
-            Ok(line) => self.writer.write_line(&line),
-            Err(_) => {} // 无损 JSON 在发射点拦截；序列化失败 = 编程错误，不外溢
+        // 无损 JSON 在发射点拦截；序列化失败 = 编程错误，不外溢
+        if let Ok(line) = serde_json::to_string(&envelope) {
+            self.writer.write_line(&line);
         }
     }
 }

@@ -61,6 +61,13 @@ const state = {
   streamOk: false,
   // ---- 日志栏 ----
   logsEnv: null,
+  trajEnv: null,
+  trajRows: [],
+  trajCursor: null,
+  trajFollow: true,
+  trajEs: null,
+  trajKey: "",
+  activity: [],
   logLines: [],
   logKind: "all",
   logSearch: "",
@@ -495,6 +502,8 @@ function renderDetail(force) {
   renderBoundRules(env);
   renderTabs();
   if (state.tab === "config") fillEditForm(env);
+  if (state.tab === "trajectory" && env) loadTrajectory(env);
+  if (state.tab !== "trajectory") stopTrajectoryStream();
 }
 
 function renderDetailActions(env) {
@@ -1677,6 +1686,210 @@ function renderLogs(force) {
   applyAutoscroll(previousTop);
 }
 
+// ---- 轨迹页签：数据面请求事件的实时时间线 ---- //
+
+/// 载入并跟随某环境的请求轨迹：先拉一次尾部窗口，再开 SSE 增量跟随。
+/// 环境切换或页签离开时由调用方停流（stopTrajectoryStream）。
+async function loadTrajectory(env) {
+  if (state.trajEnv !== env.name) {
+    stopTrajectoryStream();
+    state.trajEnv = env.name;
+    state.trajRows = [];
+    state.trajCursor = null;
+    state.trajKey = "";
+    await fetchTrajectoryPage(env.name);
+    renderTrajectory(true);
+  }
+  startTrajectoryStream(env.name);
+}
+
+async function fetchTrajectoryPage(name) {
+  try {
+    const data = await get(`${environmentPath(name)}/trajectory?limit=300`);
+    state.trajRows = (data.events || []).map(rowFromEnvelope);
+    state.trajCursor = state.trajRows.length
+      ? state.trajRows[state.trajRows.length - 1].seq
+      : 0;
+  } catch (error) {
+    reportError(error);
+  }
+}
+
+/// SSE：连接即发 baseline（尾部窗口 + cursor），此后 events 增量。
+/// 断线后 EventSource 自动重连；cursor 随 URL 重置，续传交给服务端。
+function startTrajectoryStream(name) {
+  if (state.trajEs && state.trajEnv === name) return;
+  stopTrajectoryStream();
+  const stream = new EventSource(
+    `${environmentPath(name)}/trajectory/stream?cursor=${state.trajCursor ?? 0}`,
+  );
+  state.trajEs = stream;
+  const ingest = (eventList) => {
+    if (!Array.isArray(eventList)) return;
+    for (const item of eventList) {
+      const row = rowFromEnvelope(item);
+      state.trajRows.push(row);
+    }
+    if (state.trajFollow) renderTrajectory(false);
+  };
+  stream.addEventListener("baseline", (event) => {
+    // 重连/换流都以 baseline 为准替换视图内容（不叠加）。
+    try {
+      const payload = JSON.parse(event.data);
+      state.trajRows = (payload.events || []).map(rowFromEnvelope);
+      state.trajKey = "";
+      renderTrajectory(true);
+    } catch { /* 畸形帧忽略 */ }
+  });
+  stream.addEventListener("events", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (typeof payload.cursor === "number") state.trajCursor = payload.cursor;
+      ingest(payload.events);
+    } catch { /* 畸形帧忽略 */ }
+  });
+  stream.addEventListener("error", () => {
+    // EventSource 会自动重连；这里只标记连接态（页脚的状态灯由 snapshot 流负责）。
+  });
+}
+
+function stopTrajectoryStream() {
+  if (state.trajEs) {
+    state.trajEs.close();
+    state.trajEs = null;
+  }
+}
+
+const TRAJ_DOT = {
+  "request/start": "▶",
+  "request/upstream": "→",
+  "request/body": "·",
+  "response/head": "◀",
+  "request/end": "■",
+  custom: "◇",
+};
+
+function rowFromEnvelope(envelope) {
+  const data = envelope.data || {};
+  const kind = envelope.type || "custom";
+  let text;
+  switch (kind) {
+    case "request/start":
+      text = `${data.method} ${data.authority}${data.path}（sni=${data.sni ?? "—"}${data.insecure ? "，放宽校验" : ""}）`;
+      break;
+    case "request/upstream":
+      text = `上连 ${data.resolved_addr}${data.rewritten ? "（hosts 改写）" : ""}`;
+      break;
+    case "request/body":
+      text = `请求体 ${data.bytes} B`;
+      break;
+    case "response/head":
+      text = `响应 ${data.status}（${data.bytes} B）`;
+      break;
+    case "request/end":
+      text = data.error ? `结束：${data.error}` : `完成，${data.duration_ms} ms`;
+      break;
+    default:
+      text = kind === "custom" ? `${data.kind} ${JSON.stringify(data.payload ?? {})}` : JSON.stringify(data);
+  }
+  return {
+    seq: envelope.seq,
+    time: envelope.time,
+    requestId: data.request_id,
+    kind,
+    dot: TRAJ_DOT[kind] || "◇",
+    text,
+  };
+}
+
+/// 渲染轨迹时间线：同一 request_id 的事件用同色左边线归组，一眼可读。
+function renderTrajectory(force) {
+  const view = document.getElementById("trajectory");
+  const count = document.getElementById("traj-count");
+  const key = `${state.trajEnv}|${state.trajRows.length}|${state.trajRows.at(-1)?.seq ?? 0}`;
+  if (!force && key === state.trajKey) return;
+  state.trajKey = key;
+  if (count) count.textContent = `${state.trajRows.length} 条事件 · cursor ${state.trajCursor ?? "—"}`;
+  if (!state.trajRows.length) {
+    view.replaceChildren(
+      el("div", "empty-inline", `还没有 ${state.trajEnv || "该环境"} 的请求轨迹。发一个经过代理的请求，这里会实时出现。`),
+    );
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const row of state.trajRows) {
+    const node = el("div", "traj-row");
+    node.dataset.requestId = row.requestId ?? "";
+    node.style.borderLeftColor = groupColor(row.requestId ?? 0);
+    const time = new Date(row.time).toLocaleTimeString();
+    node.textContent = `${time} #${row.requestId ?? "—"} ${row.dot} ${row.text}`;
+    fragment.appendChild(node);
+  }
+  const previousTop = view.scrollTop;
+  const stick = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+  view.replaceChildren(fragment);
+  if (stick) view.scrollTop = view.scrollHeight;
+  else view.scrollTop = previousTop;
+}
+
+/// request_id → 稳定颜色（8 色循环；确定性关联，不猜最近一个未完成的）。
+function groupColor(id) {
+  const palette = ["#2a5fe8", "#0f8a5f", "#b3661a", "#8a2a8a", "#b31a1a", "#0f7a8a", "#5a5a5a", "#8a6a0f"];
+  return palette[id % palette.length] || "#5a5a5a";
+}
+
+// ---- 活动视图：控制面审计事件 ---- //
+
+async function loadActivity() {
+  try {
+    const data = await get("/api/history?limit=300");
+    state.activity = (data.events || []).map(activityRow);
+    renderActivity();
+  } catch (error) {
+    reportError(error);
+  }
+}
+
+function activityRow(envelope) {
+  const data = envelope.data || {};
+  const kind = envelope.type || "custom";
+  const who = data.name || data.rules_name || "";
+  let text;
+  switch (kind) {
+    case "environment/created": text = `创建环境（监听 ${data.listen}）`; break;
+    case "environment/updated": text = `更新字段：${(data.fields || []).join(", ")}`; break;
+    case "environment/deleted": text = "删除环境"; break;
+    case "rules/imported": text = `导入规则 ${data.rules_name}（sha ${String(data.rules_sha256 || "").slice(0, 12)}…）`; break;
+    case "rules/deleted": text = `删除规则 ${data.rules_name}`; break;
+    case "engine/applied": text = `热应用配置 ${String(data.config_hash || "").slice(0, 12)}…`; break;
+    case "engine/rejected": text = `配置被拒（旧快照继续服务）：${data.reason}`; break;
+    case "instance/started": text = "实例启动"; break;
+    case "instance/stopped": text = "实例停止"; break;
+    case "instance/reconciled": text = `reconcile：${data.from} → ${data.to}`; break;
+    default: text = kind === "custom" ? `${data.kind} ${JSON.stringify(data.payload ?? {})}` : JSON.stringify(data);
+  }
+  return { seq: envelope.seq, time: envelope.time, kind, who, text };
+}
+
+function renderActivity() {
+  const view = document.getElementById("activity");
+  const count = document.getElementById("activity-count");
+  if (count) count.textContent = `${state.activity.length} 条事件`;
+  if (!state.activity.length) {
+    view.replaceChildren(el("div", "empty-inline", "还没有控制面事件。新建一个环境，这里就会出现第一条记录。"));
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const row of [...state.activity].reverse()) {
+    const node = el("div", "traj-row");
+    node.style.borderLeftColor = groupColor(row.kind.length);
+    const time = new Date(row.time).toLocaleTimeString();
+    node.textContent = `${time} ${row.who ? `${row.who}: ` : ""}${row.text}`;
+    fragment.appendChild(node);
+  }
+  view.replaceChildren(fragment);
+}
+
 /// 导出当前视图（尊重事件类型过滤与关键词搜索）。文件名带环境名与时间戳。
 function downloadLogs() {
   const { visible } = visibleLogRows();
@@ -1786,11 +1999,13 @@ function setView(view) {
   document.getElementById("view-rules").classList.toggle("is-hidden", view !== "rules");
   document.getElementById("view-compare").classList.toggle("is-hidden", view !== "compare");
   document.getElementById("view-settings").classList.toggle("is-hidden", view !== "settings");
+  document.getElementById("view-activity").classList.toggle("is-hidden", view !== "activity");
   // 侧栏列表区：环境视图给环境列表，规则库视图给规则集列表（设计稿第 4 页），
   // 对比与设置视图不带列表区。
   document.getElementById("side-env").classList.toggle("is-hidden", view !== "environments");
   document.getElementById("side-rules").classList.toggle("is-hidden", view !== "rules");
   if (view === "rules") renderRuleSidebar(true);
+  if (view === "activity") loadActivity();
   // 规则数计数 chip 跟着视图亮起来（计数 chip 的激活态定义见 app.css 的 .count.is-active）
   document.getElementById("rules-count").classList.toggle("is-active", view === "rules");
 }
@@ -2069,6 +2284,16 @@ function wire() {
   });
 
   document.getElementById("log-download").addEventListener("click", downloadLogs);
+  document.getElementById("traj-follow").addEventListener("click", (event) => {
+    state.trajFollow = !state.trajFollow;
+    const button = event.currentTarget;
+    button.classList.toggle("is-active", state.trajFollow);
+    button.setAttribute("aria-pressed", String(state.trajFollow));
+    setIcon(button, state.trajFollow ? "pause" : "play");
+  });
+  document.getElementById("activity-refresh").addEventListener("click", () => {
+    loadActivity().catch(reportError);
+  });
   document.getElementById("log-clear").addEventListener("click", clearLogs);
 
   const logSearch = document.getElementById("log-search");

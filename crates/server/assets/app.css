@@ -861,6 +861,14 @@ body {
 .log-count { flex: none; font-size: var(--text-xs); color: var(--muted); }
 .log-actions { display: flex; align-items: center; gap: var(--space-1); flex: none; }
 
+.traj-row {
+  padding: 2px var(--space-3);
+  border-left: 2px solid var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.traj-row:hover { background: var(--surface-2, rgba(0, 0, 0, 0.03)); }
+
 .log-view {
   height: 380px; min-height: 0;
   /* 上下留白不对称是刻意的：底部要多留 4px，滚到末行时那一行才不会被下边缘贴着 */

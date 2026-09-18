@@ -252,6 +252,13 @@ mod tests {
             fn read_tail(&self, _path: &Path, _max_bytes: u64) -> Result<String, Error> {
                 Ok(String::new())
             }
+            fn read_from(
+                &self,
+                _path: &Path,
+                _offset: u64,
+            ) -> Result<Option<(u64, String)>, Error> {
+                Ok(None)
+            }
         }
         let log = ControlEventLog::open(
             Arc::new(BrokenStore),

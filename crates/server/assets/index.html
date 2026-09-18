@@ -92,6 +92,9 @@
       <button type="button" class="nav-btn" data-view="compare" aria-pressed="false">
         <svg class="ic" aria-hidden="true"><use href="#i-compare"></use></svg><span>跨环境对比</span>
       </button>
+      <button type="button" class="nav-btn" data-view="activity" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-refresh"></use></svg><span>活动</span>
+      </button>
       <button type="button" class="nav-btn" data-view="settings" aria-pressed="false">
         <svg class="ic" aria-hidden="true"><use href="#i-gear"></use></svg><span>设置</span>
       </button>
@@ -222,6 +225,7 @@
           <button type="button" class="tab" role="tab" data-tab="config" aria-selected="false" aria-controls="panel-config" id="tabbtn-config">配置</button>
           <button type="button" class="tab" role="tab" data-tab="rules" aria-selected="false" aria-controls="panel-rules" id="tabbtn-rules">规则</button>
           <button type="button" class="tab" role="tab" data-tab="logs" aria-selected="false" aria-controls="panel-logs" id="tabbtn-logs">日志</button>
+          <button type="button" class="tab" role="tab" data-tab="trajectory" aria-selected="false" aria-controls="panel-trajectory" id="tabbtn-trajectory">轨迹</button>
         </div>
 
         <div class="tab-panels">
@@ -362,6 +366,20 @@
               <div class="log-view mono" id="logs" role="log" aria-live="off" tabindex="0"></div>
             </div>
           </div>
+
+          <!-- 轨迹：数据面请求事件（request/start→end，按 request_id 关联）。
+               连接即发尾部窗口（SSE baseline），此后 500ms 增量跟随。 -->
+          <div class="tab-panel is-hidden" data-panel="trajectory" id="panel-trajectory" role="tabpanel" aria-labelledby="tabbtn-trajectory">
+            <div class="log-filters" role="group" aria-label="轨迹操作">
+              <span class="log-count mono" id="traj-count">—</span>
+              <div class="log-actions">
+                <button type="button" class="btn icon-btn sm is-active" id="traj-follow" aria-pressed="true" title="暂停跟随：暂停后轨迹视图不再实时刷新，便于读现场" aria-label="暂停跟随">
+                  <svg class="ic ic-sm" aria-hidden="true"><use href="#i-pause"></use></svg>
+                </button>
+              </div>
+            </div>
+            <div class="log-view mono" id="trajectory" role="log" aria-live="off" tabindex="0"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -416,6 +434,27 @@
         </form>
         <p class="hint">纯静态查表：规则是确定性的，所以这个问题不发任何请求、也不会失败。</p>
         <div id="compare-result" class="compare-result"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：活动（控制面审计事件时间线） ---------- -->
+    <section class="view is-hidden" id="view-activity" aria-label="活动视图">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-refresh"></use></svg><span>活动</span>
+          </h2>
+          <span class="badge settings-chip">控制面审计事件 —— 回答"它为什么变成这样"</span>
+        </div>
+        <div class="form-body">
+          <div class="log-actions">
+            <button type="button" class="btn sm" id="activity-refresh">
+              <svg class="ic ic-sm" aria-hidden="true"><use href="#i-refresh"></use></svg><span>刷新</span>
+            </button>
+            <span class="log-count mono" id="activity-count">—</span>
+          </div>
+          <div class="log-view mono" id="activity" role="log" aria-live="off" tabindex="0"></div>
+        </div>
       </div>
     </section>
 

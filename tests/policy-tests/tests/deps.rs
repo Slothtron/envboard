@@ -27,7 +27,7 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
     // 引擎库 = 唯一内部根（api 词汇 / rules / domain / 引擎本体全在其中，
     // 原先 api-domain-rules-core 的四条内部边变成了 crate 内的模块纪律，
     // 见下面第 2 条的源文件面判据）
-    ("envboard-engine", &[]),
+    ("envboard-engine", &["envboard-events"]),
     // 事件模型：纯数据词汇（serde/serde_json），manager 与 engine 都会用
     ("envboard-events", &[]),
     ("envboard-engine-fake", &["envboard-engine"]),
