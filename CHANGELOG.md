@@ -21,6 +21,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   state.json）；`Manager::commit` 单一发射点（先 save 后 emit，门禁钉死）；
   `GET /api/history` + 工作台「活动」视图；事件写失败丢弃 + 计数
   （`/api/status` 的 `events_dropped`）不阻断控制面。契约见 `spec/events.md`。
+- **抓包（capture）**：`capture` 环境字段（默认关、热开关）；请求/响应详情存
+  实例内存会话（停止/重启即丢弃，清空走 `POST .../capture/clear`），满即淘最旧
+  （`--capture-budget`，默认 256 MiB），body 超 256 KiB 标 omitted（缺失而非截断）；
+  `GET .../captures` 详情/清空/导出（HAR 1.2 / JSONL）+ 工作台轨迹页点开详情与导出。
+  设计参考 mitmproxy（成对落盘、raw/decoded 分离、缺失而非截断、View.clear）。
 - **数据面请求轨迹**：`trajectories/<env>.jsonl`（request/start→upstream→
   body→response/head→end，`request_id` 贯穿；正文与头部不入轨迹）；独立有界
   总线 + `EngineReport.trajectory_drops`；`GET /api/environments/:name/trajectory`

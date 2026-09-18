@@ -35,7 +35,10 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
     // 工作台 = 唯一宿主入口（lib 的 HTTP 面 + [[bin]] 组合根）。边表里的
     // envboard-engine 只允许 src/main.rs（装配引擎与共享 CA）使用；lib 侧
     // **依旧只认识管理器的公开 API**，由下面的源文件面判据钉死。
-    ("envboard-server", &["envboard-engine", "envboard-manager"]),
+    (
+        "envboard-server",
+        &["envboard-engine", "envboard-events", "envboard-manager"],
+    ),
     // 纯测试 crate
     ("envboard-contract-tests", &[]),
     // 工程门禁：不依赖任何内部 crate

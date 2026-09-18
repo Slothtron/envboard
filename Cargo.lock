@@ -394,6 +394,7 @@ dependencies = [
  "clap",
  "envboard-engine",
  "envboard-engine-fake",
+ "envboard-events",
  "envboard-manager",
  "futures-util",
  "libc",

@@ -72,6 +72,25 @@ request/end | custom`
 - 新增事件类型：枚举加变体 + 登记进 `KNOWN_CONTROL_KINDS` /
   `KNOWN_DATA_KINDS`（静态注册表，与本文档表格保持一致由代码评审保证）。
 
+## 抓包会话（capture；易失）
+
+- `capture` 是环境第 8 个字段，**默认 false**，PATCH 热开/关。**开关只控记录**：
+  关 = 停止记录新请求，已有记录原样保留；重新打开续用同一会话——开关往返不丢记录。
+- 会话 = 实例生命周期：记录在内存缓冲（无文件落盘），**停止/重启实例即全部丢弃**。
+  丢弃路径只有两个：手动 `POST .../capture/clear`（缓冲清零，会话延续，`generation` +1）
+  与实例消亡。对齐 mitmproxy 的内存 View + `view.clear`（它无 id、无生命周期管理），
+  这里把 `session.id / started_at / generation` 形式化出来供 UI 明示。
+- 记录形状：`{version, session, request_id, time, request{method,path,authority,headers,body},
+  response{status,headers,body}, error}`；成对落"盘"（内存条目），无半条记录
+  （与 mitmproxy `save.py` 在 response/error 才写整条 flow 同一纪律）。
+- **缺失而非截断**（mitmproxy `stream_large_bodies` 的语义等价物）：单侧 body 超
+  256 KiB → 只记头与元数据、body 标 `omitted: true`；body 按原始字节存
+  （utf8 直存 / 二进制 base64 标注），解码延迟到展示端。
+- 缓冲按字节预算淘汰（默认 256 MiB/环境，`--capture-budget` 可调），**满即淘最旧**，
+  `captured/dropped` 计数随 API 可见——内存占用恒定，长会话不丢记录的出路是导出。
+- 消费：`GET .../captures?limit=`、`GET .../captures/:request_id`、
+  `GET .../captures/export?format=har|jsonl`（HAR 1.2，对齐 mitmproxy savehar 形状）。
+
 ## 消费面
 
 - 控制面：`GET /api/history?name=<env>&limit=N`（拉取式只读）；

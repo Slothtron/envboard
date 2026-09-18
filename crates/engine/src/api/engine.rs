@@ -32,6 +32,10 @@ pub struct EngineSpec {
     pub log: Option<Arc<dyn LineWriter>>,
     /// 请求轨迹出口（trajectories/<env>.jsonl）。None = 不记轨迹。
     pub trajectory: Option<Arc<dyn LineWriter>>,
+    /// 抓包开关（运行期观测旋钮；不进 config_hash —— 与 log 同一性质）。
+    pub capture: bool,
+    /// 抓包缓冲字节预算（0 = 引擎默认 256 MiB）。
+    pub capture_budget: usize,
 }
 
 impl EngineSpec {
@@ -118,6 +122,24 @@ pub struct EngineReport {
     pub trajectory_drops: u64,
 }
 
+/// 抓包会话视图（Manager 经 ProxyEngine 面读取；引擎内部实现）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureView {
+    pub session: SessionInfo,
+    pub captured: u64,
+    pub dropped: u64,
+    pub records: Vec<serde_json::Value>,
+}
+
+/// 会话元数据：会话 = 实例生命周期；停止/重启即消失。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: u64,
+    pub started_at: u64,
+    /// 手动清空的代次（clear 一次 +1；用于 UI 区分前后两段）。
+    pub generation: u64,
+}
+
 /// 运行中的引擎实例句柄。无进程身份：实例不是进程。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineHandle {
@@ -144,6 +166,17 @@ pub trait ProxyEngine: Send + Sync {
 
     /// 内存读健康（同步：视图层因此不需要 await 引擎）。
     fn report(&self, handle: &EngineHandle) -> EngineReport;
+
+    /// 抓包会话视图（易失：会话 = 实例生命周期）。None = 实例不在跑。
+    /// 默认 None：不支持抓包的实现不必假装。
+    fn capture_view(&self, _env: &str, _limit: usize) -> Option<CaptureView> {
+        None
+    }
+
+    /// 手动清空抓包会话（generation +1，会话延续）。false = 实例不在跑。
+    fn clear_capture(&self, _env: &str) -> bool {
+        false
+    }
 
     /// 故障注入旋钮（live 断言与集成测试用）：
     /// 把已登记实例置为 failed 并释放监听 —— 与"引擎线程 panic 后运行时散掉、

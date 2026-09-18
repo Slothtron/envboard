@@ -46,6 +46,9 @@ struct Cli {
     #[arg(long)]
     port_range: Option<String>,
 
+    /// 抓包缓冲字节预算（每环境；默认 256 MiB，0 = 引擎默认）。
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    capture_budget: usize,
     /// 实例日志落盘目录（默认 `<state_dir>/logs`）。
     #[arg(long)]
     log_dir: Option<PathBuf>,
@@ -165,6 +168,7 @@ fn state_dir(cli: &Cli) -> Result<PathBuf, Error> {
 
 fn build_config(cli: &Cli) -> Result<ManagerConfig, Error> {
     let mut config = ManagerConfig::new(state_dir(cli)?);
+    config.capture_budget = cli.capture_budget;
     if let Some(dir) = cli.log_dir.clone() {
         config.log_dir = Some(dir);
     }

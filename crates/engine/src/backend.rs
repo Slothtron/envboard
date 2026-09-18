@@ -19,6 +19,7 @@ use crate::ca::SharedCa;
 use crate::config::EngineConfig;
 use crate::engine::{EngineInstance, EngineState};
 use crate::logsink::BoundedLinePump;
+use crate::trajectory::TrajectoryRecorder;
 
 /// config_hash 的唯一真相是 core-api 的 EngineSpec::hashable_json 摘要；
 /// 引擎内部编译哈希只做自身幂等，绝不作为对外回执（禁止第二真相）。
@@ -53,6 +54,9 @@ impl Entry {
 pub struct EngineBackend {
     ca: Arc<SharedCa>,
     entries: Mutex<BTreeMap<String, Entry>>,
+    /// 轨迹记录器与会话 id，**独立于 entries 的生命周期**：stop 移除 Entry 后
+    /// 再 start，seq/request_id 仍要续着上一次的走（否则轨迹文件断档）。
+    recorders: Mutex<BTreeMap<String, (Arc<TrajectoryRecorder>, u64)>>,
 }
 
 impl EngineBackend {
@@ -60,6 +64,7 @@ impl EngineBackend {
         EngineBackend {
             ca,
             entries: Mutex::new(BTreeMap::new()),
+            recorders: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -74,6 +79,8 @@ fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> Engine
         max_buffered_body: None,
         log_writer: log,
         trajectory_writer: spec.trajectory.clone(),
+        capture: spec.capture,
+        capture_budget: spec.capture_budget,
     }
 }
 
@@ -110,9 +117,29 @@ impl ProxyEngine for EngineBackend {
             .unwrap_or_else(|| Arc::new(crate::NullLineWriter));
         let pump = BoundedLinePump::start(sink);
         let trajectory_pump = spec.trajectory.clone().map(BoundedLinePump::start);
+        // recorder 与会话 id 跨 stop/start 复用（轨迹 seq 连续性）；抓包会话
+        // 则随本次实例全新开始。
+        let (recorder, session_id) = {
+            let mut recorders = self.recorders.lock().unwrap();
+            let slot = recorders.entry(env.clone()).or_insert_with(|| {
+                (
+                    Arc::new(TrajectoryRecorder::start(
+                        spec.trajectory
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(crate::NullLineWriter)),
+                    )),
+                    1,
+                )
+            });
+            let session_id = slot.1;
+            slot.1 += 1;
+            (slot.0.clone(), session_id)
+        };
         let engine = EngineInstance::start(
             spec_to_config(&spec, Some(pump.writer())),
             Arc::clone(&self.ca),
+            recorder,
+            session_id,
         )?;
         let handle = EngineHandle {
             env: env.clone(),
@@ -159,6 +186,31 @@ impl ProxyEngine for EngineBackend {
             engine.stop();
         }
         entry.injected = Some(format!("injected failure: {reason}"));
+        true
+    }
+
+    fn capture_view(&self, env: &str, limit: usize) -> Option<crate::CaptureView> {
+        let guard = self.entries.lock().unwrap();
+        let engine = guard.get(env)?.engine.as_ref()?;
+        let shared = engine.shared_handle();
+        Some(crate::CaptureView {
+            session: crate::SessionInfo {
+                id: shared.capture.session_id(),
+                started_at: shared.capture.started_at(),
+                generation: shared.capture.generation(),
+            },
+            captured: shared.capture.captured(),
+            dropped: shared.capture.dropped(),
+            records: shared.capture.tail(limit),
+        })
+    }
+
+    fn clear_capture(&self, env: &str) -> bool {
+        let guard = self.entries.lock().unwrap();
+        let Some(engine) = guard.get(env).and_then(|entry| entry.engine.as_ref()) else {
+            return false;
+        };
+        engine.shared_handle().capture.clear();
         true
     }
 

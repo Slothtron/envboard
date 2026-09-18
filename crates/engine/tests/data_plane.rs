@@ -109,7 +109,10 @@ async fn serve_echo<S: AsyncRead + AsyncWrite + Unpin>(mut io: S) {
 }
 
 async fn start_engine(cfg: EngineConfig, ca: Arc<SharedCa>) -> EngineInstance {
-    let engine = EngineInstance::start(cfg, ca).unwrap();
+    let recorder = std::sync::Arc::new(envboard_engine::trajectory::TrajectoryRecorder::start(
+        std::sync::Arc::new(envboard_engine::NullLineWriter),
+    ));
+    let engine = EngineInstance::start(cfg, ca, recorder, 1).unwrap();
     let status = engine.wait_until_settled(Duration::from_secs(5));
     assert_eq!(
         status.state,
@@ -378,7 +381,10 @@ async fn port_conflict_is_detected_without_try_bind() {
     let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
     let proxy = free_port().await;
     let first = start_engine(localhost_config(proxy), ca.clone()).await;
-    let second = EngineInstance::start(localhost_config(proxy), ca.clone()).unwrap();
+    let recorder = std::sync::Arc::new(envboard_engine::trajectory::TrajectoryRecorder::start(
+        std::sync::Arc::new(envboard_engine::NullLineWriter),
+    ));
+    let second = EngineInstance::start(localhost_config(proxy), ca.clone(), recorder, 1).unwrap();
     let status = second.wait_until_settled(Duration::from_secs(5));
     assert_eq!(
         status.state,

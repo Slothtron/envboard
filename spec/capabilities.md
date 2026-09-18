@@ -206,8 +206,9 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
   期望哈希；v2 靠状态文件回显 + 规则条数 + `options_echo` 的三层比对**整体删除**
   （同步装配不存在"宿主静默忽略一个选项"的介质）。
 - **热/停机字段**（PATCH 面，与「编辑已有环境」一节共同生效）：
-  - 热：`description`、`insecure_hosts`、`rules` 绑定、规则**内容**（import 同名
-    覆盖即对绑定环境热应用）；
+  - 热：`description`、`insecure_hosts`、`capture`、`rules` 绑定、规则**内容**
+    （import 同名覆盖即对绑定环境热应用）；`capture` 只控记录——关闭不停留也不清空，
+    清空走显式的 `POST .../capture/clear`，重启实例才整体丢弃（契约见 `spec/events.md`）；
   - 停机：`name`、`listen`、`proxy_user`、`proxy_password`。停机字段在实例运行时
     被修改 → `conflict`；热字段 apply 失败 → 按 `invalid_config` 标记，
     不得伪造成运行错误。

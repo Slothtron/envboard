@@ -145,10 +145,12 @@ impl AsyncWrite for Upstream {
     }
 }
 
-struct Shared {
+pub(crate) struct Shared {
     configs: ArcSwap<CompiledConfig>,
-    /// 请求轨迹记录器（实例生命周期持有：seq/request_id 跨热更新连续）。
-    trajectory: Option<Arc<crate::trajectory::TrajectoryRecorder>>,
+    /// 请求轨迹记录器（backend Entry 持有并跨重启复用；实例只是借用）。
+    trajectory: Arc<crate::trajectory::TrajectoryRecorder>,
+    /// 抓包会话缓冲（实例生命周期；停止/重启即消失）。
+    pub(crate) capture: crate::capture::CaptureBuffer,
     acceptor: TlsAcceptor,
     strict: Arc<rustls::ClientConfig>,
     permissive: Arc<rustls::ClientConfig>,
@@ -167,18 +169,29 @@ pub struct EngineInstance {
 impl EngineInstance {
     /// 拉起实例：配置先编译（响亮失败），线程随后台绑定；绑定结果经
     /// [EngineInstance::status] 可见（starting → running / port_conflict / failed）。
-    pub fn start(config: EngineConfig, ca: Arc<SharedCa>) -> Result<Self, Error> {
+    pub fn start(
+        config: EngineConfig,
+        ca: Arc<SharedCa>,
+        recorder: Arc<crate::trajectory::TrajectoryRecorder>,
+        capture_session_id: u64,
+    ) -> Result<Self, Error> {
         let compiled = config::compile(&config)?;
         let hash = compiled.config_hash.clone();
         let bound = compiled.listen;
         let server = tls::mitm_server_config(ca)?;
         let (shutdown, _) = watch::channel(false);
-        let trajectory = config
-            .trajectory_writer
-            .map(|writer| Arc::new(crate::trajectory::TrajectoryRecorder::start(writer)));
         let shared = Arc::new(Shared {
             configs: ArcSwap::from_pointee(compiled),
-            trajectory,
+            trajectory: recorder,
+            capture: crate::capture::CaptureBuffer::new(
+                capture_session_id,
+                unix_ms(),
+                if config.capture_budget > 0 {
+                    config.capture_budget
+                } else {
+                    crate::capture::DEFAULT_CAPTURE_BUDGET
+                },
+            ),
             acceptor: TlsAcceptor::from(server),
             strict: tls::strict_upstream_client_config()?,
             permissive: tls::permissive_upstream_client_config()?,
@@ -232,6 +245,11 @@ impl EngineInstance {
 
     pub fn status(&self) -> EngineStatus {
         self.shared.status.lock().unwrap().clone()
+    }
+
+    /// 抓包面内部接缝：backend 经它读取会话缓冲（不进 pub API 语义面）。
+    pub(crate) fn shared_handle(&self) -> Arc<Shared> {
+        self.shared.clone()
     }
 
     /// 等实例离开 starting（绑定成功或冲突/失败都是"定态"）。
@@ -554,12 +572,9 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
     // 内核播种 → hosts 规则修订连接目标 → 按最终地址做 insecure 判定。
     let mut target = ConnectTarget::seed(&origin.host, origin.port);
     let seed_addr = target.resolved_addr;
-    let request_id = shared
-        .trajectory
-        .as_ref()
-        .map(|recorder| recorder.next_request_id())
-        .unwrap_or(0);
-    if let Some(recorder) = &shared.trajectory {
+    let request_id = shared.trajectory.next_request_id();
+    {
+        let recorder = &shared.trajectory;
         recorder.record(DataEvent::RequestStart {
             request_id,
             method: method.clone(),
@@ -573,7 +588,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         return fail(
             cfg,
             io,
-            shared.trajectory.as_ref(),
+            &shared.trajectory,
             request_id,
             started_ms,
             clock,
@@ -591,7 +606,8 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         .map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| origin.host.clone());
     target.apply_insecure_match(cfg.is_insecure(origin.sni.as_deref(), Some(&address_text)));
-    if let Some(recorder) = &shared.trajectory {
+    {
+        let recorder = &shared.trajectory;
         recorder.record(DataEvent::RequestUpstream {
             request_id,
             resolved_addr: address_text.clone(),
@@ -600,7 +616,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         if matches!(target.tls_policy, TlsPolicy::Insecure) {
             // start 里 insecure 先记 false（改写判定在前）；这里补一条修订记录，
             // 让"放宽命中"在轨迹里可见（同 request_id 的确定性关联）。
-            recorder.record(envboard_events::DataEvent::Custom {
+            recorder.record(DataEvent::Custom {
                 kind: "tls/insecure".to_string(),
                 payload: serde_json::json!({ "request_id": request_id }),
             });
@@ -634,7 +650,8 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let request_body = request_bytes;
-    if let Some(recorder) = &shared.trajectory {
+    {
+        let recorder = &shared.trajectory;
         recorder.record(DataEvent::RequestBody {
             request_id,
             bytes: request_body.len() as u64,
@@ -645,7 +662,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             return fail(
                 cfg,
                 io,
-                shared.trajectory.as_ref(),
+                &shared.trajectory,
                 request_id,
                 started_ms,
                 clock,
@@ -665,7 +682,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             return fail(
                 cfg,
                 io,
-                shared.trajectory.as_ref(),
+                &shared.trajectory,
                 request_id,
                 started_ms,
                 clock,
@@ -683,7 +700,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             // 帧要跟着走）。这里只补终局记录。
             record(
                 cfg,
-                shared.trajectory.as_ref(),
+                &shared.trajectory,
                 request_id,
                 started_ms,
                 clock,
@@ -700,7 +717,37 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         }
         Ok(Exchange::Parts(part)) => {
             let (status, response_headers, response_body) = part;
-            if let Some(recorder) = &shared.trajectory {
+            if cfg.capture {
+                shared.capture.push(
+                    request_id,
+                    serde_json::json!({
+                        "version": 1,
+                        "session": shared.capture.session_id(),
+                        "request_id": request_id,
+                        "time": started_ms,
+                        "request": {
+                            "method": method,
+                            "path": path,
+                            "authority": authority,
+                            "headers": head.headers,
+                            "body": crate::capture::encode_body(&request_body),
+                        },
+                        "response": {
+                            "status": status,
+                            "headers": response_headers,
+                            "body": crate::capture::encode_body(&response_body),
+                        },
+                        "error": serde_json::Value::Null,
+                    }),
+                    request_body.len() + response_body.len() + 512,
+                );
+                shared.trajectory.record(DataEvent::Custom {
+                    kind: "capture/saved".to_string(),
+                    payload: serde_json::json!({ "request_id": request_id, "session": shared.capture.session_id() }),
+                });
+            }
+            {
+                let recorder = &shared.trajectory;
                 recorder.record(DataEvent::ResponseHead {
                     request_id,
                     status,
@@ -718,7 +765,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             .await?;
             record(
                 cfg,
-                shared.trajectory.as_ref(),
+                &shared.trajectory,
                 request_id,
                 started_ms,
                 clock,
@@ -739,7 +786,7 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
 #[allow(clippy::too_many_arguments)]
 fn record(
     cfg: &CompiledConfig,
-    trajectory: Option<&Arc<crate::trajectory::TrajectoryRecorder>>,
+    trajectory: &Arc<crate::trajectory::TrajectoryRecorder>,
     request_id: u64,
     timestamp: u64,
     clock: std::time::Instant,
@@ -766,7 +813,8 @@ fn record(
         error: None,
     };
     event.emit(&cfg.log_writer);
-    if let Some(recorder) = trajectory {
+    {
+        let recorder = trajectory;
         recorder.record(DataEvent::RequestEnd {
             request_id,
             duration_ms: clock.elapsed().as_millis() as u64,
@@ -779,7 +827,7 @@ fn record(
 async fn fail<W: AsyncRead + AsyncWrite + Unpin>(
     cfg: &CompiledConfig,
     io: &mut BufReader<W>,
-    trajectory: Option<&Arc<crate::trajectory::TrajectoryRecorder>>,
+    trajectory: &Arc<crate::trajectory::TrajectoryRecorder>,
     request_id: u64,
     timestamp: u64,
     clock: std::time::Instant,
@@ -804,7 +852,8 @@ async fn fail<W: AsyncRead + AsyncWrite + Unpin>(
         error: Some(reason.to_string()),
     };
     event.emit(&cfg.log_writer);
-    if let Some(recorder) = trajectory {
+    {
+        let recorder = trajectory;
         recorder.record(DataEvent::RequestEnd {
             request_id,
             duration_ms: clock.elapsed().as_millis() as u64,

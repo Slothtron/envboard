@@ -38,6 +38,10 @@ pub struct EngineConfig {
     pub log_writer: Option<Arc<dyn LineWriter>>,
     /// 轨迹出口（trajectories/<env>.jsonl）；None = 不记轨迹。
     pub trajectory_writer: Option<Arc<dyn LineWriter>>,
+    /// 抓包开关（只控记录：关 = 停止记录新请求，不清空已有记录）。
+    pub capture: bool,
+    /// 抓包缓冲字节预算（0 = 默认 256 MiB）。
+    pub capture_budget: usize,
 }
 
 impl Default for EngineConfig {
@@ -51,6 +55,8 @@ impl Default for EngineConfig {
             max_buffered_body: None,
             log_writer: None,
             trajectory_writer: None,
+            capture: false,
+            capture_budget: 0,
         }
     }
 }
@@ -59,6 +65,8 @@ impl Default for EngineConfig {
 pub struct CompiledConfig {
     pub listen: Listen,
     pub insecure_hosts: Vec<String>,
+    /// 抓包开关（快照值；apply 热切换生效）。
+    pub capture: bool,
     /// hosts 规则查找表（connect 路径直调改写）。
     pub rules: BTreeMap<String, String>,
     pub log_writer: Arc<dyn LineWriter>,
@@ -173,6 +181,7 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
     Ok(CompiledConfig {
         listen: config.listen,
         insecure_hosts: config.insecure_hosts.clone(),
+        capture: config.capture,
         rules,
         log_writer,
         max_buffered_body,

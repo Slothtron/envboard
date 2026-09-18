@@ -138,6 +138,8 @@ pub struct ManagerConfig {
     pub listen_host: IpAddr,
     pub port_range: (u16, u16),
     pub max_attempts: usize,
+    /// 抓包缓冲字节预算（每环境；0 = 引擎默认 256 MiB）。
+    pub capture_budget: usize,
 }
 
 impl ManagerConfig {
@@ -155,6 +157,7 @@ impl ManagerConfig {
             listen_host: DEFAULT_LISTEN_HOST,
             port_range: DEFAULT_PORT_RANGE,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            capture_budget: 0,
         }
     }
 

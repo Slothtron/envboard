@@ -31,8 +31,8 @@ use envboard_engine::domain::{
     plan_reconcile, seed_from, select_port,
 };
 use envboard_engine::{
-    ClockPort, CoreCapabilities, EngineHandle, EngineSpec, Error, ErrorCode, InstanceState,
-    LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine,
+    CaptureView as EngineCaptureView, ClockPort, CoreCapabilities, EngineHandle, EngineSpec, Error,
+    ErrorCode, InstanceState, LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine,
 };
 use serde_json::{Map, Value, json};
 
@@ -63,6 +63,8 @@ pub struct EnvView {
     pub proxy_command: String,
     /// 代理鉴权是否启用。只给布尔，不回显凭据。
     pub proxy_auth_enabled: bool,
+    /// 抓包开关（只控记录；清空走显式动作）。
+    pub capture: bool,
 }
 
 impl EnvView {
@@ -80,6 +82,7 @@ impl EnvView {
             "rules_missing": self.rules_missing,
             "proxy_command": self.proxy_command,
             "proxy_auth_enabled": self.proxy_auth_enabled,
+            "capture": self.capture,
         })
     }
 }
@@ -1032,6 +1035,8 @@ impl Manager {
             rules_source: rules_name.map(|name| self.config.rules_path(name)),
             log: self.log_writer(environment.name()),
             trajectory: self.trajectory_writer(environment.name()),
+            capture: environment.capture(),
+            capture_budget: self.config.capture_budget,
         }
     }
 
@@ -1241,6 +1246,18 @@ impl Manager {
         self.engine.inject_failed(name, reason)
     }
 
+    /// 抓包会话视图（易失；会话 = 实例生命周期）。
+    pub fn captures(&self, name: &str, limit: usize) -> Result<Option<EngineCaptureView>, Error> {
+        self.require(name)?;
+        Ok(self.engine.capture_view(name, limit))
+    }
+
+    /// 手动清空抓包会话（generation +1，会话延续）。
+    pub fn clear_capture(&self, name: &str) -> Result<bool, Error> {
+        self.require(name)?;
+        Ok(self.engine.clear_capture(name))
+    }
+
     fn require(&self, name: &str) -> Result<Value, Error> {
         self.state
             .lock()
@@ -1385,6 +1402,7 @@ impl Manager {
             rules: environment.rules().map(str::to_string),
             insecure_hosts: environment.insecure_hosts().to_vec(),
             description: environment.description().to_string(),
+            capture: environment.capture(),
             desired: state.desired_of(&name),
             health: self.verdict(&name, &environment, state),
             rules_count,

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 envboard-engine.workspace = true
+envboard-events.workspace = true
 clap.workspace = true
 envboard-manager.workspace = true
 axum = { workspace = true, features = ["json", "query"] }

@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod backend;
 pub mod ca;
+pub mod capture;
 pub mod config;
 pub mod der;
 pub mod domain;

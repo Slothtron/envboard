@@ -201,6 +201,8 @@ fn spec(port: u16, rules: Option<&str>, insecure: &[&str]) -> EngineSpec {
         rules_source: None,
         log: None,
         trajectory: None,
+        capture: false,
+        capture_budget: 0,
     }
 }
 

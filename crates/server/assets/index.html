@@ -373,11 +373,13 @@
             <div class="log-filters" role="group" aria-label="轨迹操作">
               <span class="log-count mono" id="traj-count">—</span>
               <div class="log-actions">
+                <button type="button" class="btn sm" id="capture-export" title="导出当前抓包会话（易失：停止/重启实例即丢弃）">导出抓包</button>
                 <button type="button" class="btn icon-btn sm is-active" id="traj-follow" aria-pressed="true" title="暂停跟随：暂停后轨迹视图不再实时刷新，便于读现场" aria-label="暂停跟随">
                   <svg class="ic ic-sm" aria-hidden="true"><use href="#i-pause"></use></svg>
                 </button>
               </div>
             </div>
+            <div class="log-view mono" id="capture-detail" hidden></div>
             <div class="log-view mono" id="trajectory" role="log" aria-live="off" tabindex="0"></div>
           </div>
         </div>

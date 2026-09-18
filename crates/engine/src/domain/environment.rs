@@ -28,6 +28,7 @@ pub const KNOWN_FIELDS: &[&str] = &[
     "description",
     "proxy_user",
     "proxy_password",
+    "capture",
 ];
 
 /// 只读（迁移）不写的旧字段。
@@ -62,6 +63,8 @@ pub struct Environment {
     description: String,
     proxy_user: Option<String>,
     proxy_password: Option<String>,
+    /// 抓包开关（默认关）。只控记录：关 = 停止记录新请求，不清空已有记录。
+    capture: bool,
 }
 
 impl Environment {
@@ -80,6 +83,7 @@ impl Environment {
             description: description.into(),
             proxy_user: None,
             proxy_password: None,
+            capture: false,
         }
     }
 
@@ -117,6 +121,10 @@ impl Environment {
 
     pub fn proxy_password(&self) -> Option<&str> {
         self.proxy_password.as_deref()
+    }
+
+    pub fn capture(&self) -> bool {
+        self.capture
     }
 
     /// 代理访问鉴权是否启用。视图/日志**只**能用这个布尔，禁止回显凭据。
@@ -158,6 +166,7 @@ impl Environment {
         );
         out.insert("proxy_user".into(), nullable(&self.proxy_user));
         out.insert("proxy_password".into(), nullable(&self.proxy_password));
+        out.insert("capture".into(), Value::Bool(self.capture));
         Value::Object(out)
     }
 
@@ -192,6 +201,7 @@ impl Environment {
         let insecure_hosts = parse_insecure_hosts(object.get("insecure_hosts"))?;
         let description = parse_description(object.get("description"))?;
         let (proxy_user, proxy_password) = parse_credentials(object)?;
+        let capture = parse_capture(object.get("capture"))?;
 
         Ok(Self {
             name,
@@ -201,6 +211,7 @@ impl Environment {
             description,
             proxy_user,
             proxy_password,
+            capture,
         })
     }
 
@@ -245,6 +256,17 @@ fn nullable(value: &Option<String>) -> Value {
     match value {
         Some(text) => Value::String(text.clone()),
         None => Value::Null,
+    }
+}
+
+/// `capture` 解析：缺省/null = false；给出则必须是布尔。
+fn parse_capture(value: Option<&Value>) -> Result<bool, Error> {
+    let field = format!("{PATH}.capture");
+    match value {
+        None | Some(Value::Null) => Ok(false),
+        Some(value) => value.as_bool().ok_or_else(|| {
+            Error::invalid_config(&field, format!("capture must be a boolean, got {value}"))
+        }),
     }
 }
 

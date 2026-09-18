@@ -1701,6 +1701,29 @@ async function loadTrajectory(env) {
     renderTrajectory(true);
   }
   startTrajectoryStream(env.name);
+  await refreshCaptureSession(env.name);
+}
+
+async function exportCapture() {
+  const env = state.trajEnv || currentEnvironment()?.name;
+  if (!env) return;
+  try {
+    const response = await fetch(
+      `${environmentPath(env)}/captures/export?format=har`,
+      { headers: headers(false) },
+    );
+    if (!response.ok) throw await response.json();
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = el("a");
+    link.href = url;
+    link.download = `${env}-captures.har`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast("抓包会话已导出为 HAR。", "ok");
+  } catch (error) {
+    reportError(error);
+  }
 }
 
 async function fetchTrajectoryPage(name) {
@@ -1802,6 +1825,47 @@ function rowFromEnvelope(envelope) {
   };
 }
 
+// ---- 抓包会话（易失：会话 = 实例生命周期；清空/导出走显式动作） ---- //
+
+const captureState = { env: null, records: new Map(), session: null };
+
+async function refreshCaptureSession(env) {
+  if (state.trajEnv !== env) return;
+  try {
+    const data = await get(`${environmentPath(env)}/captures?limit=500`);
+    captureState.env = env;
+    captureState.session = data.session || null;
+    captureState.records = new Map((data.records || []).map((r) => [r.request_id, r]));
+    renderCaptureBar(data);
+  } catch { /* 实例不在跑：会话不存在，条隐藏 */ }
+}
+
+function renderCaptureBar(view) {
+  const count = document.getElementById("traj-count");
+  if (!count || !captureState.session) return;
+  const dropped = view.dropped ? `，已淘汰 ${view.dropped} 条（更早记录已被挤出）` : "";
+  count.textContent =
+    `抓包会话 #${captureState.session.id} · gen ${captureState.session.generation} · ` +
+    `已捕获 ${view.captured} 条${dropped}`;
+}
+
+async function showCaptureDetail(env, requestId) {
+  const panel = document.getElementById("capture-detail");
+  try {
+    const data = await get(`${environmentPath(env)}/captures?limit=500`);
+    const record = (data.records || []).find((r) => r.request_id === requestId);
+    if (!record) {
+      panel.hidden = false;
+      panel.textContent = `#${requestId} 的抓包不在当前会话窗口里（可能已被淘汰或未开抓包）。`;
+      return;
+    }
+    panel.hidden = false;
+    panel.textContent = JSON.stringify(record, null, 2);
+  } catch (error) {
+    reportError(error);
+  }
+}
+
 /// 渲染轨迹时间线：同一 request_id 的事件用同色左边线归组，一眼可读。
 function renderTrajectory(force) {
   const view = document.getElementById("trajectory");
@@ -1823,6 +1887,13 @@ function renderTrajectory(force) {
     node.style.borderLeftColor = groupColor(row.requestId ?? 0);
     const time = new Date(row.time).toLocaleTimeString();
     node.textContent = `${time} #${row.requestId ?? "—"} ${row.dot} ${row.text}`;
+    if (state.trajEnv && row.kind === "custom" && row.text.startsWith("capture/saved")) {
+      node.title = "点击查看抓包详情";
+      node.style.cursor = "pointer";
+      node.addEventListener("click", () => {
+        showCaptureDetail(state.trajEnv, row.requestId).catch(reportError);
+      });
+    }
     fragment.appendChild(node);
   }
   const previousTop = view.scrollTop;
@@ -2293,6 +2364,9 @@ function wire() {
   });
   document.getElementById("activity-refresh").addEventListener("click", () => {
     loadActivity().catch(reportError);
+  });
+  document.getElementById("capture-export").addEventListener("click", () => {
+    exportCapture().catch(reportError);
   });
   document.getElementById("log-clear").addEventListener("click", clearLogs);
 

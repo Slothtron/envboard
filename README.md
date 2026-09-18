@@ -21,6 +21,7 @@
 | 端口自动分配（区间内随机试绑，新建冲突自动重试一次） | ✅ |
 | 按 host 改写上连目标（hosts 规则，只改 `ConnectTarget.resolved_addr`） | ✅ |
 | 请求轨迹（每请求一条 append-only 事件流，SSE 实时跟随） | ✅ |
+| 抓包（请求/响应详情，实例内存会话：默认关、热开关、停止/重启即丢弃、HAR/JSONL 导出） | ✅ |
 | 控制面审计事件（权威仍在 state.json；`GET /api/history` + 工作台「活动」） | ✅ |
 | CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；absolute-URI 正向代理；101 透传 | ✅ |
 | 代理访问鉴权（`proxy_user` / `proxy_password` → 407 门；**凭据只在内存**，不进 argv / 视图 / SSE） | ✅ |
@@ -227,6 +228,10 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 | GET | `/api/environments/:name/trajectory?limit=N` | 请求轨迹尾部（拉取式） |
 | GET | `/api/environments/:name/trajectory/stream` | SSE 实时轨迹（`baseline` 尾部窗口 + `events` 增量；断线带 `?cursor=` 续传） |
 | GET | `/api/history?name=<env>&limit=N` | 控制面审计事件（只读；`name` 缺省 = 全部） |
+| GET | `/api/environments/:name/captures?limit=N` | 抓包会话尾部（易失，会话 = 实例生命周期） |
+| GET | `/api/environments/:name/captures/:request_id` | 单条抓包详情 |
+| POST | `/api/environments/:name/capture/clear` | 手动清空抓包会话（会话延续） |
+| GET | `/api/environments/:name/captures/export?format=har\|jsonl` | 导出当前抓包会话（HAR 1.2 / JSONL 下载） |
 | GET/POST | `/api/rules` | 规则账本列表（名字 + 条数） / 导入（覆盖同名 = 对绑定环境热应用） |
 | GET/DELETE | `/api/rules/:name` | 规则原文 / 删除（仍被绑定时 `conflict`） |
 | GET | `/api/compare?host=<域名>` | 跨环境静态对比：该域名在各环境被覆盖成什么（不发请求） |

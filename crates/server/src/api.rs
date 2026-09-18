@@ -129,6 +129,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/environments/:name/reallocate", post(api_reallocate))
         .route("/api/environments/:name/logs", get(api_logs))
         .route("/api/environments/:name/trajectory", get(api_trajectory))
+        .route("/api/environments/:name/captures", get(api_captures))
+        .route(
+            "/api/environments/:name/captures/export",
+            get(api_captures_export),
+        )
+        .route(
+            "/api/environments/:name/captures/:request_id",
+            get(api_capture),
+        )
+        .route(
+            "/api/environments/:name/capture/clear",
+            post(api_capture_clear),
+        )
         .route(
             "/api/environments/:name/trajectory/stream",
             get(api_trajectory_stream),
@@ -373,6 +386,207 @@ async fn api_trajectory(
         Ok(events) => Json(json!({ "events": events })).into_response(),
         Err(error) => error_response(error),
     }
+}
+
+/// GET /api/environments/:name/captures?limit=N —— 抓包会话尾部（易失）。
+async fn api_captures(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 2000);
+    match state.manager.captures(&name, limit) {
+        Ok(Some(view)) => Json(serde_json::to_value(view).unwrap_or(Value::Null)).into_response(),
+        Ok(None) => not_found_response(&name),
+        Err(error) => error_response(error),
+    }
+}
+
+/// GET /api/environments/:name/captures/:request_id —— 单条抓包详情。
+async fn api_capture(
+    State(state): State<AppState>,
+    Path((name, request_id)): Path<(String, String)>,
+) -> Response {
+    let Ok(request_id) = request_id.parse::<u64>() else {
+        return error_response(Error::invalid_config(
+            "request_id",
+            format!("request_id must be an integer, got {request_id:?}"),
+        ));
+    };
+    match state.manager.captures(&name, 1) {
+        Ok(Some(view)) => match view
+            .records
+            .iter()
+            .find(|r| r.get("request_id") == Some(&serde_json::json!(request_id)))
+        {
+            Some(record) => Json(record.clone()).into_response(),
+            None => not_found_response(&name),
+        },
+        Ok(None) => not_found_response(&name),
+        Err(error) => error_response(error),
+    }
+}
+
+/// POST /api/environments/:name/capture/clear —— 手动清空会话（会话延续）。
+async fn api_capture_clear(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.clear_capture(&name) {
+        Ok(true) => Json(json!({"ok": true})).into_response(),
+        Ok(false) => not_found_response(&name),
+        Err(error) => error_response(error),
+    }
+}
+
+/// GET /api/environments/:name/captures/export?format=har|jsonl —— 导出当前会话。
+async fn api_captures_export(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let format = params.get("format").map(String::as_str).unwrap_or("har");
+    let Some(view) = state.manager.captures(&name, usize::MAX).unwrap_or(None) else {
+        return not_found_response(&name);
+    };
+    match format {
+        "jsonl" => {
+            let mut body = envboard_events::header_line();
+            body.push('\n');
+            for record in &view.records {
+                body.push_str(&record.to_string());
+                body.push('\n');
+            }
+            attachment(
+                body,
+                &format!("{name}-session-{}.jsonl", view.session.id),
+                "application/x-ndjson",
+            )
+        }
+        "har" => {
+            let har = har_from_records(&name, &view.records);
+            match serde_json::to_string_pretty(&har) {
+                Ok(text) => attachment(
+                    text,
+                    &format!("{name}-session-{}.har", view.session.id),
+                    "application/json",
+                ),
+                Err(error) => error_response(Error::new(
+                    envboard_engine::ErrorCode::InternalError,
+                    format!("har serialization failed: {error}"),
+                )),
+            }
+        }
+        other => error_response(Error::invalid_config(
+            "format",
+            format!("format must be har or jsonl, got {other:?}"),
+        )),
+    }
+}
+
+fn not_found_response(name: &str) -> Response {
+    error_response(Error::new(
+        envboard_engine::ErrorCode::NotFound,
+        format!(
+            "no live capture session for environment {name:?} (session lives with the running instance)"
+        ),
+    ))
+}
+
+fn attachment(body: String, filename: &str, content_type: &str) -> Response {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\u{22}{filename}\u{22}"),
+        )],
+        [(header::CONTENT_TYPE, content_type)],
+        body,
+    )
+        .into_response()
+}
+
+/// HAR 1.2 形状（对齐 mitmproxy 的 savehar 输出）：只含我们记录到的字段。
+fn har_from_records(env: &str, records: &[Value]) -> Value {
+    let entries: Vec<Value> = records
+        .iter()
+        .filter_map(|record| {
+            let request = record.get("request")?;
+            let response = record.get("response")?;
+            let body_to_har = |body: &Value| -> Value {
+                let size = body.get("size").and_then(Value::as_u64).unwrap_or(0);
+                if body.get("omitted").is_some() {
+                    json!({"size": size, "mimeType": null, "text": null})
+                } else {
+                    let text = body.get("content").and_then(Value::as_str).unwrap_or("");
+                    json!({"size": size, "mimeType": null, "text": text})
+                }
+            };
+            Some(json!({
+                "startedDateTime": record.get("time")
+                    .and_then(Value::as_u64)
+                    .map(|ms| format!("{ms}"))
+                    .unwrap_or_default(),
+                "time": 0,
+                "_envboard": {
+                    "session": record.get("session").cloned().unwrap_or(Value::Null),
+                    "request_id": record.get("request_id").cloned().unwrap_or(Value::Null),
+                },
+                "request": {
+                    "method": request.get("method").cloned().unwrap_or(Value::Null),
+                    "url": format!("http://{}{}", 
+                        request.get("authority").and_then(Value::as_str).unwrap_or(""),
+                        request.get("path").and_then(Value::as_str).unwrap_or("")),
+                    "httpVersion": "HTTP/1.1",
+                    "headers": headers_to_har(request.get("headers")),
+                    "queryString": [],
+                    "headersSize": -1,
+                    "bodySize": request.get("body").and_then(|b| b.get("size")).cloned().unwrap_or(json!(-1)),
+                    "postData": body_to_har(request.get("body").unwrap_or(&Value::Null)),
+                },
+                "response": {
+                    "status": response.get("status").cloned().unwrap_or(Value::Null),
+                    "statusText": "",
+                    "httpVersion": "HTTP/1.1",
+                    "headers": headers_to_har(response.get("headers")),
+                    "content": body_to_har(response.get("body").unwrap_or(&Value::Null)),
+                    "headersSize": -1,
+                    "bodySize": response.get("body").and_then(|b| b.get("size")).cloned().unwrap_or(json!(-1)),
+                    "redirectURL": "",
+                },
+                "cache": {},
+                "timings": {"send": 0, "wait": -1, "receive": 0},
+            }))
+        })
+        .collect();
+    json!({
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "envboard", "version": env!("CARGO_PKG_VERSION")},
+            "pages": [],
+            "_env": env,
+            "entries": entries,
+        }
+    })
+}
+
+fn headers_to_har(value: Option<&Value>) -> Value {
+    let Some(pairs) = value.and_then(Value::as_array) else {
+        return Value::Array(vec![]);
+    };
+    Value::Array(
+        pairs
+            .iter()
+            .filter_map(|pair| {
+                let items = pair.as_array()?;
+                Some(json!({
+                    "name": items.first().cloned().unwrap_or(Value::Null),
+                    "value": items.get(1).cloned().unwrap_or(Value::Null),
+                }))
+            })
+            .collect(),
+    )
 }
 
 /// GET /api/environments/:name/trajectory/stream —— SSE 实时轨迹。
