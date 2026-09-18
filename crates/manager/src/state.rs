@@ -169,6 +169,11 @@ impl ManagerConfig {
         self.state_dir.join("state.json")
     }
 
+    /// 控制面审计事件日志（E-B：权威在 state.json，事件是观察）。
+    pub fn events_file(&self) -> PathBuf {
+        self.state_dir.join("events.jsonl")
+    }
+
     pub fn lock_file(&self) -> PathBuf {
         self.state_dir.join("lock")
     }

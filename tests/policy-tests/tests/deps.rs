@@ -28,8 +28,10 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
     // 原先 api-domain-rules-core 的四条内部边变成了 crate 内的模块纪律，
     // 见下面第 2 条的源文件面判据）
     ("envboard-engine", &[]),
+    // 事件模型：纯数据词汇（serde/serde_json），manager 与 engine 都会用
+    ("envboard-events", &[]),
     ("envboard-engine-fake", &["envboard-engine"]),
-    ("envboard-manager", &["envboard-engine"]),
+    ("envboard-manager", &["envboard-engine", "envboard-events"]),
     // 工作台 = 唯一宿主入口（lib 的 HTTP 面 + [[bin]] 组合根）。边表里的
     // envboard-engine 只允许 src/main.rs（装配引擎与共享 CA）使用；lib 侧
     // **依旧只认识管理器的公开 API**，由下面的源文件面判据钉死。
@@ -313,6 +315,23 @@ fn the_rust_layering_holds() {
                 if let Some(token) = token {
                     problems.push(format!(
                         "envboard-engine/src/{entry} 是纯逻辑模块却引用了 {token:?}：必须经端口访问外界"
+                    ));
+                }
+            }
+        }
+
+        // 10. 控制面事件的单一发射点：manager.rs 里 `repo.save` 只允许出现在
+        // `commit` 内 —— 先 save 后 emit 的顺序由 commit 的实现固定，任何绕过
+        // commit 直接 save 的写入点都会让"动作没有审计事件"。
+        if name == "envboard-manager" {
+            let manager_rs = crate_dir.join("src").join("manager.rs");
+            if let Some(text) = read_text(&manager_rs) {
+                let saves = text.matches("self.repo.save(").count();
+                let has_commit = text.contains("fn commit(");
+                if saves != 1 || !has_commit {
+                    problems.push(format!(
+                        "envboard-manager/src/manager.rs 有 {saves} 处 repo.save（要求恰 1 处，且在 commit 内）：\
+                         控制面写入必须走 commit —— 先 save 后 emit，事件不许旁路"
                     ));
                 }
             }

@@ -35,8 +35,10 @@ use envboard_engine::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::ports::{FilePort, PortProbe, StateRepo};
+use crate::events::ControlEventLog;
+use crate::ports::{EventStorePort, FilePort, PortProbe, StateRepo};
 use crate::state::{ManagerConfig, PersistedState, StoredError, StoredRules};
+use envboard_events::ControlEvent;
 
 /// 启动后等待绑定定态的预算（绑定是本地 bind，毫秒级；给足宽容只防极端调度）。
 const SETTLE_BUDGET: Duration = Duration::from_secs(5);
@@ -114,6 +116,8 @@ pub struct Manager {
     _lock: Option<crate::state::InstanceLock>,
     state: Mutex<PersistedState>,
     handles: Mutex<BTreeMap<String, EngineHandle>>,
+    /// 控制面审计事件日志（E-B：权威仍是 state.json，事件是观察）。
+    events: ControlEventLog,
 }
 
 /// 环境日志的文件写线（引擎经有界总线投递到这里；写失败只丢行，不回流）。
@@ -166,6 +170,12 @@ impl Manager {
         for raw in &state.environments {
             Environment::from_json(raw)?;
         }
+        let events = ControlEventLog::open(
+            Arc::new(crate::infra::RealEventStore),
+            config.events_file(),
+            crate::events::DEFAULT_MAX_EVENT_BYTES,
+            logger.clone(),
+        );
         let manager = Self {
             config,
             engine,
@@ -177,11 +187,42 @@ impl Manager {
             _lock: lock,
             state: Mutex::new(state),
             handles: Mutex::new(BTreeMap::new()),
+            events,
         };
         for message in manager.reconcile_rules()? {
             manager.logger.log(LogLevel::Info, &message);
         }
         Ok(manager)
+    }
+
+    /// 注入事件存储实现（测试用；产品路径是 `infra::RealEventStore`）。
+    /// 必须在任何会发事件的操作之前调用。
+    pub fn with_event_store(mut self, port: Arc<dyn EventStorePort>) -> Self {
+        self.events = ControlEventLog::open(
+            port,
+            self.config.events_file(),
+            crate::events::DEFAULT_MAX_EVENT_BYTES,
+            self.logger.clone(),
+        );
+        self
+    }
+
+    /// 控制面事件的单一发射点：**先 save 后 emit**。事件写失败不阻断控制面
+    /// （`ControlEventLog::emit` 内部丢弃 + 计数 + WARN）。
+    fn commit(&self, state: &PersistedState, event: ControlEvent) -> Result<(), Error> {
+        self.repo.save(state)?;
+        self.events.emit(self.clock.now_unix_ms(), event);
+        Ok(())
+    }
+
+    /// 事件累计丢弃数（`/api/status` 暴露；磁盘故障的可见面）。
+    pub fn events_dropped(&self) -> u64 {
+        self.events.dropped()
+    }
+
+    /// 控制面历史（拉取式只读）。`name` 过滤该环境的事件；`limit` 取尾部。
+    pub fn history(&self, name: Option<&str>, limit: usize) -> Result<Vec<Value>, Error> {
+        self.events.history(name, limit)
     }
 
     pub fn config(&self) -> &ManagerConfig {
@@ -278,7 +319,13 @@ impl Manager {
         state.environments.push(environment.to_json());
         state.desired.insert(name.clone(), Desired::Stopped);
         state.auto_port.insert(name.clone(), !explicit_port);
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::EnvironmentCreated {
+                name: name.clone(),
+                listen: environment.listen().to_string(),
+            },
+        )?;
         self.logger.log(
             LogLevel::Info,
             &format!("created environment {name} on {}", environment.listen()),
@@ -354,7 +401,12 @@ impl Manager {
         let mut state = self.state.lock().unwrap();
         state.desired.insert(name.into(), Desired::Stopped);
         state.marks.remove(name);
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::InstanceStopped {
+                name: name.to_string(),
+            },
+        )?;
         drop(state);
         self.get(name)
     }
@@ -390,7 +442,12 @@ impl Manager {
         state.desired.remove(name);
         state.auto_port.remove(name);
         state.marks.remove(name);
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::EnvironmentDeleted {
+                name: name.to_string(),
+            },
+        )?;
         drop(state);
 
         // v2 遗留的 agent 目录（注入器时代）在这里彻底消失；规则库里的规则不动
@@ -438,7 +495,13 @@ impl Manager {
             .sort_by(|left, right| left.name.cmp(&right.name));
         let path = self.config.rules_path(name);
         crate::agent::write_private(&path, rendered.as_bytes())?;
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::RulesImported {
+                rules_name: name.to_string(),
+                rules_sha256: envboard_engine::sha256::hex(rendered.as_bytes()),
+            },
+        )?;
         let affected = self.environments_bound_locked(&state, name);
         drop(state);
 
@@ -499,7 +562,12 @@ impl Manager {
             }
         }
         state.rules.retain(|entry| entry.name != name);
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::RulesDeleted {
+                rules_name: name.to_string(),
+            },
+        )?;
         drop(state);
 
         let path = self.config.rules_path(name);
@@ -513,7 +581,13 @@ impl Manager {
     pub fn reconcile_rules(&self) -> Result<Vec<String>, Error> {
         let mut state = self.state.lock().unwrap();
         let messages = self.reconcile_rules_locked(&mut state)?;
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::Custom {
+                kind: "manager/rules-reconciled".to_string(),
+                payload: serde_json::json!({ "repaired": messages.len() }),
+            },
+        )?;
         Ok(messages)
     }
 
@@ -684,7 +758,6 @@ impl Manager {
                 let _ = std::fs::remove_dir_all(&old_dir);
             }
         }
-        self.repo.save(&state)?;
         let mut changed: Vec<&str> = Vec::new();
         if merged.name() != environment.name() {
             changed.push("name");
@@ -704,6 +777,13 @@ impl Manager {
         if merged.description() != environment.description() {
             changed.push("description");
         }
+        self.commit(
+            &state,
+            ControlEvent::EnvironmentUpdated {
+                name: environment.name().to_string(),
+                fields: changed.iter().map(|field| (*field).to_string()).collect(),
+            },
+        )?;
         self.logger.log(
             LogLevel::Info,
             &format!("updated {name}: changed {}", changed.join(", ")),
@@ -744,7 +824,13 @@ impl Manager {
         state.marks.remove(name);
         // 端口换了仍然是"随机分配的"：将来再撞仍可自动换一次。
         state.auto_port.insert(name.into(), true);
-        self.repo.save(&state)?;
+        self.commit(
+            &state,
+            ControlEvent::EnvironmentUpdated {
+                name: name.to_string(),
+                fields: vec!["listen.port".to_string()],
+            },
+        )?;
         self.logger.log(
             LogLevel::Info,
             &format!(
@@ -935,7 +1021,12 @@ impl Manager {
         let mut state = self.state.lock().unwrap();
         state.desired.insert(name.into(), Desired::Running);
         state.marks.remove(name);
-        if let Err(error) = self.repo.save(&state) {
+        if let Err(error) = self.commit(
+            &state,
+            ControlEvent::InstanceStarted {
+                name: name.to_string(),
+            },
+        ) {
             self.logger
                 .log(LogLevel::Error, &format!("cannot persist state: {error}"));
         }
@@ -972,7 +1063,13 @@ impl Manager {
             Desired::Stopped
         };
         state.desired.insert(name.into(), desired);
-        if let Err(save_error) = self.repo.save(&state) {
+        if let Err(save_error) = self.commit(
+            &state,
+            ControlEvent::EngineRejected {
+                name: name.to_string(),
+                reason: error.message.clone(),
+            },
+        ) {
             self.logger.log(
                 LogLevel::Error,
                 &format!("cannot persist state: {save_error}"),
@@ -1001,7 +1098,13 @@ impl Manager {
             Ok(hash) => {
                 let mut state = self.state.lock().unwrap();
                 state.marks.remove(name);
-                let _ = self.repo.save(&state);
+                let _ = self.commit(
+                    &state,
+                    ControlEvent::EngineApplied {
+                        name: name.to_string(),
+                        config_hash: hash.clone(),
+                    },
+                );
                 self.logger.log(
                     LogLevel::Info,
                     &format!("{name}: hot-applied configuration {hash}"),
@@ -1246,7 +1349,13 @@ impl Manager {
         {
             let mut state = self.state.lock().unwrap();
             replace_environment(&mut state, &updated)?;
-            self.repo.save(&state)?;
+            self.commit(
+                &state,
+                ControlEvent::EnvironmentUpdated {
+                    name: name.to_string(),
+                    fields: vec!["listen.port".to_string()],
+                },
+            )?;
         }
         self.logger
             .log(LogLevel::Info, &format!("{name}: re-allocated port {port}"));

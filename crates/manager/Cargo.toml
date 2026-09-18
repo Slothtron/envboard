@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 envboard-engine.workspace = true
+envboard-events.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

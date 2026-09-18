@@ -15,6 +15,7 @@
 //! 管理器只依赖 [`ProxyEngine`](envboard_engine::ProxyEngine) 抽象，不认识任何具体引擎实现。
 
 pub mod agent;
+pub mod events;
 pub mod infra;
 pub mod logs;
 pub mod manager;

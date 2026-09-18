@@ -43,7 +43,10 @@ impl std::fmt::Display for ParseError {
                 write!(f, "format version {found} > supported {supported}")
             }
             ParseError::UnknownType { line, kind } => {
-                write!(f, "line {line}: unknown event type {kind:?} (not marked ignorable)")
+                write!(
+                    f,
+                    "line {line}: unknown event type {kind:?} (not marked ignorable)"
+                )
             }
             ParseError::MalformedLine { line, detail } => {
                 write!(f, "line {line}: {detail}")
@@ -68,9 +71,9 @@ pub struct ParsedEvent<T> {
 /// 解析一份 JSONL 事件日志。撕裂尾容忍、未知类型 fail-closed、seq 连续性判定。
 pub fn parse_log<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>, ParseError> {
     let mut lines = text.lines();
-    let header = lines.next().ok_or_else(|| {
-        ParseError::BadHeader("log is empty (no version header)".to_string())
-    })?;
+    let header = lines
+        .next()
+        .ok_or_else(|| ParseError::BadHeader("log is empty (no version header)".to_string()))?;
     let version: u64 = parse_header(header)?;
     if version > FORMAT_VERSION {
         return Err(ParseError::UnsupportedVersion {
@@ -105,7 +108,10 @@ pub fn parse_log<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>,
         };
         // 未知类型 fail-closed：先看 type 与 ignorable，再做正常反序列化。
         let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let ignorable = value.get("ignorable").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ignorable = value
+            .get("ignorable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let known = known_kind::<T>(kind);
         if !known && !ignorable {
             return Err(ParseError::UnknownType {
@@ -116,12 +122,11 @@ pub fn parse_log<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>,
         if !known {
             continue;
         }
-        let envelope: Envelope<T> = serde_json::from_value(value).map_err(|error| {
-            ParseError::MalformedLine {
+        let envelope: Envelope<T> =
+            serde_json::from_value(value).map_err(|error| ParseError::MalformedLine {
                 line: line_no,
                 detail: error.to_string(),
-            }
-        })?;
+            })?;
         if envelope.seq != expected_seq {
             return Err(ParseError::SeqGap {
                 expected: expected_seq,
@@ -138,7 +143,10 @@ pub fn parse_log<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>,
 }
 
 /// 追加一行（写入方负责顺序与 seq 连续性；这里只做无损 JSON 防线）。
-pub fn append_line<T: Serialize>(buffer: &mut String, envelope: &Envelope<T>) -> Result<(), String> {
+pub fn append_line<T: Serialize>(
+    buffer: &mut String,
+    envelope: &Envelope<T>,
+) -> Result<(), String> {
     let line = serde_json::to_string(envelope)
         .map_err(|error| format!("event is not lossless JSON: {error}"))?;
     buffer.push_str(&line);
@@ -147,8 +155,8 @@ pub fn append_line<T: Serialize>(buffer: &mut String, envelope: &Envelope<T>) ->
 }
 
 fn parse_header(header: &str) -> Result<u64, ParseError> {
-    let value: serde_json::Value = serde_json::from_str(header)
-        .map_err(|error| ParseError::BadHeader(error.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(header).map_err(|error| ParseError::BadHeader(error.to_string()))?;
     let version = value
         .get("version")
         .and_then(|v| v.as_u64())
@@ -200,9 +208,7 @@ mod tests {
     fn unknown_type_is_rejected_unless_ignorable() {
         let mut buffer = header_line();
         buffer.push('\n');
-        buffer.push_str(
-            r#"{"seq":1,"time":1,"type":"future/thing","data":{"x":1}}"#,
-        );
+        buffer.push_str(r#"{"seq":1,"time":1,"type":"future/thing","data":{"x":1}}"#);
         let error = parse_log::<ControlEvent>(&buffer).unwrap_err();
         assert!(matches!(error, ParseError::UnknownType { kind, .. } if kind == "future/thing"));
 
@@ -223,7 +229,13 @@ mod tests {
         append_line(&mut buffer, &sample(1)).unwrap();
         append_line(&mut buffer, &sample(3)).unwrap();
         let error = parse_log::<ControlEvent>(&buffer).unwrap_err();
-        assert!(matches!(error, ParseError::SeqGap { expected: 2, found: 3 }));
+        assert!(matches!(
+            error,
+            ParseError::SeqGap {
+                expected: 2,
+                found: 3
+            }
+        ));
     }
 
     #[test]

@@ -8,6 +8,11 @@
 pub trait ClockPort: Send + Sync {
     /// Unix 秒。
     fn now_unix(&self) -> u64;
+
+    /// Unix 毫秒（事件时间戳用；默认由秒推，真实实现可覆盖以获得毫秒精度）。
+    fn now_unix_ms(&self) -> u64 {
+        self.now_unix() * 1000
+    }
 }
 
 /// 日志级别 —— 只要够用，不求与任何日志框架对齐。

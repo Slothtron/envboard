@@ -16,6 +16,8 @@ pub static KNOWN_CONTROL_KINDS: &[&str] = &[
     "rules/deleted",
     "engine/applied",
     "engine/rejected",
+    "instance/started",
+    "instance/stopped",
     "instance/reconciled",
     "custom",
 ];
@@ -24,43 +26,32 @@ pub static KNOWN_CONTROL_KINDS: &[&str] = &[
 #[serde(tag = "type", content = "data")]
 pub enum ControlEvent {
     #[serde(rename = "environment/created")]
-    EnvironmentCreated {
-        name: String,
-        listen: String,
-    },
+    EnvironmentCreated { name: String, listen: String },
     /// 只记被 PATCH 改动的字段名清单（值在 state 里，不在事件里）。
     #[serde(rename = "environment/updated")]
-    EnvironmentUpdated {
-        name: String,
-        fields: Vec<String>,
-    },
+    EnvironmentUpdated { name: String, fields: Vec<String> },
     #[serde(rename = "environment/deleted")]
     EnvironmentDeleted { name: String },
     /// 规则正文不入事件：hash 可对账（与账本里那份正文比对）。
     #[serde(rename = "rules/imported")]
     RulesImported {
-        name: String,
         rules_name: String,
         rules_sha256: String,
     },
     #[serde(rename = "rules/deleted")]
-    RulesDeleted {
-        name: String,
-        rules_name: String,
-    },
+    RulesDeleted { rules_name: String },
     /// 配置热应用成功（回执语义）。
     #[serde(rename = "engine/applied")]
-    EngineApplied {
-        name: String,
-        config_hash: String,
-        epoch: u64,
-    },
+    EngineApplied { name: String, config_hash: String },
+    /// 期望状态进入 running 且实例定态。
+    #[serde(rename = "instance/started")]
+    InstanceStarted { name: String },
+    /// 期望状态进入 stopped。
+    #[serde(rename = "instance/stopped")]
+    InstanceStopped { name: String },
     /// 配置被整套拒绝（invalid_config）；旧快照继续服务。
     #[serde(rename = "engine/rejected")]
-    EngineRejected {
-        name: String,
-        reason: String,
-    },
+    EngineRejected { name: String, reason: String },
     /// reconcile 决策落地：状态字面量（starting/running/failed/...）。
     #[serde(rename = "instance/reconciled")]
     InstanceReconciled {
@@ -84,6 +75,8 @@ impl ControlEvent {
             ControlEvent::RulesDeleted { .. } => "rules/deleted",
             ControlEvent::EngineApplied { .. } => "engine/applied",
             ControlEvent::EngineRejected { .. } => "engine/rejected",
+            ControlEvent::InstanceStarted { .. } => "instance/started",
+            ControlEvent::InstanceStopped { .. } => "instance/stopped",
             ControlEvent::InstanceReconciled { .. } => "instance/reconciled",
             ControlEvent::Custom { .. } => "custom",
         }
@@ -108,23 +101,22 @@ mod tests {
             },
             ControlEvent::EnvironmentDeleted { name: "a".into() },
             ControlEvent::RulesImported {
-                name: "a".into(),
                 rules_name: "r".into(),
                 rules_sha256: "x".into(),
             },
             ControlEvent::RulesDeleted {
-                name: "a".into(),
                 rules_name: "r".into(),
             },
             ControlEvent::EngineApplied {
                 name: "a".into(),
                 config_hash: "h".into(),
-                epoch: 1,
             },
             ControlEvent::EngineRejected {
                 name: "a".into(),
                 reason: "bad".into(),
             },
+            ControlEvent::InstanceStarted { name: "a".into() },
+            ControlEvent::InstanceStopped { name: "a".into() },
             ControlEvent::InstanceReconciled {
                 name: "a".into(),
                 from: "stopped".into(),
@@ -135,7 +127,11 @@ mod tests {
                 payload: Value::Null,
             },
         ];
-        assert_eq!(samples.len(), KNOWN_CONTROL_KINDS.len());
+        assert_eq!(
+            samples.len(),
+            KNOWN_CONTROL_KINDS.len(),
+            "词汇表与注册表条数不一致"
+        );
         for event in samples {
             assert!(
                 KNOWN_CONTROL_KINDS.contains(&event.kind()),

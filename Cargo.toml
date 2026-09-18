@@ -17,6 +17,7 @@ rust-version = "1.98"
 [workspace.dependencies]
 # 内部 crate：只写 path，避免版本漂移
 envboard-engine = { path = "crates/engine" }
+envboard-events = { path = "crates/events" }
 envboard-engine-fake = { path = "crates/engine-fake" }
 envboard-manager = { path = "crates/manager" }
 envboard-server = { path = "crates/server" }

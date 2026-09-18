@@ -136,6 +136,7 @@ pub fn router(state: AppState) -> Router {
             get(api_rules_read).delete(api_rules_delete),
         )
         .route("/api/compare", get(api_compare))
+        .route("/api/history", get(api_history))
         .route("/api/events", get(api_events))
         // API 的 404 也要是 JSON：前端按 {error:{code,message}} 解析，
         // 让它面对 axum 的纯文本 404 只能报"响应不是 JSON"，排查体验很差。
@@ -345,8 +346,27 @@ async fn api_status(State(state): State<AppState>) -> Response {
             },
             "environments": views.len(),
             "running": views.iter().filter(|view| view.health.as_str() == "running").count(),
+            "events_dropped": manager.events_dropped(),
         }))
         .into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// GET /api/history?name=<env>&limit=N —— 控制面审计事件（只读、拉取式）。
+/// 事件是"为什么变成这样"的证据面；权威状态仍由 /api/environments 回答。
+async fn api_history(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let name = params.get("name").map(String::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    match state.manager.history(name, limit) {
+        Ok(events) => Json(json!({ "events": events })).into_response(),
         Err(error) => error_response(error),
     }
 }

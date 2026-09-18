@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use envboard_engine::{ClockPort, Error, ErrorCode, LogLevel, LoggerPort};
 
-use crate::ports::{FilePort, PortProbe};
+use crate::ports::{EventStorePort, FilePort, PortProbe};
 
 /// 用"试绑"判断端口是否空闲。
 ///
@@ -73,6 +73,86 @@ impl FilePort for RealFiles {
                 format!("cannot read {}: {error}", path.display()),
             )
         })
+    }
+}
+
+/// 真实事件存储：append-only JSONL，0600，open-write-close（无长持 fd，
+/// rename 轮转安全）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RealEventStore;
+
+impl EventStorePort for RealEventStore {
+    fn append(&self, path: &Path, line: String) -> Result<(), Error> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("cannot create {}: {error}", parent.display()),
+                )
+            })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("cannot append {}: {error}", path.display()),
+                )
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        let mut file = file;
+        use std::io::Write as _;
+        file.write_all(line.as_bytes()).map_err(|error| {
+            Error::new(
+                ErrorCode::InternalError,
+                format!("cannot append {}: {error}", path.display()),
+            )
+        })
+    }
+
+    fn size(&self, path: &Path) -> Option<u64> {
+        std::fs::metadata(path).ok().map(|meta| meta.len())
+    }
+
+    fn rotate(&self, path: &Path) -> Result<(), Error> {
+        let rotated = path.with_extension("jsonl.1");
+        std::fs::rename(path, &rotated).map_err(|error| {
+            Error::new(
+                ErrorCode::InternalError,
+                format!("cannot rotate {}: {error}", path.display()),
+            )
+        })
+    }
+
+    fn read_tail(&self, path: &Path, max_bytes: u64) -> Result<String, Error> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return Ok(String::new());
+        };
+        let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let start = len.saturating_sub(max_bytes);
+        file.seek(SeekFrom::Start(start)).map_err(|error| {
+            Error::new(ErrorCode::InternalError, format!("seek failed: {error}"))
+        })?;
+        let mut text = String::new();
+        file.take(max_bytes)
+            .read_to_string(&mut text)
+            .map_err(|error| {
+                Error::new(ErrorCode::InternalError, format!("read failed: {error}"))
+            })?;
+        // 半行截断：从第一个完整换行之后开始。
+        if start > 0
+            && let Some(at) = text.find('\n')
+        {
+            text.drain(..=at);
+        }
+        Ok(text)
     }
 }
 #[cfg(test)]
