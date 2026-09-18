@@ -31,6 +31,7 @@ struct Entry {
     /// 报告如实说 failed —— 与真线程死亡后的可观察形态一致。
     engine: Option<EngineInstance>,
     pump: Arc<BoundedLinePump>,
+    trajectory_pump: Option<Arc<BoundedLinePump>>,
     /// 最近一次成功装配的 spec 回执（start 与 apply 更新）。
     receipt: Mutex<String>,
     injected: Option<String>,
@@ -72,6 +73,7 @@ fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> Engine
         rules_text: spec.rules_text.clone(),
         max_buffered_body: None,
         log_writer: log,
+        trajectory_writer: spec.trajectory.clone(),
     }
 }
 
@@ -107,6 +109,10 @@ impl ProxyEngine for EngineBackend {
             .clone()
             .unwrap_or_else(|| Arc::new(crate::NullLineWriter));
         let pump = BoundedLinePump::start(sink);
+        let trajectory_pump = spec
+            .trajectory
+            .clone()
+            .map(|writer| BoundedLinePump::start(writer));
         let engine = EngineInstance::start(
             spec_to_config(&spec, Some(pump.writer())),
             Arc::clone(&self.ca),
@@ -121,6 +127,7 @@ impl ProxyEngine for EngineBackend {
             Entry {
                 engine: Some(engine),
                 pump,
+                trajectory_pump,
                 receipt: Mutex::new(receipt),
                 injected: None,
             },
@@ -183,6 +190,7 @@ impl ProxyEngine for EngineBackend {
                 epoch: 0,
                 last_error: None,
                 log_drops: 0,
+                trajectory_drops: 0,
             };
         };
         match &entry.engine {
@@ -194,6 +202,11 @@ impl ProxyEngine for EngineBackend {
                     epoch: status.epoch,
                     last_error: status.last_error,
                     log_drops: entry.pump.dropped(),
+                    trajectory_drops: entry
+                        .trajectory_pump
+                        .as_ref()
+                        .map(|pump| pump.dropped())
+                        .unwrap_or(0),
                 }
             }
             None => EngineReport {
@@ -207,6 +220,11 @@ impl ProxyEngine for EngineBackend {
                 epoch: 0,
                 last_error: entry.injected.clone(),
                 log_drops: entry.pump.dropped(),
+                trajectory_drops: entry
+                    .trajectory_pump
+                    .as_ref()
+                    .map(|pump| pump.dropped())
+                    .unwrap_or(0),
             },
         }
     }

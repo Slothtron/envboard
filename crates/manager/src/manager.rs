@@ -225,6 +225,31 @@ impl Manager {
         self.events.history(name, limit)
     }
 
+    /// 数据面请求轨迹尾部（拉取式只读；实时流走 SSE）。
+    pub fn trajectory(&self, name: &str, limit: usize) -> Result<Vec<Value>, Error> {
+        self.require(name)?;
+        let Some(path) = self.config.trajectory_file(name) else {
+            return Ok(Vec::new());
+        };
+        let text = match crate::infra::RealEventStore.read_tail(&path, 1024 * 1024) {
+            Ok(text) => text,
+            Err(_) => return Ok(Vec::new()), // 文件不存在 = 还没有轨迹
+        };
+        let events =
+            envboard_events::parse_log::<envboard_events::DataEvent>(&text).map_err(|error| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("trajectory log is unreadable: {error}"),
+                )
+            })?;
+        let selected: Vec<Value> = events
+            .into_iter()
+            .map(|entry| serde_json::to_value(&entry.envelope).unwrap_or(Value::Null))
+            .collect();
+        let start = selected.len().saturating_sub(limit);
+        Ok(selected[start..].to_vec())
+    }
+
     pub fn config(&self) -> &ManagerConfig {
         &self.config
     }
@@ -960,12 +985,19 @@ impl Manager {
             rules_text,
             rules_source: rules_name.map(|name| self.config.rules_path(name)),
             log: self.log_writer(environment.name()),
+            trajectory: self.trajectory_writer(environment.name()),
         }
     }
 
     fn log_writer(&self, name: &str) -> Option<Arc<dyn LineWriter>> {
         self.config
             .log_file(name)
+            .map(|path| Arc::new(FileLineWriter { path }) as Arc<dyn LineWriter>)
+    }
+
+    fn trajectory_writer(&self, name: &str) -> Option<Arc<dyn LineWriter>> {
+        self.config
+            .trajectory_file(name)
             .map(|path| Arc::new(FileLineWriter { path }) as Arc<dyn LineWriter>)
     }
 

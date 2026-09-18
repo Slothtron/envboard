@@ -37,6 +37,7 @@ use crate::http::{self, HttpError, Message};
 use crate::request_log::LogRecord;
 use crate::target::{ConnectTarget, TlsPolicy};
 use crate::tls;
+use envboard_events::DataEvent;
 
 /// 读一个头（含保活等待）的上限：空闲连接被超时切断，不占 fd。
 pub const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -146,6 +147,8 @@ impl AsyncWrite for Upstream {
 
 struct Shared {
     configs: ArcSwap<CompiledConfig>,
+    /// 请求轨迹记录器（实例生命周期持有：seq/request_id 跨热更新连续）。
+    trajectory: Option<Arc<crate::trajectory::TrajectoryRecorder>>,
     acceptor: TlsAcceptor,
     strict: Arc<rustls::ClientConfig>,
     permissive: Arc<rustls::ClientConfig>,
@@ -170,8 +173,12 @@ impl EngineInstance {
         let bound = compiled.listen;
         let server = tls::mitm_server_config(ca)?;
         let (shutdown, _) = watch::channel(false);
+        let trajectory = config
+            .trajectory_writer
+            .map(|writer| Arc::new(crate::trajectory::TrajectoryRecorder::start(writer)));
         let shared = Arc::new(Shared {
             configs: ArcSwap::from_pointee(compiled),
+            trajectory,
             acceptor: TlsAcceptor::from(server),
             strict: tls::strict_upstream_client_config()?,
             permissive: tls::permissive_upstream_client_config()?,
@@ -547,9 +554,35 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
     // 内核播种 → hosts 规则修订连接目标 → 按最终地址做 insecure 判定。
     let mut target = ConnectTarget::seed(&origin.host, origin.port);
     let seed_addr = target.resolved_addr;
+    let request_id = shared
+        .trajectory
+        .as_ref()
+        .map(|recorder| recorder.next_request_id())
+        .unwrap_or(0);
+    if let Some(recorder) = &shared.trajectory {
+        recorder.record(DataEvent::RequestStart {
+            request_id,
+            method: method.clone(),
+            authority: authority.clone(),
+            path: path.clone(),
+            sni: origin.sni.clone(),
+            insecure: false,
+        });
+    }
     if let Err(reason) = hosts::apply(&cfg.rules, &mut target) {
         return fail(
-            cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr, &reason,
+            cfg,
+            io,
+            shared.trajectory.as_ref(),
+            request_id,
+            started_ms,
+            clock,
+            &method,
+            &authority,
+            &path,
+            &target,
+            seed_addr,
+            &reason,
         )
         .await;
     }
@@ -558,6 +591,21 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         .map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| origin.host.clone());
     target.apply_insecure_match(cfg.is_insecure(origin.sni.as_deref(), Some(&address_text)));
+    if let Some(recorder) = &shared.trajectory {
+        recorder.record(DataEvent::RequestUpstream {
+            request_id,
+            resolved_addr: address_text.clone(),
+            rewritten: seed_addr != target.resolved_addr,
+        });
+        if matches!(target.tls_policy, TlsPolicy::Insecure) {
+            // start 里 insecure 先记 false（改写判定在前）；这里补一条修订记录，
+            // 让"放宽命中"在轨迹里可见（同 request_id 的确定性关联）。
+            recorder.record(envboard_events::DataEvent::Custom {
+                kind: "tls/insecure".to_string(),
+                payload: serde_json::json!({ "request_id": request_id }),
+            });
+        }
+    }
 
     // 请求体：分帧 + 缓冲上限（快照值，不是编译期常量）。
     let request_bytes = match http::request_framing(&method, &head) {
@@ -586,10 +634,27 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let request_body = request_bytes;
+    if let Some(recorder) = &shared.trajectory {
+        recorder.record(DataEvent::RequestBody {
+            request_id,
+            bytes: request_body.len() as u64,
+        });
+    }
     let upstream = match connect_upstream(shared, &target, origin.with_tls).await {
         Err(fault) => {
             return fail(
-                cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr, &fault,
+                cfg,
+                io,
+                shared.trajectory.as_ref(),
+                request_id,
+                started_ms,
+                clock,
+                &method,
+                &authority,
+                &path,
+                &target,
+                seed_addr,
+                &fault,
             )
             .await;
         }
@@ -598,7 +663,18 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
     match exchange(io, upstream, &head, &method, &path, &request_body).await {
         Err(fault) => {
             return fail(
-                cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr, &fault,
+                cfg,
+                io,
+                shared.trajectory.as_ref(),
+                request_id,
+                started_ms,
+                clock,
+                &method,
+                &authority,
+                &path,
+                &target,
+                seed_addr,
+                &fault,
             )
             .await;
         }
@@ -607,6 +683,8 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             // 帧要跟着走）。这里只补终局记录。
             record(
                 cfg,
+                shared.trajectory.as_ref(),
+                request_id,
                 started_ms,
                 clock,
                 &method,
@@ -622,6 +700,13 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         }
         Ok(Exchange::Parts(part)) => {
             let (status, response_headers, response_body) = part;
+            if let Some(recorder) = &shared.trajectory {
+                recorder.record(DataEvent::ResponseHead {
+                    request_id,
+                    status,
+                    bytes: response_body.len() as u64,
+                });
+            }
             let first = format!("HTTP/1.1 {status} {}", reason_for_status(status));
             http::write_message(
                 io.get_mut(),
@@ -633,6 +718,8 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             .await?;
             record(
                 cfg,
+                shared.trajectory.as_ref(),
+                request_id,
                 started_ms,
                 clock,
                 &method,
@@ -652,6 +739,8 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
 #[allow(clippy::too_many_arguments)]
 fn record(
     cfg: &CompiledConfig,
+    trajectory: Option<&Arc<crate::trajectory::TrajectoryRecorder>>,
+    request_id: u64,
     timestamp: u64,
     clock: std::time::Instant,
     method: &str,
@@ -677,12 +766,21 @@ fn record(
         error: None,
     };
     event.emit(&cfg.log_writer);
+    if let Some(recorder) = trajectory {
+        recorder.record(DataEvent::RequestEnd {
+            request_id,
+            duration_ms: clock.elapsed().as_millis() as u64,
+            error: None,
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn fail<W: AsyncRead + AsyncWrite + Unpin>(
     cfg: &CompiledConfig,
     io: &mut BufReader<W>,
+    trajectory: Option<&Arc<crate::trajectory::TrajectoryRecorder>>,
+    request_id: u64,
     timestamp: u64,
     clock: std::time::Instant,
     method: &str,
@@ -706,6 +804,13 @@ async fn fail<W: AsyncRead + AsyncWrite + Unpin>(
         error: Some(reason.to_string()),
     };
     event.emit(&cfg.log_writer);
+    if let Some(recorder) = trajectory {
+        recorder.record(DataEvent::RequestEnd {
+            request_id,
+            duration_ms: clock.elapsed().as_millis() as u64,
+            error: Some(reason.to_string()),
+        });
+    }
     let _ = write_status(io.get_mut(), 502, reason).await;
     Ok(true)
 }
@@ -721,7 +826,7 @@ fn origin_path(head: &Message) -> String {
     format!("/{uri}")
 }
 
-fn unix_ms() -> u64 {
+pub(crate) fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

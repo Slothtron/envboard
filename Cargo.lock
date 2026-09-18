@@ -334,6 +334,7 @@ version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "envboard-events",
  "rcgen",
  "rustls",
  "rustls-native-certs",

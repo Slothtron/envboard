@@ -128,6 +128,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/environments/:name/restart", post(api_restart))
         .route("/api/environments/:name/reallocate", post(api_reallocate))
         .route("/api/environments/:name/logs", get(api_logs))
+        .route("/api/environments/:name/trajectory", get(api_trajectory))
         .route("/api/rules", get(api_rules_list).post(api_rules_import))
         // 故障注入旋钮（live 断言组 9 的面）：核心不支持注入时如实 400。
         .route("/api/_fault", post(api_fault))
@@ -349,6 +350,23 @@ async fn api_status(State(state): State<AppState>) -> Response {
             "events_dropped": manager.events_dropped(),
         }))
         .into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// GET /api/environments/:name/trajectory?limit=N —— 请求轨迹尾部（拉取式）。
+async fn api_trajectory(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 2000);
+    match state.manager.trajectory(&name, limit) {
+        Ok(events) => Json(json!({ "events": events })).into_response(),
         Err(error) => error_response(error),
     }
 }

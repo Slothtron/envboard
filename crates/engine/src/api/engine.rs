@@ -30,6 +30,8 @@ pub struct EngineSpec {
     pub rules_source: Option<PathBuf>,
     /// 日志线出口。None = 丢弃。
     pub log: Option<Arc<dyn LineWriter>>,
+    /// 请求轨迹出口（trajectories/<env>.jsonl）。None = 不记轨迹。
+    pub trajectory: Option<Arc<dyn LineWriter>>,
 }
 
 impl EngineSpec {
@@ -112,6 +114,8 @@ pub struct EngineReport {
     pub last_error: Option<String>,
     /// 日志总线累计丢弃行数（数据面永不阻塞的代价必须可见）。
     pub log_drops: u64,
+    /// 轨迹总线累计丢弃行数（与 log_drops 同一有界纪律）。
+    pub trajectory_drops: u64,
 }
 
 /// 运行中的引擎实例句柄。无进程身份：实例不是进程。

@@ -19,6 +19,7 @@ pub mod request_log;
 pub mod rules;
 pub mod target;
 pub mod tls;
+pub mod trajectory;
 
 /// 编排层共享词汇的根再导出：`crate::EngineSpec` 等接缝类型、
 /// 错误码、端口（ClockPort/LineWriter/LoggerPort）从这里拿。

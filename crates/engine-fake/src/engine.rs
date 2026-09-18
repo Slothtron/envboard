@@ -43,6 +43,7 @@ impl FakeEngine {
             epoch: 1,
             last_error: None,
             log_drops: 0,
+            trajectory_drops: 0,
         }
     }
 
@@ -210,6 +211,7 @@ impl ProxyEngine for FakeEngine {
                 epoch: 0,
                 last_error: None,
                 log_drops: 0,
+                trajectory_drops: 0,
             },
         }
     }

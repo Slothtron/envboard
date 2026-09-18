@@ -174,6 +174,14 @@ impl ManagerConfig {
         self.state_dir.join("events.jsonl")
     }
 
+    /// 某个环境的请求轨迹文件（`<state_dir>/trajectories/<env>.jsonl`）。
+    /// `None` = 日志目录被显式关闭（--no-log-file）时连轨迹一起关。
+    pub fn trajectory_file(&self, env: &str) -> Option<PathBuf> {
+        self.log_dir
+            .as_ref()
+            .map(|dir| dir.join("trajectories").join(format!("{env}.jsonl")))
+    }
+
     pub fn lock_file(&self) -> PathBuf {
         self.state_dir.join("lock")
     }

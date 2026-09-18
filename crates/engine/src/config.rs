@@ -36,6 +36,8 @@ pub struct EngineConfig {
     pub max_buffered_body: Option<usize>,
     /// 日志出口。请求终局日志与引擎 WARN 共用；None = 丢弃（NullLineWriter）。
     pub log_writer: Option<Arc<dyn LineWriter>>,
+    /// 轨迹出口（trajectories/<env>.jsonl）；None = 不记轨迹。
+    pub trajectory_writer: Option<Arc<dyn LineWriter>>,
 }
 
 impl Default for EngineConfig {
@@ -48,6 +50,7 @@ impl Default for EngineConfig {
             rules_text: None,
             max_buffered_body: None,
             log_writer: None,
+            trajectory_writer: None,
         }
     }
 }
