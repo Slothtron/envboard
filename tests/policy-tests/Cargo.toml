@@ -1,0 +1,13 @@
+[package]
+name = "envboard-policy-tests"
+description = "工程门禁：仓库纪律的机械判定（只有测试目标）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+toml.workspace = true

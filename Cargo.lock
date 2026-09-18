@@ -324,59 +324,36 @@ dependencies = [
 name = "envboard-contract-tests"
 version = "0.2.0"
 dependencies = [
- "envboard-core-api",
- "envboard-domain",
- "envboard-rules",
+ "envboard-engine",
  "serde_json",
 ]
 
 [[package]]
-name = "envboard-core"
+name = "envboard-engine"
 version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
- "envboard-core-api",
- "envboard-rules",
  "rcgen",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "thiserror",
  "time",
  "tokio",
  "tokio-rustls",
 ]
 
 [[package]]
-name = "envboard-core-api"
+name = "envboard-engine-fake"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "envboard-core-fake"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "envboard-core-api",
+ "envboard-engine",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "envboard-domain"
-version = "0.2.0"
-dependencies = [
- "envboard-core-api",
- "envboard-rules",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -384,10 +361,8 @@ name = "envboard-manager"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "envboard-core-api",
- "envboard-core-fake",
- "envboard-domain",
- "envboard-rules",
+ "envboard-engine",
+ "envboard-engine-fake",
  "libc",
  "serde",
  "serde_json",
@@ -402,24 +377,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "envboard-rules"
-version = "0.2.0"
-dependencies = [
- "envboard-core-api",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "envboard-web"
+name = "envboard-server"
 version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
- "envboard-core",
- "envboard-core-api",
- "envboard-core-fake",
- "envboard-domain",
+ "envboard-engine",
+ "envboard-engine-fake",
  "envboard-manager",
  "futures-util",
  "libc",

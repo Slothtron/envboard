@@ -256,7 +256,7 @@ v2 把 envboard 从「一个 mitmproxy 进程内的运行时开关」改成**多
   request_body →（上游）→ response_head → response_body → log。
 - 能力注册表（envboard-core/src/plugin.rs 的 CAPABILITIES，静态只读）：
   只参与装配期校验与自省，不参与请求路径查找。契约表在
-  core/spec/capabilities.md 的「v3 插件与能力注册表」；三方一致性
+  spec/capabilities.md 的「v3 插件与能力注册表」；三方一致性
   （契约表 ↔ 静态注册表 ↔ 内置实现）由新增 policy 门禁判定
   （envboard-policy-tests/tests/registry.rs，负向样本双向验证过会红）。
 - 装配期校验：id 未注册 / 内核冒充插件 / 缺依赖 / 依赖环 → invalid_config
@@ -379,7 +379,7 @@ mitmproxy，本条目记录的是独立库面的落地。
 
 ### Changed (breaking)
 
-- `core/spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段一路收到**当前的 7 个**
+- `spec/capabilities.md` **重写**：领域模型从 v1 的 8 字段一路收到**当前的 7 个**
   （`name` / `listen` / `rules` / `insecure_hosts` / `description` / `proxy_user` /
   `proxy_password`；中间形态是 5 字段 + `options`，再补第 6 个 `proxy_auth`，
   见上面那条 breaking）。
@@ -387,7 +387,7 @@ mitmproxy，本条目记录的是独立库面的落地。
   `domain_suffix`、`color`、`labels` 与 mapping / annotate / activate / resolve
   全部语义 —— v2 的切换模型是"一个环境 = 一个独立实例 + 一个独立端口"，
   不再有"当前环境"这个全局状态。
-- `core/spec/errors.md`：删除 `dns_failure`、`disabled` 与 `rcode` 表；
+- `spec/errors.md`：删除 `dns_failure`、`disabled` 与 `rcode` 表；
   新增 `port_conflict`、`port_range_exhausted`、`config_mismatch`，并补上
   环境健康状态表（`stopped` / `starting` / `running` / `port_conflict` /
   `config_mismatch` / `unhealthy` / `failed`）。
@@ -397,7 +397,7 @@ mitmproxy，本条目记录的是独立库面的落地。
 
 ### Added
 
-- `core/spec/rules.md`：hosts 规则语法的 **BNF**，作为 Rust 实现与 Python 注入器的
+- `spec/rules.md`：hosts 规则语法的 **BNF**，作为 Rust 实现与 Python 注入器的
   共同仲裁（v1 只有散文式描述，无法支撑"两侧输出逐字节一致"这条要求）。
 
 ### Added
@@ -416,7 +416,7 @@ mitmproxy，本条目记录的是独立库面的落地。
   - `envboard-manager`：环境 CRUD、随机端口分配与持久化、状态存储（原子写 + 0600）、
     单实例锁（flock）、健康判定（状态文件为主 + 契约回显比对）、reconcile、规则导入。
   - `envboard-cli`：`envboard` 二进制（`env`, `rules`, `run`, `status`）。
-  - `envboard-contract-tests`：**消费 `core/spec/fixtures` 全部 golden case**。
+  - `envboard-contract-tests`：**消费 `spec/fixtures` 全部 golden case**。
 - `scripts/verify_dual_impl.py`：跨语言对拍门禁 —— 63 个用例里 Rust 与 Python 输出必须
   逐字节一致，**已知分歧必须显式声明**（声明了却不再分歧也会失败，防止白名单掩盖新分歧）。
 - `scripts/rust_dependency_lint.py`：Rust 侧的依赖方向与纯度门禁（含"纯逻辑 crate 不得
@@ -482,7 +482,7 @@ mitmproxy，本条目记录的是独立库面的落地。
   流程规范、工作区规范文件）：不给路径/链接/章节号、不点名字；指向本仓的路径必须真实存在；
   含 `§` 的行必须写明是哪份本仓文件（或"本文件"）。纳入 `ci/verify.sh` 默认层
   （`doc-scope-lint` 步骤），判据与豁免见 README 的「文本自包含」一节。
-- 按同一条规则清理了包内既有引用：README / CHANGELOG / `core/spec/**` / 验收文档与
+- 按同一条规则清理了包内既有引用：README / CHANGELOG / `spec/**` / 验收文档与
   **代码注释**里对外部文档的章节号引用、风险表编号（如 `R14`）一律改成自包含表述或指向
   本仓内真实存在的文件与标题；顺带修掉两处失效引用（对拍入口指向已删除的脚本、
   清单里"断言已不存在"的路径改为显式标记）。

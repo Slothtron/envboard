@@ -1,0 +1,19 @@
+[package]
+name = "envboard-manager"
+description = "envboard 环境管理器：环境 CRUD、端口分配、进程编排、状态持久化、健康检查"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+envboard-engine.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+envboard-engine-fake.workspace = true
+async-trait.workspace = true

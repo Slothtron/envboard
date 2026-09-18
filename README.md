@@ -3,7 +3,7 @@
 多环境代理管理器：**一个环境 = 一个进程内引擎实例 + 一个端口**。客户端把代理指到
 `127.0.0.1:<环境端口>` 就是在用那个环境，所以多个环境可以**同时活着**、直接对比。
 
-数据面是**纯 Rust 进程内引擎**（`envboard-core`）：没有子进程、没有轮询、没有第二种
+数据面是**纯 Rust 进程内引擎**（`envboard-engine`）：没有子进程、没有轮询、没有第二种
 语言 —— 配置生效塌缩成一次**同步装配**，PATCH 返回后的第一个请求就是新配置。
 
 规则是 hosts 风格的静态覆盖表，在**建连时改写上连目标** —— 客户端看到的一切
@@ -46,7 +46,7 @@
 **内置能力**：监听、407 门、TLS 策略、共享 CA、协议面是引擎原生快路径；hosts 规则
 改写（connect 路径直调修订 `resolved_addr`，规则脏数据 fail-closed 502）与请求终局
 日志（有界总线投递，写失败丢行不阻断流量）是引擎内置步骤，不是可插拔接口。
-逐项语义以 core/spec/capabilities.md 的「引擎能力矩阵」为准。
+逐项语义以 spec/capabilities.md 的「引擎能力矩阵」为准。
 
 **ConnectTarget 是唯一接缝**：`authority / sni / resolved_addr / tls_policy /
 chained_proxy`（恒 None 的扩展位）。改写语义只有一件事：不动请求内容、不动 Host 头、
@@ -64,18 +64,18 @@ previous snapshot still serving" 呈现。
 落盘是 `<log_dir>/<env>.log`（管理器侧单一写者）、copytruncate 轮转、有界尾读。
 
 ```
-core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、66 个 golden fixture
-core/rs/crates/
-  envboard-core-api   ProxyEngine 接缝（EngineSpec / EngineHandle / EngineReport /
+spec/            语言中立契约：能力清单、错误码、规则语法 BNF、66 个 golden fixture
+crates/
+  engine              ProxyEngine 接缝（EngineSpec / EngineHandle / EngineReport /
                       InstanceState）、错误码、端口（时钟 / 日志 LineWriter）      ← 根
-  envboard-domain     环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
-  envboard-rules      hosts 解析 + 确定性渲染（全仓唯一一份解析实现）              ← 纯逻辑
-  envboard-core       引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
+  │ domain             环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
+  │ rules              hosts 解析 + 确定性渲染（全仓唯一一份解析实现）              ← 纯逻辑
+  │ 引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
                       hosts 改写、请求终局日志、有界日志总线
-  envboard-core-fake  ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
+  engine-fake         ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
   envboard-manager    环境 CRUD、端口分配、账本持久化、锁、健康判定、reconcile、
                       规则账本、EngineSpec 编译与热装配接线
-  envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）+ envboard
+  server              axum API + 内嵌前端（index.html / app.css / app.js）+ envboard
                       二进制（唯一发布产物；组合根在本 crate 的 src/main.rs）
   envboard-contract-tests   消费全部 66 个契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
@@ -247,16 +247,15 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 | `policy` | `cargo test -p envboard-policy-tests` | 工具链收敛（toolchain）、命名（naming）、文本自包含（doc_scope）、依赖方向（deps）、注册表三方一致（registry）—— 一文件一门禁，可单跑 |
 | `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测 + 冒烟（鉴权档位、非回环拒启、单写者；端口分配、reconcile、锁、健康判定、日志尾部与轮转、环境编辑热/停机） |
 | `contract` | `cargo test -p envboard-contract-tests` | 66 个 fixture 的形状与语义都由实现消费；失败用例钉住错误码，成功用例钉归一化字段 |
-| `artifact` | `cargo test -p envboard-web --test artifact` | 声明的发布工件逐项在位、内嵌前端资产完整（行数 + 关键符号）、二进制里真的带着进程内引擎 |
-| `live` | `cargo test -p envboard-web --test live_workbench -- --ignored` | 29 条实机断言逐条点名打印：双环境对照、规则热重载与热生效时延、`insecure_hosts` 三态对照、既有 CA 零感知、凭据 argv 审计、407/200、鉴权四档（含非回环拒启负向）、CSP、320 连打、注入 failed 与端口释放、崩溃自愈、编辑热生效 |
-| `live` | `cargo test -p envboard-core --test live_manager -- --ignored` | 引擎直驱三组：预放 CA 加载复用 + 回执如实 + curl 验链；注入 failed 可见、端口释放、重拉回 running；insecure 名单外 502 → 热 apply 第一次请求即 200 |
+| `artifact` | `cargo test -p envboard-server --test artifact` | 声明的发布工件逐项在位、内嵌前端资产完整（行数 + 关键符号）、二进制里真的带着进程内引擎 |
+| `live` | `cargo test -p envboard-server --test live_workbench -- --ignored` | 29 条实机断言逐条点名打印：双环境对照、规则热重载与热生效时延、`insecure_hosts` 三态对照、既有 CA 零感知、凭据 argv 审计、407/200、鉴权四档（含非回环拒启负向）、CSP、320 连打、注入 failed 与端口释放、崩溃自愈、编辑热生效 |
+| `live` | `cargo test -p envboard-engine --test live_manager -- --ignored` | 引擎直驱三组：预放 CA 加载复用 + 回执如实 + curl 验链；注入 failed 可见、端口释放、重拉回 running；insecure 名单外 502 → 热 apply 第一次请求即 200 |
 
 常用的引擎侧单跑（全部 hermetic，不需要网络与宿主）：
 
 ```bash
-cargo test -p envboard-core                    # 单测 + data_plane / backend / mitm
-cargo test -p envboard-core --test data_plane  # 规则命中、502、407、insecure 热翻转、port_conflict、隧道保活
-cargo test -p envboard-core --test plugins     # fail-closed 带名、bypass+计数、钩子超时、Early 不触上游
+cargo test -p envboard-engine                  # 单测 + data_plane / backend / mitm
+cargo test -p envboard-engine --test data_plane  # 规则命中、502、407、insecure 热翻转、port_conflict、隧道保活
 cargo test -p envboard-policy-tests --test registry   # 注册表 ↔ 内置实现 ↔ 契约表 三方一致
 ```
 
@@ -309,11 +308,11 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
   别人的进程时，对应环境以 `port_conflict` 如实呈现。
 
 工作台界面的视觉令牌、CSP 约束与交互纪律以
-`core/rs/crates/envboard-web/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）。
+`crates/server/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）。
 
 ## 健康与错误码
 
-环境实际状态全部来自**内存报告**（契约见 core/spec/errors.md 的「健康状态」）：
+环境实际状态全部来自**内存报告**（契约见 spec/errors.md 的「健康状态」）：
 
 | 状态 | 含义 |
 |---|---|
@@ -327,7 +326,7 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
 判定次序：**标记 → desired → 引擎内存报告**；视图层与权威判定是同一个函数。
 错误码：`invalid_config`（含热更被拒）/ `not_found` / `conflict` / `port_conflict` /
 `port_range_exhausted` / `store_failure` / `internal_error` —— 语义、HTTP 映射与
-可重试性以 core/spec/errors.md 为准。
+可重试性以 spec/errors.md 为准。
 
 ## 已知限制
 
