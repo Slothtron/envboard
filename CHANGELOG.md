@@ -4,6 +4,28 @@ All notable changes to `slothtron-envboard` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-18
+
+### Changed（v4：独立工具形态 + DSH 式事件轨迹）
+
+- **移除插件抽象**：`Plugin` trait、能力注册表（`CAPABILITIES`）、装配期拓扑
+  校验、钩子执行器与 `debug-inject` 整体退场。hosts 改写下沉为引擎 connect
+  路径的内部直调（`hosts::apply`，语义不变：脏规则 fail-closed 502），请求
+  终局日志直投有界总线（行格式不变）。`EngineReport.bypass_counts` 删除。
+- **目录重排为独立工具形态**：`core/spec/` → `spec/`；`core/rs/crates/*` →
+  `crates/{engine,engine-fake,manager,server}`；契约/门禁测试 →
+  `tests/{contract-tests,policy-tests}`。core-api + core + domain + rules 四
+  crate 合并为 `crates/engine`（api/rules/domain 变模块边界，deps 门禁改为
+  模块面判据）；`envboard-web` → `envboard-server`（bin 仍为 `envboard`）。
+- **控制面审计事件**：`<state_dir>/events.jsonl`（append-only，权威仍是
+  state.json）；`Manager::commit` 单一发射点（先 save 后 emit，门禁钉死）；
+  `GET /api/history` + 工作台「活动」视图；事件写失败丢弃 + 计数
+  （`/api/status` 的 `events_dropped`）不阻断控制面。契约见 `spec/events.md`。
+- **数据面请求轨迹**：`trajectories/<env>.jsonl`（request/start→upstream→
+  body→response/head→end，`request_id` 贯穿；正文与头部不入轨迹）；独立有界
+  总线 + `EngineReport.trajectory_drops`；`GET /api/environments/:name/trajectory`
+  + SSE 实时流（baseline + 增量 + cursor 续传）+ 工作台「轨迹」页签。
+
 ## [0.2.0] - 2026-09-17
 
 ### Fixed + Changed（第三轮走查后：配置页签回显、动作行收敛、设置页结构件补齐 + 按设计规范全量 UI 走查）

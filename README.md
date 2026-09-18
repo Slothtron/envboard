@@ -20,12 +20,14 @@
 | 按域名放宽上游证书校验（`insecure_hosts`：精确匹配，运行中改立即生效） | ✅ |
 | 端口自动分配（区间内随机试绑，新建冲突自动重试一次） | ✅ |
 | 按 host 改写上连目标（hosts 规则，只改 `ConnectTarget.resolved_addr`） | ✅ |
+| 请求轨迹（每请求一条 append-only 事件流，SSE 实时跟随） | ✅ |
+| 控制面审计事件（权威仍在 state.json；`GET /api/history` + 工作台「活动」） | ✅ |
 | CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；absolute-URI 正向代理；101 透传 | ✅ |
 | 代理访问鉴权（`proxy_user` / `proxy_password` → 407 门；**凭据只在内存**，不进 argv / 视图 / SSE） | ✅ |
 | 共享 CA（所有实例一张；兼容加载 mitmproxy 形状的同名 CA 文件，已装证书的客户端零感知） | ✅ |
 | 规则库账本（`state.json` 的 `rules[]` 是唯一真相；物化文件可再生；启动对账回填） | ✅ |
 | 期望状态 reconcile（引擎线程 panic → `failed` → 按 desired 自动重启 = 崩溃自愈） | ✅ |
-| 工作台（三视图：环境 / 规则库 / 跨环境对比；详情、可折叠日志栏、SSE 每秒快照） | ✅ |
+| 工作台（环境 / 规则库 / 跨环境对比 / 活动 / 设置；详情含轨迹页签、可折叠日志栏、SSE 每秒快照） | ✅ |
 | 工作台鉴权档位（回环默认免鉴权；非回环必须显式 `--token`；header 与 `?token=` 等效） | ✅ |
 | 对外服务开关（环境监听 `0.0.0.0`，默认 `127.0.0.1`） | ✅ |
 | 单实例锁、状态原子写 + 0600 | ✅ |
@@ -93,6 +95,8 @@ core-api 是根；domain / rules 是纯逻辑（不得依赖 tokio / libc）；�
 ├── lock              单实例锁（flock）
 ├── rules/<name>.rules    规则物化文件（可再生；给人看，运行时输入是账本 rendered）
 ├── logs/<env>.log    实例日志（copytruncate 轮转，保留一份 .1）
+├── events.jsonl      控制面审计事件（权威仍是 state.json；8 MiB 轮转，见 spec/events.md）
+├── trajectories/<env>.jsonl  请求轨迹（append-only 事件流，见 spec/events.md）
 └── shared/confdir/   共享 CA（mitmproxy-ca.pem / mitmproxy-ca-cert.pem）
 ```
 
@@ -215,15 +219,18 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 |---|---|---|
 | GET | `/` | 工作台页面（内嵌 HTML 外壳） |
 | GET | `/app.css` / `/app.js` | 内嵌静态资产（唯一豁免 token 的两个路径） |
-| GET | `/api/status` | 管理器与引擎概况、`port_range` 等配置回显 |
+| GET | `/api/status` | 管理器与引擎概况、`port_range` 等配置回显、`events_dropped` |
 | GET/POST | `/api/environments` | 列表 / 建环境（`name` 必填；端口缺省 = 自动分配） |
 | GET/PATCH/DELETE | `/api/environments/:name` | 详情 / 改环境（PATCH 未提及不动、`null` 清空） / 删除（须先停止） |
 | POST | `/api/environments/:name/{start,stop,restart,reallocate}` | 启停 / 重启 / 显式重分配端口 |
 | GET | `/api/environments/:name/logs?lines=N` | 实例日志尾部 |
+| GET | `/api/environments/:name/trajectory?limit=N` | 请求轨迹尾部（拉取式） |
+| GET | `/api/environments/:name/trajectory/stream` | SSE 实时轨迹（`baseline` 尾部窗口 + `events` 增量；断线带 `?cursor=` 续传） |
+| GET | `/api/history?name=<env>&limit=N` | 控制面审计事件（只读；`name` 缺省 = 全部） |
 | GET/POST | `/api/rules` | 规则账本列表（名字 + 条数） / 导入（覆盖同名 = 对绑定环境热应用） |
 | GET/DELETE | `/api/rules/:name` | 规则原文 / 删除（仍被绑定时 `conflict`） |
 | GET | `/api/compare?host=<域名>` | 跨环境静态对比：该域名在各环境被覆盖成什么（不发请求） |
-| GET | `/api/events` | SSE 快照（每秒一次全量环境视图） |
+| GET | `/api/events` | SSE 快照（每秒一次全量环境视图，附 `generation`：未变更可跳过重渲） |
 | GET | `/api/ca` | 共享 CA 证书只读摘要（版本 / 序列号 / 有效期 / 指纹 / 颁发者 / SAN） |
 | GET | `/api/ca.pem` | 下载根证书（只含证书，不带私钥；`Content-Disposition: attachment`） |
 | GET | `/api/ca/qrcode.svg?data=<url>&token=<t>` | 把传入 URL（≤512 字节）编码成二维码 SVG，供手机扫码下载证书 |
