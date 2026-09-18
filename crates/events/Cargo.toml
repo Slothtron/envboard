@@ -1,0 +1,14 @@
+[package]
+name = "envboard-events"
+description = "envboard 事件模型：控制面审计事件与数据面请求轨迹的强类型词汇、信封与 JSONL 存取"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 本仓不发布 crate：发布物是 `envboard` 二进制。
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
