@@ -84,11 +84,9 @@ pub fn parse_log<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>,
 
     let mut events = Vec::new();
     let mut expected_seq = 1u64;
-    let mut line_no = 0usize;
     let raw_lines: Vec<&str> = lines.collect();
     let last_index = raw_lines.len().saturating_sub(1);
-    for (index, raw) in raw_lines.iter().enumerate() {
-        line_no += 1;
+    for (line_no, (index, raw)) in raw_lines.iter().enumerate().map(|(i, r)| (i + 1, (i, r))) {
         if raw.trim().is_empty() {
             continue;
         }
