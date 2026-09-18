@@ -15,5 +15,5 @@
 pub mod api;
 pub mod config;
 
-pub use api::{router, serve};
+pub use api::{CaAssets, router, serve};
 pub use config::{CONTENT_SECURITY_POLICY, REQUEST_HEADER, TOKEN_HEADER, WebConfig};

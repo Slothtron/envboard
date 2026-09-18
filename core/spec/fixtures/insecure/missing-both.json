@@ -3,7 +3,7 @@
   "description": "既没有 SNI 也没有地址（或地址为空）= 不放行",
   "input": {
     "hosts": [
-      "365.kdocs.cn"
+      "app.example.com"
     ]
   },
   "expect": {

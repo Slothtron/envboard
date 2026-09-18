@@ -44,20 +44,16 @@ const state = {
   token: "",
   /// 当前选中的环境：详情区与日志栏都跟着它走。
   selected: null,
-  /// 非空 = 表单处于编辑模式，值是**改名前的原名**（PATCH 要打在这个名字上）。
-  editing: null,
-  /// 空列表里点「新建环境」：详情区（含表单）要盖过空态可见 —— 否则第一个环境永远建不出来。
-  creating: false,
   view: "environments",
   tab: "overview",
   /// all | running | issues | rules
   filter: "all",
   search: "",
-  /// 次级操作行是否展开（就地展开，不是浮层）。
-  moreOpen: false,
-  /// 就地二次确认的目标："env:beta" / "rule:beta" / "reallocate:beta"；
-  /// null = 没有待确认的破坏性操作。
-  confirm: null,
+  // ---- 配置页签的常驻编辑器会话 ----
+  /// 表单当前是否偏离基线（true = 「保存」解锁）。
+  formDirty: false,
+  /// 上次回显时的服务端值（editBaseline 的快照）。
+  formBaseline: null,
   /// 最近一次成功拿到快照的本地时间（HH:MM:SS）。SSE 断线时界面照旧显示旧数据，
   /// 有了它用户至少能看出"这份数据有多旧"。
   lastOk: null,
@@ -70,8 +66,11 @@ const state = {
   logSearch: "",
   logFollow: true,
   logAutoscroll: true,
-  logCollapsed: false,
   logRenderKey: "",
+  // ---- 设置页 ----
+  ca: null,
+  // ---- 规则库侧栏搜索 ----
+  ruleSearch: "",
 };
 
 // --------------------------------------------------------------------------- //
@@ -193,7 +192,9 @@ function healthBadge(health) {
 // --------------------------------------------------------------------------- //
 
 const TOAST_MAX = 3;
-const TOAST_MS = { ok: 2600, info: 2600, bad: 6000 };
+/// 规范 6.5 节 的 2.5s 淡出用于 ok/info；错误提示停 6s —— 用户要去处理异常，
+/// 2.5 秒根本读不完「原因 + 建议动作」。这条偏差记录在规范 7.3 节。
+const TOAST_MS = { ok: 2500, info: 2500, bad: 6000 };
 
 /// 提示按"新的在上"堆叠，并且**不再互相顶掉** —— 旧实现只保留一条，
 /// 连续操作时前一条信息会被后一条吃掉（"已复制"被随后的失败顶掉过）。
@@ -239,6 +240,13 @@ function exposureText() {
   return loopback ? "仅本机可访问" : "非本机监听";
 }
 
+/// 侧栏页脚的事件流状态句（设计稿第 1 页：「事件流已连接 · 快照实时推送」）。
+function streamFootText() {
+  return state.streamOk
+    ? "事件流已连接 · 快照实时推送"
+    : `事件流断开 · ${exposureText()} · 正在轮询`;
+}
+
 /// 记下"这份数据是什么时候拿到的"，页脚用它说明新鲜度。
 function stampOk() {
   const now = new Date();
@@ -250,11 +258,10 @@ function renderChrome() {
   const status = state.status;
   if (status) {
     setText(document.getElementById("core-badge-text"), `core: ${status.core.name} ${status.core.version}`);
-    // 页脚给「我在访问谁 + 暴露面 + 数据有多新」，state_dir 是开发向信息，挪出页脚
-    // （它在 /api/status 与 README 里都能查到）。
+    // 页脚按设计稿写成事件流状态句；暴露面与数据新鲜度在状态徽章与统计卡可见。
     setText(
       document.getElementById("sidebar-foot-text"),
-      `${location.host} · ${exposureText()} · 更新于 ${state.lastOk || "—"}`,
+      streamFootText(),
     );
     setText(
       document.getElementById("env-form-port-hint"),
@@ -267,6 +274,9 @@ function renderChrome() {
   setText(document.getElementById("conn-badge-text"), connection.text);
   const dot = document.getElementById("conn-dot");
   dot.className = `conn-dot is-${connection.kind}`;
+  // 下载链接随鉴权档位带上 token（与 SSE 同款：<a> 带不了自定义头）。
+  const download = document.getElementById("ca-download");
+  if (download) download.setAttribute("href", caUrl("/api/ca.pem"));
   renderStats();
 }
 
@@ -282,6 +292,7 @@ function renderStats() {
   // 与紧挨着的空态文案自相矛盾。
   setText(document.getElementById("env-count"), String(visibleEnvironments().length));
   setText(document.getElementById("rules-count"), String(state.rules.length));
+  setText(document.getElementById("rule-side-count"), String(visibleRuleSets().length));
 }
 
 // --------------------------------------------------------------------------- //
@@ -439,7 +450,7 @@ const currentEnvironment = () =>
   state.environments.find((env) => env.name === state.selected) || null;
 
 const ADVICE = {
-  unhealthy: "　建议：先看底部日志栏的尾部输出，再决定重启还是先改规则。",
+  unhealthy: "　建议：打开「日志」页签看尾部输出，再决定重启还是先改规则。",
   config_mismatch: "　建议：停止后重新启动，让实例与实际配置对齐。",
   port_conflict: "　建议：用「更多操作 → 重分配端口」，或先停掉占用该端口的实例。",
   failed: "　建议：看日志尾巴上的报错，修掉后重新启动。",
@@ -452,8 +463,9 @@ function renderDetail(force) {
   const empty = document.getElementById("detail-empty");
   const detail = document.getElementById("detail");
 
-  if (env) state.creating = false;
-  if (!env && !state.creating) {
+  // 新建走独立弹窗（#modal-create，设计稿第 8 页）：详情区只在真的选中了
+  // 一个环境时才出现，"新建模式下的详情面板"这一形态整个消失。
+  if (!env) {
     empty.hidden = false;
     detail.hidden = true;
     renderTabs();
@@ -461,22 +473,10 @@ function renderDetail(force) {
   }
   empty.hidden = true;
   detail.hidden = false;
-  if (!env) {
-    // 新建模式（还没有选中环境）：头部只留名字，动作行与原因行没有实例可作用。
-    document.getElementById("detail-name").textContent = "新建环境";
-    document.getElementById("detail-badge").hidden = true;
-    document.getElementById("detail-reason").classList.add("is-hidden");
-    document.getElementById("detail-actions").classList.add("is-hidden");
-    renderTabs();
-    return;
-  }
 
   const key = JSON.stringify([
     env,
-    state.editing,
     state.tab,
-    state.confirm,
-    state.moreOpen,
     [...pending],
   ]);
   if (!force && key === detailKey) return;
@@ -490,56 +490,17 @@ function renderDetail(force) {
   badge.hidden = false;
 
   renderDetailActions(env);
-  renderMore(env);
   renderReason(env);
   renderOverview(env);
   renderBoundRules(env);
   renderTabs();
-  if (state.editing) {
-    const target = state.environments.find((item) => item.name === state.editing);
-    if (target) syncEditLock(target);
-  }
+  if (state.tab === "config") fillEditForm(env);
 }
 
 function renderDetailActions(env) {
   const host = document.getElementById("detail-actions");
   host.classList.remove("is-hidden"); // 新建模式曾把它藏起来：回到真实环境必须回来
   host.replaceChildren();
-
-  // 破坏性操作走就地二次确认：不用原生 confirm（阻塞、样式不可控、且与"禁止原生弹窗"
-  // 的约束冲突），改成把动作行换成一句"后果说明 + 确认/取消"。
-  if (state.confirm === `env:${env.name}`) {
-    const box = el("div", "confirm");
-    box.appendChild(
-      el("span", "confirm-text", `删除 ${env.name}？实例会先被停掉；规则文件本身不受影响。`),
-    );
-    const key = `delete:${env.name}`;
-    box.appendChild(
-      button({
-        label: "确认删除",
-        icon: "trash",
-        className: "btn danger sm",
-        key,
-        onClick: () =>
-          runAction(key, async () => {
-            state.confirm = null;
-            return mutate(environmentPath(env.name), "DELETE");
-          }),
-      }),
-    );
-    box.appendChild(
-      button({
-        label: "取消",
-        className: "btn ghost sm",
-        onClick: () => {
-          state.confirm = null;
-          renderDetail(true);
-        },
-      }),
-    );
-    host.appendChild(box);
-    return;
-  }
 
   const running = env.desired === "running";
   const action = running ? "stop" : "start";
@@ -564,122 +525,25 @@ function renderDetailActions(env) {
     }),
   );
 
+  // 删除进主动作行（用户裁决：动作行只留 停止 / 重启 / 删除 三键）。
+  // 确认不再是就地展开 —— 规范 7.2.3 节：破坏性操作必须在模态窗内呈现，
+  // 写明后果与不可逆性，确认按钮是显式的第二次点击。
   host.appendChild(
     button({
-      label: "更多操作",
-      icon: state.moreOpen ? "chevron-down" : "more",
-      className: `btn${state.moreOpen ? " is-active" : ""}`,
-      title: "编辑配置 / 复制代理命令 / 跟随日志 / 重分配端口 / 删除环境",
-      onClick: () => {
-        state.moreOpen = !state.moreOpen;
-        renderDetail(true);
-      },
-    }),
-  );
-}
-
-/// 次级操作：就地展开的一行。浮层要按锚点算坐标，而 CSP 不允许内联 style；
-/// 展开行没有这个问题，键盘与读屏器也不必处理"浮层焦点陷阱"。
-function renderMore(env) {
-  const host = document.getElementById("detail-more");
-  if (!state.moreOpen) {
-    host.classList.add("is-hidden");
-    host.replaceChildren();
-    return;
-  }
-  host.classList.remove("is-hidden");
-  host.replaceChildren();
-
-  host.appendChild(
-    button({
-      label: "编辑配置",
-      icon: "edit",
-      className: "btn sm",
-      onClick: () => startEdit(env),
-    }),
-  );
-  host.appendChild(
-    button({
-      label: "复制代理命令",
-      icon: "copy",
-      className: "btn sm",
-      onClick: (event) => copyText(env.proxy_command, "代理命令已复制到剪贴板", event.currentTarget),
-    }),
-  );
-  host.appendChild(
-    button({
-      label: "跟随日志",
-      icon: "log",
-      className: "btn sm",
-      onClick: () => {
-        state.logFollow = true;
-        syncLogFollowButton();
-        loadLogs(true);
-      },
-    }),
-  );
-  // 重分配端口是**二级操作**：它不会丢数据，但会让客户端此前的 export https_proxy=…
-  // 立即失效。所以它和删除环境一样走就地二次确认，并把后果写清楚 ——
-  // 只在 port_conflict 下出现，而那正是用户最想"赶紧点一下"的时刻。
-  if (env.health === "port_conflict") {
-    const key = `reallocate:${env.name}`;
-    if (state.confirm === key) {
-      const box = el("div", "confirm");
-      box.appendChild(
-        el(
-          "span",
-          "confirm-text",
-          `重新分配 ${env.name} 的监听端口？端口会变，客户端现有的 export https_proxy=… 将立即失效，需要同步更新。`,
-        ),
-      );
-      box.appendChild(
-        button({
-          label: "确认重分配",
-          icon: "shuffle",
-          className: "btn danger sm",
-          key,
-          onClick: () =>
-            runAction(key, async () => {
-              state.confirm = null;
-              return mutate(`${environmentPath(env.name)}/reallocate`, "POST");
-            }),
-        }),
-      );
-      box.appendChild(
-        button({
-          label: "取消",
-          className: "btn ghost sm",
-          onClick: () => {
-            state.confirm = null;
-            renderDetail(true);
-          },
-        }),
-      );
-      host.appendChild(box);
-    } else {
-      host.appendChild(
-        button({
-          label: "重分配端口",
-          icon: "shuffle",
-          className: "btn sm",
-          key,
-          onClick: () => {
-            state.confirm = key;
-            renderDetail(true);
-          },
-        }),
-      );
-    }
-  }
-  host.appendChild(
-    button({
-      label: "删除环境",
+      label: "删除",
       icon: "trash",
-      className: "btn sm danger",
-      onClick: () => {
-        state.confirm = `env:${env.name}`;
-        renderDetail(true);
-      },
+      className: "btn danger",
+      title: `删除环境 ${env.name}`,
+      onClick: () =>
+        openConfirm({
+          title: `删除环境 ${env.name}？`,
+          text:
+            "实例会先被停掉，环境配置与它的日志文件随之删除；监听端口 " + env.listen.port + " 会被释放。" +
+            "规则文件本身不受影响。指向该端口的客户端代理配置将立即失效，需要同步更新。",
+          actionLabel: "确认删除",
+          actionKey: `delete:${env.name}`,
+          run: () => mutate(environmentPath(env.name), "DELETE"),
+        }),
     }),
   );
 }
@@ -699,6 +563,30 @@ function renderReason(env) {
   host.classList.toggle("danger", severe);
   host.classList.toggle("warn", !severe);
   text.textContent = `${reason}${ADVICE[env.health] || ""}`;
+
+  // port_conflict 的解药（重分配端口）就放在原因条里：动作行只留三键
+  // （停止 / 重启 / 删除），这是 port_conflict 下用户唯一还需要做的事。
+  // 它会让客户端现有的 export https_proxy=… 立即失效，所以确认走破坏性模态
+  // （规范 7.2.3 节：写明后果与不可逆性 + 显式第二次点击）。
+  if (env.health === "port_conflict") {
+    host.appendChild(
+      button({
+        label: "重分配端口",
+        icon: "shuffle",
+        className: "btn sm",
+        onClick: () =>
+          openConfirm({
+            title: `重新分配 ${env.name} 的监听端口？`,
+            text:
+              "端口会变，客户端现有的 export https_proxy=… 将立即失效，需要同步更新。" +
+              "旧端口会被释放，环境以新端口重新拉起。",
+            actionLabel: "确认重分配",
+            actionKey: `reallocate:${env.name}`,
+            run: () => mutate(`${environmentPath(env.name)}/reallocate`, "POST"),
+          }),
+      }),
+    );
+  }
 }
 
 function renderOverview(env) {
@@ -793,6 +681,9 @@ function renderBoundRules(env) {
       return;
     }
 
+    // 规模与预览行数：预览只展开前 3 行（设计稿第 3 页），完整内容走「去规则库编辑」。
+    const lines = entry.text.split("\n").filter((line) => line.trim());
+    const stats = ruleStats(entry.text);
     const head = el("div", "bound-head");
     const tag = el("span", "badge purple");
     const tagDot = el("span", "dot");
@@ -801,7 +692,18 @@ function renderBoundRules(env) {
     tag.appendChild(el("span", "mono", name));
     head.appendChild(tag);
     if (env.rules_missing) head.appendChild(el("span", "badge warn", "规则缺失（已忽略）"));
-    head.appendChild(el("span", "rule-meta", `${entry.text.split("\n").filter(Boolean).length} 行 / ${entry.text.length} 字符`));
+    head.appendChild(
+      el(
+        "span",
+        "rule-meta",
+        [
+          stats ? `${stats.entries} 条 · ${stats.ips} 个 IP` : null,
+          "热重载已启用",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      ),
+    );
     head.appendChild(
       button({
         label: "去规则库编辑",
@@ -813,7 +715,14 @@ function renderBoundRules(env) {
         },
       }),
     );
-    host.replaceChildren(head, el("pre", "rule-preview", entry.text || "（文件是空的）"));
+    const previewLines = lines.slice(0, 3);
+    if (lines.length > 3) {
+      previewLines.push(`… 其余 ${lines.length - 3} 条`);
+    }
+    const box = el("div", "rule-preview-box");
+    const pre = el("pre", "rule-preview", previewLines.join("\n") || "（文件是空的）");
+    box.appendChild(pre);
+    host.replaceChildren(head, box);
   });
 }
 
@@ -832,7 +741,7 @@ function renderRules(force) {
     .filter((name) => name && !names.includes(name));
   const options = [...names, ...new Set(missing)];
 
-  const key = JSON.stringify([options, state.confirm, [...pending]]);
+  const key = JSON.stringify([options, [...pending]]);
   if (!force && key === rulesKey) return;
   rulesKey = key;
 
@@ -853,7 +762,10 @@ function renderRules(force) {
     // 取不到时留空而不是显示 0：0 条和「还没取到」是两件事。
     const stats = absent ? null : ruleStatsCache.get(name);
     if (stats) {
-      item.appendChild(el("span", "rule-size mono", `${stats.entries} 条 · ${stats.ips} 个 IP`));
+      // 设计稿第 4 页的行内元信息：条数 · IP 数 · 落盘文件名（规则集名 + .hosts）。
+      item.appendChild(
+        el("span", "rule-size mono", `${stats.entries} 条 · ${stats.ips} 个 IP · ${name}.hosts`),
+      );
     } else if (!absent) {
       ensureRuleStats(name);
     }
@@ -869,88 +781,117 @@ function renderRules(force) {
       ),
     );
 
-    if (state.confirm === `rule:${name}`) {
-      const box = el("div", "confirm");
-      // 写明后果：删掉一份被绑定的规则，环境不会报错，而是**静默地不再覆盖** ——
-      // 这正是最该在动手前说清的一类后果。
-      box.appendChild(
-        el(
-          "span",
-          "confirm-text",
-          users.length
-            ? `删除规则文件 ${name}？绑定它的 ${users.join(" / ")} 会失去覆盖，重启后按不覆盖运行。`
-            : `删除规则文件 ${name}？它当前没有被任何环境绑定，文件本身会从磁盘删掉。`,
-        ),
-      );
-      const key2 = `ruledelete:${name}`;
-      box.appendChild(
-        button({
-          label: "确认删除",
-          className: "btn danger sm",
-          key: key2,
-          onClick: () =>
-            runAction(key2, async () => {
-              state.confirm = null;
-              return mutate(`/api/rules/${encodeURIComponent(name)}`, "DELETE");
-            }),
-        }),
-      );
-      box.appendChild(
-        button({
-          label: "取消",
-          className: "btn ghost sm",
-          onClick: () => {
-            state.confirm = null;
-            renderRules(true);
-          },
-        }),
-      );
-      item.appendChild(box);
-    } else {
-      const actions = el("div", "rule-actions");
-      if (!absent) {
-        actions.appendChild(
-          button({ label: "载入", className: "btn sm", onClick: () => loadRule(name) }),
-        );
-      }
+    const actions = el("div", "rule-actions");
+    if (!absent) {
       actions.appendChild(
-        button({
-          label: "删除",
-          icon: "trash",
-          className: "btn sm danger",
-          onClick: () => {
-            state.confirm = `rule:${name}`;
-            renderRules(true);
-          },
-        }),
+        button({ label: "载入", className: "btn sm", onClick: () => loadRule(name) }),
       );
-      item.appendChild(actions);
     }
+    // 删除走破坏性确认模态（规范 7.2.3 节）。被绑定的规则删掉后环境**静默不再覆盖**，
+    // 这正是最该在动手前说清的一类后果，所以引用环境要写进后果文本。
+    actions.appendChild(
+      button({
+        label: "删除",
+        icon: "trash",
+        className: "btn sm danger",
+        onClick: () =>
+          openConfirm({
+            title: `删除规则文件 ${name}？`,
+            text: users.length
+              ? "绑定它的 " + users.join(" / ") + " 不会报错，而是静默地不再覆盖任何域名；重启后按不覆盖运行。请先解绑或改绑。"
+              : "它当前没有被任何环境绑定，文件本身会从磁盘删掉。",
+            actionLabel: "确认删除",
+            actionKey: `ruledelete:${name}`,
+            run: () => mutate(`/api/rules/${encodeURIComponent(name)}`, "DELETE"),
+          }),
+      }),
+    );
+    item.appendChild(actions);
     host.appendChild(item);
   }
 
   renderRuleOptions(options, new Set(missing));
+  renderRuleSidebar();
+}
+
+// ---- 侧栏「规则集」列表（规则库视图，设计稿第 4 页） ----
+
+const visibleRuleSets = () => {
+  const needle = state.ruleSearch.trim().toLowerCase();
+  const names = state.rules;
+  if (!needle) return names;
+  return names.filter((name) => name.toLowerCase().includes(needle));
+};
+
+let ruleSideKey = "";
+
+function renderRuleSidebar(force) {
+  const names = visibleRuleSets();
+  const key = JSON.stringify([names, state.ruleSearch, [...pending]]);
+  if (!force && key === ruleSideKey) return;
+  ruleSideKey = key;
+
+  const host = document.getElementById("rule-side-list");
+  host.replaceChildren();
+  if (!state.rules.length) {
+    host.appendChild(el("li", "empty-inline", "还没有规则集。导入一份 hosts 文本即可创建。"));
+    return;
+  }
+  if (!names.length) {
+    host.appendChild(el("li", "empty-inline", "没有符合条件的规则集。"));
+    return;
+  }
+  for (const name of names) {
+    const users = state.environments.filter((env) => env.rules === name);
+    const item = el("li", "rule-side-item");
+    item.dataset.rule = name;
+    const main = el("button", "rule-side-main");
+    main.type = "button";
+    // 点侧栏规则集 = 载入到导入表单（与主列表「载入」同义，设计稿语义一致）。
+    main.addEventListener("click", () => loadRule(name));
+    main.appendChild(el("span", "rule-side-name mono", name));
+    const stats = ruleStatsCache.get(name);
+    main.appendChild(
+      el("span", "rule-side-meta", stats ? `${stats.entries} 条 · ${name}.hosts` : name),
+    );
+    if (!stats && state.rules.includes(name)) ensureRuleStats(name);
+    item.appendChild(main);
+    // 「N 环境引用」徽标：删错一份被引用的规则是静默故障，引用数要一直可见。
+    const badge = el("span", `badge ${users.length ? "purple" : ""}`.trim());
+    badge.appendChild(el("span", null, `${users.length} 环境引用`));
+    item.appendChild(badge);
+    host.appendChild(item);
+  }
 }
 
 let ruleOptionsKey = "";
 
 function renderRuleOptions(options, missing) {
-  const select = document.getElementById("rules-select");
   const key = JSON.stringify([options, [...missing]]);
   if (key === ruleOptionsKey) return;
   ruleOptionsKey = key;
 
-  const previous = select.value;
-  select.replaceChildren();
-  const empty = el("option", null, "（不覆盖）");
-  empty.value = "";
-  select.appendChild(empty);
-  for (const name of options) {
-    const option = el("option", null, missing.has(name) ? `${name}（文件不存在）` : name);
-    option.value = name;
-    select.appendChild(option);
+  // 两个下拉吃同一份选项：编辑表单（覆盖语义，首项 = 不覆盖）与
+  // 创建弹窗（设计稿第 8 页：未选择 = 可稍后绑定）。
+  const specs = [
+    { id: "rules-select", emptyLabel: "（不覆盖）" },
+    { id: "env-create-rules", emptyLabel: "未选择（可稍后绑定）" },
+  ];
+  for (const { id, emptyLabel } of specs) {
+    const select = document.getElementById(id);
+    if (!select) continue;
+    const previous = select.value;
+    select.replaceChildren();
+    const empty = el("option", null, emptyLabel);
+    empty.value = "";
+    select.appendChild(empty);
+    for (const name of options) {
+      const option = el("option", null, missing.has(name) ? `${name}（文件不存在）` : name);
+      option.value = name;
+      select.appendChild(option);
+    }
+    select.value = previous;
   }
-  select.value = previous;
 }
 
 /// 「载入」：把已导入的规则原文取回表单，改完再导入（覆盖同名文件）。
@@ -1055,58 +996,12 @@ async function runAction(key, mutateFn) {
   }
 }
 
-/// 复制成功后在按钮上给一个瞬时反馈（「已复制」+ 对勾）。
-/// 只碰这一个按钮的局部 DOM：详情区每次快照都可能重画，整块重渲染会把反馈冲掉。
-function flashCopied(node) {
-  if (!node || node.dataset.copied === "1") return;
-  node.dataset.copied = "1";
-  const label = node.querySelector("span");
-  const use = node.querySelector("svg.ic use");
-  const originalLabel = label ? label.textContent : "";
-  const originalIcon = use ? use.getAttribute("href") : "";
-  if (label) label.textContent = "已复制";
-  if (use) use.setAttribute("href", "#i-check");
-  node.classList.add("is-copied");
-  setTimeout(() => {
-    delete node.dataset.copied;
-    if (label && label.isConnected) label.textContent = originalLabel;
-    if (use && use.isConnected) use.setAttribute("href", originalIcon);
-    node.classList.remove("is-copied");
-  }, 1400);
-}
-
-async function copyText(text, message, node) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      // 回退路径：非安全上下文下 clipboard API 不可用（127.0.0.1 算安全上下文，
-      // 但换成本机其它别名访问时不算）。
-      const area = document.createElement("textarea");
-      area.value = text;
-      area.setAttribute("readonly", "");
-      area.className = "sr-only";
-      document.body.appendChild(area);
-      area.select();
-      const ok = document.execCommand("copy");
-      area.remove();
-      if (!ok) throw new Error("浏览器拒绝了剪贴板写入");
-    }
-    toast(message, "ok");
-    flashCopied(node);
-  } catch (error) {
-    toast(`复制失败：${error.message}`, "bad");
-  }
-}
-
 function selectEnvironment(name) {
   if (state.selected === name) {
     setView("environments");
     return;
   }
   state.selected = name;
-  state.confirm = null;
-  state.moreOpen = false;
   clearRuleCaches();
   setView("environments");
   renderSidebar(true);
@@ -1114,15 +1009,61 @@ function selectEnvironment(name) {
   loadLogs(true);
 }
 
-// ---- 新建 / 编辑（同一个表单） ----
+// ---- 配置页签 = 常驻编辑器 ----
+//
+// 「编辑配置」入口已随更多操作一起退场：配置页签本身就是编辑器 —— 选中环境即
+// 回显当前值，有改动才解锁「保存」。SSE 每秒推一次快照，所以回显必须幂等：
+// 只有"换了环境 / 保存成功 / 服务端值变了"才重填，用户改到一半的内容绝不被冲掉。
 
-/// 进入编辑模式：把当前值填进表单，并在表单上记住**原名**。
-///
-/// 记住原名而不是新名：改名时请求要打在旧名字的 URL 上，改完才换成新名字。
-function startEdit(env) {
+/// 表单基线：上次回显时的服务端值。保存按钮按"当前输入 ≠ 基线"解锁。
+function editBaseline(env) {
+  return {
+    name: env.name,
+    port: String(env.listen.port),
+    rules: env.rules || "",
+    insecure_hosts: insecureHosts(env).join("\n"),
+    public: !isLoopbackHost(env.listen.host),
+    description: env.description || "",
+  };
+}
+
+/// 回显指纹：环境的服务端值一变（保存成功 / 热字段被别处改掉）它就变，
+/// 干净的表单跟着重填；脏表单不重填。
+function editEchoKey(env) {
+  return [
+    env.name,
+    env.listen.host,
+    env.listen.port,
+    env.rules || "",
+    env.rules_count || 0,
+    insecureHosts(env).join(","),
+    env.description || "",
+    env.health,
+  ].join("|");
+}
+
+function fillEditForm(env) {
   const form = document.getElementById("env-form");
-  state.editing = env.name;
-  form.dataset.editing = env.name;
+  const sameEnv = form.dataset.filledEnv === env.name;
+  const echoKey = editEchoKey(env);
+
+  if (sameEnv && state.formDirty) {
+    // 改到一半：不回填（保住现场），但锁位 / 警示 / 保存按钮要跟最新状态走。
+    syncEditLock(env);
+    syncAuthWarning();
+    updateSaveButton();
+    return;
+  }
+  if (sameEnv && form.dataset.echoKey === echoKey) {
+    // 数据没变：什么都不重填 —— 每秒一次的快照不许抖动表单。
+    syncEditLock(env);
+    updateSaveButton();
+    return;
+  }
+
+  form.dataset.filledEnv = env.name;
+  form.dataset.echoKey = echoKey;
+  state.formDirty = false;
   field(form, "name").value = env.name;
   field(form, "port").value = String(env.listen.port);
   field(form, "description").value = env.description || "";
@@ -1131,27 +1072,57 @@ function startEdit(env) {
   // 放宽清单可以回显（它不是凭据），一行一个域名，与文本框的输入形态一致。
   field(form, "insecure_hosts").value = insecureHosts(env).join("\n");
   // 对外服务 = listen.host 是否非回环。凭据本身**永不回显** —— 服务端只回
-  // `proxy_auth_enabled` 这个布尔，所以两栏一律清空：不填 = 保持原样，
-  // 想清掉只能走下面的「清除代理鉴权」。
+  // `proxy_auth_enabled` 这个布尔，所以两栏一律清空：不填 = 保持原样。
   field(form, "public").checked = !isLoopbackHost(env.listen.host);
   field(form, "proxy_user").value = "";
   field(form, "proxy_password").value = "";
   field(form, "proxy_clear").checked = false;
-  document.getElementById("env-form-proxy-clear-field").classList.remove("is-hidden");
+  // 「清除代理鉴权」只在确有已保存凭据时才有意义。
+  document
+    .getElementById("env-form-proxy-clear-field")
+    .classList.toggle("is-hidden", !env.proxy_auth_enabled);
   document.getElementById("env-form-title").textContent = `编辑环境 · ${env.name}`;
-  document.getElementById("env-form-submit-text").textContent = "保存";
-  document.getElementById("env-form-cancel").hidden = false;
-  const mode = document.getElementById("env-form-mode");
-  mode.hidden = false;
-  document.getElementById("env-form-mode-text").textContent = "编辑中";
-  state.tab = "config";
-  state.moreOpen = false;
-  renderDetail(true);
+  state.formBaseline = editBaseline(env);
+  clearInvalid(form);
   syncEditLock(env);
   syncAuthWarning();
-  field(form, "name").focus();
+  updateSaveButton();
 }
 
+/// 表单此刻是否偏离基线。凭据两栏任何输入都算改动（它们不回显，
+/// 非空即意图）；「清除代理鉴权」勾上同理。
+function formIsDirty() {
+  const baseline = state.formBaseline;
+  if (!baseline) return false;
+  const form = document.getElementById("env-form");
+  return (
+    field(form, "name").value.trim() !== baseline.name ||
+    field(form, "port").value.trim() !== baseline.port ||
+    field(form, "rules").value !== baseline.rules ||
+    parseInsecureHosts(field(form, "insecure_hosts").value).join("\n") !==
+      baseline.insecure_hosts ||
+    field(form, "public").checked !== baseline.public ||
+    field(form, "description").value !== baseline.description ||
+    field(form, "proxy_user").value !== "" ||
+    field(form, "proxy_password").value !== "" ||
+    field(form, "proxy_clear").checked
+  );
+}
+
+/// 保存按钮：无改动 = 禁用（用户裁决：监听表单改动）。
+function updateSaveButton() {
+  const submit = document.getElementById("env-form-submit");
+  if (submit) submit.disabled = !state.formDirty;
+}
+
+/// 输入会话驱动：任何 input / change 都重估脏态。跑在 rAF 外、直接同步算 ——
+/// 表单就十来个字段，比对成本可忽略，而提交瞬间需要的就是当下值。
+function syncFormDirty() {
+  if (state.tab !== "config" || !currentEnvironment()) return;
+  state.formDirty = formIsDirty();
+  updateSaveButton();
+  syncAuthWarning();
+}
 /// 运行中只锁**停机字段**（名字 / 监听地址 / 代理凭据）—— 它们的改动会让运行中的实例与
 /// 配置分叉，服务端以 `conflict` 拒绝。描述、规则绑定与放宽域名清单是**热**字段，
 /// 运行中照样可改，所以这里不锁。状态变了要重新同步 —— 表单还开着的时候环境可能被停掉。
@@ -1162,6 +1133,12 @@ function syncEditLock(env) {
     const input = field(form, name);
     input.disabled = locked;
     input.title = locked ? "运行中不能改：先点「停止」" : "";
+  }
+  // 表单头部的状态位：运行中 = 停机字段被锁，要如实标注（而不是让人对着灰输入框猜）。
+  const mode = document.getElementById("env-form-mode");
+  if (mode) {
+    mode.hidden = !locked;
+    document.getElementById("env-form-mode-text").textContent = "运行中";
   }
   document.getElementById("env-form-hint").textContent = locked
     ? `编辑 ${env.name}：实例在运行。描述 / 规则绑定 / 放宽校验域名可以热改（保存后几秒内生效）；` +
@@ -1178,26 +1155,204 @@ function ensureRuleOption(name) {
   select.appendChild(option);
 }
 
-function cancelEdit() {
-  const form = document.getElementById("env-form");
-  state.editing = null;
-  form.dataset.editing = "";
-  for (const name of STOP_REQUIRED_FIELDS) {
-    const input = field(form, name);
-    input.disabled = false;
-    input.title = "";
-    input.removeAttribute("aria-invalid");
+// ---- 创建环境弹窗（设计稿第 8 页） ----// --------------------------------------------------------------------------- //
+// 模态窗控制器（规范 6.6.4 节 / 6.6.8 节）
+// --------------------------------------------------------------------------- //
+//
+// 三个模态（创建环境 / 二维码 / 破坏性确认）共用一套：焦点陷阱、ESC 策略、
+// 遮罩点击策略、焦点归还。data-modal-state 是自动化断言锚点：open / validating / submitting。
+
+const modalTriggers = new Map(); // modal id -> 触发元素（关闭后焦点归还）
+const MODAL_FOCUSABLE =
+  "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])";
+
+function activeModal() {
+  return document.querySelector(".modal-overlay:not(.is-hidden)");
+}
+
+function openModal(id, trigger, focusSelector) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  if (trigger && trigger.focus) modalTriggers.set(id, trigger);
+  modal.classList.remove("is-hidden");
+  modal.dataset.modalState = "open";
+  const target =
+    (focusSelector && modal.querySelector(focusSelector)) || modal.querySelector(MODAL_FOCUSABLE);
+  if (target) target.focus();
+}
+
+/// force=true = 用户显式点取消/关闭：submitting 中也放行（规范：取消与关闭保持可点，
+/// 已发出的请求不因关闭面板而撤销）。ESC 不 force —— submitting 时忽略 ESC，
+/// 避免关掉一个结果未知的弹窗。
+function closeModal(id, { force = false } = {}) {
+  const modal = document.getElementById(id);
+  if (!modal || modal.classList.contains("is-hidden")) return;
+  if (!force && modal.dataset.modalState === "submitting") return;
+  modal.classList.add("is-hidden");
+  modal.dataset.modalState = "";
+  const trigger = modalTriggers.get(id);
+  modalTriggers.delete(id);
+  if (trigger && trigger.isConnected && trigger.focus) trigger.focus();
+}
+
+function wireModalChrome() {
+  // 全局键盘：ESC 关闭 + Tab 焦点陷阱，只作用于当前打开的模态。
+  document.addEventListener("keydown", (event) => {
+    const modal = activeModal();
+    if (!modal) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModal(modal.id);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusables = [...modal.querySelectorAll(MODAL_FOCUSABLE)];
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !modal.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !modal.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  // 遮罩点击策略（规范 6.6.4 节）：表单型（创建环境）点击遮罩不关闭 ——
+  // 防止未保存输入被误丢；确认 / 二维码不是表单，点遮罩 = 取消。
+  for (const overlay of document.querySelectorAll(".modal-overlay")) {
+    overlay.addEventListener("mousedown", (event) => {
+      if (event.target !== overlay) return;
+      if (overlay.dataset.modalMode === "env") return;
+      closeModal(overlay.id);
+    });
   }
+}
+
+// ---- 破坏性操作确认模态（规范 7.2.3 节）----
+//
+// 删除环境 / 删除规则 / 重分配端口都走这里：触发按钮是第一击，模态内「确认」
+// 是显式第二击；正文写明后果与不可逆性。旧的「就地展开确认」整体退场。
+
+let confirmJob = null;
+
+function openConfirm({ title, text, actionLabel, actionKey, run }) {
+  document.getElementById("confirm-title").textContent = title;
+  document.getElementById("confirm-text").textContent = text;
+  document.getElementById("confirm-go-text").textContent = actionLabel;
+  confirmJob = { key: actionKey, run };
+  // 焦点落在「取消」而不是「确认」：默认动作不该是破坏性的。
+  openModal("modal-confirm", document.activeElement, "#confirm-cancel");
+}
+
+function runConfirm() {
+  if (!confirmJob) return;
+  const job = confirmJob;
+  confirmJob = null;
+  closeModal("modal-confirm", { force: true });
+  runAction(job.key, job.run);
+}
+
+
+//
+// 新建与编辑从此分家：弹窗只收四个字段（名称 / 描述 / 端口 / 规则集），
+// 不含 0.0.0.0 对外绑定与代理鉴权 —— 那些是"把环境跑给别人用"的进阶配置，
+// 放进编辑表单（配置页签）里慢慢配，别让第一次创建就被表单淹没。
+function openCreateModal() {
+  const form = document.getElementById("env-create-form");
   form.reset();
-  // 「清除代理鉴权」只在编辑模式有意义：新建时没有已保存的凭据可清。
-  field(form, "proxy_clear").checked = false;
-  document.getElementById("env-form-proxy-clear-field").classList.add("is-hidden");
-  syncAuthWarning();
-  document.getElementById("env-form-title").textContent = "新建环境";
-  document.getElementById("env-form-submit-text").textContent = "创建";
-  document.getElementById("env-form-cancel").hidden = true;
-  document.getElementById("env-form-mode").hidden = true;
-  document.getElementById("env-form-hint").textContent = "";
+  clearInvalid(form);
+  // 打开时焦点落到首个字段（规范 6.6.4），而不是标题栏的关闭按钮。
+  openModal("modal-create", document.activeElement, "#env-create-form input[name=name]");
+}
+
+function closeCreateModal() {
+  // 取消与关闭保持可点（规范 6.6.6 节）：submitting 中也 force。
+  closeModal("modal-create", { force: true });
+}
+
+/// 校验文案（规范 6.6.5 节）：前半句给原因、后半句给建议动作 —— 满足异常三通道。
+function validateCreateField(form, name) {
+  if (name === "name") {
+    const value = field(form, "name").value.trim();
+    if (!value) return "名称为必填项。请填写后提交。";
+    if (!/^[a-z][a-z0-9_\-]*$/.test(value)) return "名称含非法字符（仅允许字母、数字、-、_）。请修改后重试。";
+    return null;
+  }
+  if (name === "port") {
+    const value = field(form, "port").value.trim();
+    if (value && (!/^\d+$/.test(value) || Number(value) < 1024 || Number(value) > 65535))
+      return "端口需在 1024–65535。请修正或留空自动分配。";
+    return null;
+  }
+  return null;
+}
+
+/// 提交时全量校验：标红全部错误字段，但焦点只落在**第一个**错误字段上（规范 6.6.4 节）。
+function validateCreate(form) {
+  clearInvalid(form);
+  let firstBad = null;
+  for (const name of ["name", "port"]) {
+    const message = validateCreateField(form, name);
+    if (message) {
+      markInvalid(form, `environment.${name}`, message, { noFocus: true });
+      if (!firstBad) firstBad = name;
+    }
+  }
+  if (firstBad) field(form, firstBad).focus();
+  return !firstBad;
+}
+
+async function submitCreate(form) {
+  const key = "create";
+  if (pending.has(key)) return;
+  const modal = document.getElementById("modal-create");
+  if (!validateCreate(form)) {
+    modal.dataset.modalState = "validating";
+    return;
+  }
+  // submitting（规范 6.6.6 节）：确认按钮 loading +「创建中…」、字段只读、
+  // 取消与关闭仍可点、ESC 被模态控制器忽略。
+  modal.dataset.modalState = "submitting";
+  pending.add(key);
+  const submit = document.getElementById("create-submit");
+  const submitLabel = submit.querySelector("span");
+  submit.classList.add("is-busy");
+  submit.disabled = true;
+  if (submitLabel) submitLabel.textContent = "创建中…";
+  const controls = [...form.elements].filter((node) => node.name);
+  for (const control of controls) control.disabled = true;
+  try {
+    const payload = { name: field(form, "name").value.trim(), description: field(form, "description").value };
+    const port = field(form, "port").value.trim();
+    if (port) payload.listen = { host: "127.0.0.1", port: Number(port) };
+    const rules = field(form, "rules").value;
+    if (rules) payload.rules = rules;
+    const created = await mutate("/api/environments", "POST", payload);
+    closeModal("modal-create", { force: true });
+    state.selected = created && created.name ? created.name : state.selected;
+    await refreshAll({ force: true });
+    toast(`已创建 ${state.selected}。`, "ok");
+  } catch (error) {
+    // 服务端错误映射回对应字段，不弹全局错误（规范 6.6.5 节）：
+    // 重名（409）落回名称栏，用规范文案而不是透传英文。
+    if (/already exists/.test(String(error.message || ""))) {
+      markInvalid(form, "environment.name", "已存在同名环境。请更换名称或查看已有环境。");
+    } else if (error.field) {
+      markInvalid(form, error.field, error.message);
+    } else if (!error.handled) {
+      reportError(error);
+    }
+  } finally {
+    pending.delete(key);
+    for (const control of controls) control.disabled = false;
+    submit.classList.remove("is-busy");
+    submit.disabled = false;
+    if (submitLabel) submitLabel.textContent = "创建环境";
+    if (!modal.classList.contains("is-hidden")) modal.dataset.modalState = "open";
+  }
 }
 
 /// 把「放宽校验域名」文本框折成契约里的 `insecure_hosts` 数组。
@@ -1210,31 +1365,30 @@ function parseInsecureHosts(text) {
   return String(text || "").split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
-/// 表单 → 请求体。创建与编辑共用，差别只有三处（都写在下面，避免两份字段映射漂移）：
+/// 表单 → PATCH 请求体（配置页签的常驻编辑器只服务 PATCH；创建走弹窗）。
 ///
-/// * 编辑时 `rules` **总是显式给值**（空选 = `null` = 不覆盖）：PATCH 里"没给这个字段"
+/// 三处语义（都写在下面，避免字段映射漂移）：
+///
+/// * `rules` **总是显式给值**（空选 = `null` = 不覆盖）：PATCH 里"没给这个字段"
 ///   才是"不动它"，所以想解绑就必须真的把 null 发出去；
-/// * `insecure_hosts` **总是显式给值**（与 `rules` / 凭据同款理由：整体替换，
-///   不显式给就永远删不掉一条）；
-/// * 编辑时端口栏留空 = 保持当前端口（不写 `listen`），创建时留空 = 自动分配。
-///
-/// `listen` 是**整体替换**（契约如此），所以 host 与 port 要么都发、要么都不发：
-/// 对外服务开关只切 host（`0.0.0.0` ↔ `127.0.0.1`），端口沿用输入框或当前值。
-/// 创建时勾了对外服务却留空端口：自动分配是管理器的职责，契约里 `listen.port`
-/// 必填，这里直接拦下并提示 —— 与其让服务端报错，不如当场说清。
-function formPayload(form, editing) {
+/// * `insecure_hosts` **总是显式给值**（同款理由：整体替换，不显式给就永远删不掉一条）；
+/// * `listen` 是**整体替换**，host 与 port 要么都发、要么都不发：host 没变且
+///   端口没改 → 不发 listen（免得"看起来改了其实只是原样重发"）；
+///   对外服务开关只切 host（`0.0.0.0` ↔ `127.0.0.1`）。
+function formPayload(form, env) {
   const port = field(form, "port").value.trim();
   const rules = field(form, "rules").value;
   const publicBind = field(form, "public").checked;
   const host = publicBind ? "0.0.0.0" : "127.0.0.1";
   const proxyUser = field(form, "proxy_user").value;
   const proxyPassword = field(form, "proxy_password").value;
-  const clearCredentials = Boolean(editing) && field(form, "proxy_clear").checked;
+  const clearCredentials = field(form, "proxy_clear").checked;
   const payload = {
     name: field(form, "name").value.trim(),
     description: field(form, "description").value,
     // 整体替换：总是显式给数组，空数组 = 全部恢复严格校验（与 rules / 凭据同款）。
     insecure_hosts: parseInsecureHosts(field(form, "insecure_hosts").value),
+    rules: rules || null,
   };
   if (clearCredentials) {
     payload.proxy_user = null;
@@ -1245,29 +1399,13 @@ function formPayload(form, editing) {
     if (proxyUser) payload.proxy_user = proxyUser;
     if (proxyPassword) payload.proxy_password = proxyPassword;
   }
-  if (editing) {
-    payload.rules = rules || null;
-    // host 没变且端口留空 → 不发 listen（免得"看起来改了其实只是原样重发"）
-    const current = state.environments.find((env) => env.name === state.editing);
-    const hostChanged = !current || current.listen.host !== host;
-    if (hostChanged || port) {
-      const effectivePort = port ? Number(port) : current ? current.listen.port : null;
-      if (!effectivePort) throw handled(new Error("listen.port is required"));
-      payload.listen = { host, port: effectivePort };
-    }
-  } else {
-    if (rules) payload.rules = rules;
-    if (publicBind && !port) {
-      const portInput = field(form, "port");
-      portInput.setAttribute("aria-invalid", "true");
-      portInput.insertAdjacentElement(
-        "afterend",
-        el("span", "field-error", "勾选「对外服务」时端口不能留空：自动分配只支持默认监听 127.0.0.1，请显式填写端口。"),
-      );
-      portInput.focus();
-      throw handled(new Error("listen.port is required"));
-    }
-    if (port) payload.listen = { host, port: Number(port) };
+  // host 没变且端口没改 → 不发 listen（免得"看起来改了其实只是原样重发"）。
+  const hostChanged = !env || env.listen.host !== host;
+  const portChanged = Boolean(port) && Number(port) !== (env ? env.listen.port : null);
+  if (hostChanged || portChanged) {
+    const effectivePort = port ? Number(port) : env ? env.listen.port : null;
+    if (!effectivePort) throw handled(new Error("listen.port is required"));
+    payload.listen = { host, port: effectivePort };
   }
   return payload;
 }
@@ -1293,13 +1431,13 @@ function syncAuthWarning() {
 }
 
 /// 表单里此刻是否"有凭据"。凭据**永不回显**，所以只能这样推断：
-/// 两栏填了任意一栏 = 有；否则编辑模式下已保存的凭据仍然生效（除非勾了「清除」）。
+/// 两栏填了任意一栏 = 有；否则当前环境已保存的凭据仍然生效（除非勾了「清除」）。
 function credentialsInForm() {
   const form = document.getElementById("env-form");
   if (!form) return false;
   if (field(form, "proxy_user").value || field(form, "proxy_password").value) return true;
   if (field(form, "proxy_clear").checked) return false;
-  const current = state.environments.find((env) => env.name === state.editing);
+  const current = currentEnvironment();
   return Boolean(current && current.proxy_auth_enabled);
 }
 
@@ -1329,7 +1467,7 @@ function fieldNameForPath(path) {
   return parts[parts.length - 1] || null;
 }
 
-function markInvalid(form, path, message) {
+function markInvalid(form, path, message, opts = {}) {
   const name = fieldNameForPath(path);
   const input = name ? field(form, name) : null;
   if (!input) {
@@ -1344,8 +1482,10 @@ function markInvalid(form, path, message) {
   if (previous) previous.remove();
   // 消息原文来自服务端错误码（判定权在 core，前端只翻译与呈现），
   // 放在字段下方比放 toast 更可行动：知道是哪一项、也知道原因。
-  input.insertAdjacentElement("afterend", el("span", "field-error", message || "这一项不符合要求。"));
-  input.focus();
+  const err = el("span", "field-error", message || "这一项不符合要求。");
+  err.setAttribute("data-error", name || "form"); // 规范 6.6.8 节：错误容器可断言
+  input.insertAdjacentElement("afterend", err);
+  if (!opts.noFocus) input.focus(); // 失焦校验不能再把焦点抢回输入框
 }
 
 // --------------------------------------------------------------------------- //
@@ -1636,7 +1776,8 @@ function syncAutoscrollButton() {
 
 function setView(view) {
   state.view = view;
-  for (const node of document.querySelectorAll(".view-switch .seg-btn")) {
+  // 设计稿 v3：主导航在侧栏（.nav-btn），视图主体四选一。
+  for (const node of document.querySelectorAll("#view-switch .nav-btn")) {
     const active = node.dataset.view === view;
     node.classList.toggle("is-active", active);
     node.setAttribute("aria-pressed", String(active));
@@ -1644,6 +1785,12 @@ function setView(view) {
   document.getElementById("view-environments").classList.toggle("is-hidden", view !== "environments");
   document.getElementById("view-rules").classList.toggle("is-hidden", view !== "rules");
   document.getElementById("view-compare").classList.toggle("is-hidden", view !== "compare");
+  document.getElementById("view-settings").classList.toggle("is-hidden", view !== "settings");
+  // 侧栏列表区：环境视图给环境列表，规则库视图给规则集列表（设计稿第 4 页），
+  // 对比与设置视图不带列表区。
+  document.getElementById("side-env").classList.toggle("is-hidden", view !== "environments");
+  document.getElementById("side-rules").classList.toggle("is-hidden", view !== "rules");
+  if (view === "rules") renderRuleSidebar(true);
   // 规则数计数 chip 跟着视图亮起来（计数 chip 的激活态定义见 app.css 的 .count.is-active）
   document.getElementById("rules-count").classList.toggle("is-active", view === "rules");
 }
@@ -1662,13 +1809,9 @@ function reconcileSelection() {
   }
   if (!state.selected || !list.some((env) => env.name === state.selected)) {
     state.selected = list[0].name;
-    state.confirm = null;
-    state.moreOpen = false;
   }
-  if (state.editing && !list.some((env) => env.name === state.editing)) {
-    cancelEdit();
-    toast("正在编辑的环境已不存在，已退出编辑。", "bad");
-  }
+  // 编辑会话不再独立存在（配置页签 = 常驻编辑器）：环境没了，表单随
+  // renderDetail 自动落到新的选中项，无需专门的"退出编辑"收尾。
 }
 
 async function refreshAll({ force = false, spinner = false } = {}) {
@@ -1677,14 +1820,16 @@ async function refreshAll({ force = false, spinner = false } = {}) {
   // 显式刷新 = 用户要的是"现在的事实"，规则原文缓存跟着失效（热重载改的就是它）。
   if (force) clearRuleCaches();
   try {
-    const [status, environments, rules] = await Promise.all([
+    const [status, environments, rules, ca] = await Promise.all([
       get("/api/status"),
       get("/api/environments"),
       get("/api/rules"),
+      get("/api/ca").catch(() => null),
     ]);
     state.status = status;
     state.environments = environments;
     state.rules = rules.rules;
+    state.ca = ca;
     state.streamOk = true;
     stampOk();
     reconcileSelection();
@@ -1692,6 +1837,9 @@ async function refreshAll({ force = false, spinner = false } = {}) {
     renderSidebar(force);
     renderDetail(force);
     renderRules(force);
+    renderCa();
+    renderGeneral();
+    renderAbout();
     await loadLogs(true);
   } finally {
     if (spinner) button.classList.remove("is-busy");
@@ -1721,25 +1869,41 @@ function wire() {
     refreshAll({ force: true, spinner: true }).catch(reportError);
   });
 
-  for (const node of document.querySelectorAll(".view-switch .seg-btn")) {
+  for (const node of document.querySelectorAll("#view-switch .nav-btn")) {
     node.addEventListener("click", () => setView(node.dataset.view));
   }
 
+  // 新建环境：打开独立弹窗（设计稿第 8 页），不再借详情面板的表单。
   document.getElementById("env-new").addEventListener("click", () => {
-    cancelEdit();
-    state.creating = true;
-    state.tab = "config";
-    state.moreOpen = false;
     setView("environments");
-    renderDetail(true);
-    field(document.getElementById("env-form"), "name").focus();
+    openCreateModal();
   });
-  document.getElementById("empty-new").addEventListener("click", () => {
-    state.creating = true;
-    state.tab = "config";
-    renderDetail(true);
-    field(document.getElementById("env-form"), "name").focus();
+  document.getElementById("empty-new").addEventListener("click", openCreateModal);
+  document.getElementById("create-close").addEventListener("click", closeCreateModal);
+  document.getElementById("create-cancel").addEventListener("click", closeCreateModal);
+  document.getElementById("env-create-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitCreate(event.target);
   });
+  // 失焦校验单字段（规范 6.6.5 节）：离开名称/端口栏时就地判定，不等到提交才发现。
+  document.getElementById("env-create-form").addEventListener("focusout", (event) => {
+    const input = event.target;
+    const name = input && input.name;
+    if (name !== "name" && name !== "port") return;
+    const form = input.form;
+    const holder = input.closest(".field");
+    const stale = holder ? holder.querySelector(".field-error") : null;
+    if (stale) stale.remove();
+    input.removeAttribute("aria-invalid");
+    const message = validateCreateField(form, name);
+    if (message) markInvalid(form, `environment.${name}`, message, { noFocus: true });
+  });
+
+  // 破坏性确认模态（删除环境 / 删除规则 / 重分配端口共用一个壳）。
+  document.getElementById("confirm-close").addEventListener("click", () => closeModal("modal-confirm", { force: true }));
+  document.getElementById("confirm-cancel").addEventListener("click", () => closeModal("modal-confirm", { force: true }));
+  document.getElementById("confirm-go").addEventListener("click", runConfirm);
+  wireModalChrome();
 
   for (const card of document.querySelectorAll(".stat-card")) {
     card.addEventListener("click", () => {
@@ -1782,34 +1946,18 @@ function wire() {
     });
   }
 
-  const copyCmd = document.getElementById("copy-cmd");
-  copyCmd.addEventListener("click", () => {
-    const env = currentEnvironment();
-    if (env) copyText(env.proxy_command, "代理命令已复制到剪贴板", copyCmd);
-  });
-
-  document.getElementById("env-form-cancel").addEventListener("click", () => {
-    cancelEdit();
-    state.creating = false;
-    renderDetail(true);
-  });
-
-  // 对外服务 × 代理鉴权的联动警示：任一变化都要重估暴露面提示。
-  for (const id of [
-    "env-form-public",
-    "env-form-proxy-user",
-    "env-form-proxy-password",
-    "env-form-proxy-clear",
-  ]) {
-    document.getElementById(id).addEventListener("change", syncAuthWarning);
-    document.getElementById(id).addEventListener("input", syncAuthWarning);
-  }
+  // 配置页签的常驻编辑器：任何输入都重估脏态（保存按钮的解锁/禁用）与暴露面警示。
+  const envForm = document.getElementById("env-form");
+  envForm.addEventListener("input", syncFormDirty);
+  envForm.addEventListener("change", syncFormDirty);
 
   document.getElementById("env-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.target;
-    const editing = state.editing;
-    const key = editing ? `save:${editing}` : "create";
+    const env = currentEnvironment();
+    // 无改动时按钮本就是禁用态；这里再拦一道（回车提交也会走到 submit 事件）。
+    if (!env || !state.formDirty) return;
+    const key = `save:${env.name}`;
     if (pending.has(key)) return;
     pending.add(key);
     const submit = document.getElementById("env-form-submit");
@@ -1818,19 +1966,12 @@ function wire() {
     clearInvalid(form);
     const hint = document.getElementById("env-form-hint");
     try {
-      const payload = formPayload(form, editing);
-      if (editing) {
-        const saved = await mutate(environmentPath(editing), "PATCH", payload);
-        cancelEdit();
-        // 改名后把选中项搬到新名字：否则详情区会立刻回落到第一个环境，用户会以为改丢了。
-        state.selected = saved && saved.name ? saved.name : editing;
-        hint.textContent = "已保存。";
-      } else {
-        const created = await mutate("/api/environments", "POST", payload);
-        form.reset();
-        state.selected = created && created.name ? created.name : state.selected;
-        hint.textContent = "已创建。";
-      }
+      const payload = formPayload(form, env);
+      const saved = await mutate(environmentPath(env.name), "PATCH", payload);
+      // 改名后把选中项搬到新名字：否则详情区会立刻回落到第一个环境，用户会以为改丢了。
+      state.selected = saved && saved.name ? saved.name : env.name;
+      state.formDirty = false;
+      hint.textContent = "已保存。";
       await refreshAll({ force: true });
     } catch (error) {
       if (error.field) markInvalid(form, error.field, error.message);
@@ -1839,7 +1980,7 @@ function wire() {
     } finally {
       pending.delete(key);
       submit.classList.remove("is-busy");
-      submit.disabled = false;
+      updateSaveButton();
     }
   });
 
@@ -1858,7 +1999,7 @@ function wire() {
           "p",
           "cmp-summary",
           rows.length
-            ? `${domain}：${rows.length} 个环境里 ${covered} 个覆盖它`
+            ? `${domain} 在 ${rows.length} 个环境中的解析：${covered} 个覆盖`
             : "还没有环境，没有可对比的对象。",
         ),
       );
@@ -1866,13 +2007,20 @@ function wire() {
         const line = el("div", `cmp-row ${row.covered ? "is-covered" : "is-uncovered"}`);
         line.dataset.env = row.env;
         line.appendChild(el("span", "cmp-env mono", row.env));
+        line.appendChild(el("span", "cmp-arrow", "→"));
+        // 命中给蓝色解析值 + 来源规则集 chip；未覆盖如实写「直连」。
         line.appendChild(
           el(
             "span",
             "cmp-value mono",
-            row.covered ? `→ ${row.ip}（端口 ${row.port}）` : `未覆盖（端口 ${row.port}）`,
+            row.covered ? row.ip : "（未覆盖，直连）",
           ),
         );
+        const chip = el("span", row.covered ? "badge purple cmp-chip" : "badge warn cmp-chip");
+        chip.appendChild(
+          el("span", null, row.covered ? `命中 ${row.rules || "?"}.hosts` : "无规则命中"),
+        );
+        line.appendChild(chip);
         box.appendChild(line);
       }
     } catch (error) {
@@ -1907,16 +2055,7 @@ function wire() {
     }
   });
 
-  // ---- 日志栏 ----
-  document.getElementById("log-collapse").addEventListener("click", () => {
-    state.logCollapsed = !state.logCollapsed;
-    document.body.classList.toggle("log-collapsed", state.logCollapsed);
-    const node = document.getElementById("log-collapse");
-    node.setAttribute("aria-expanded", String(!state.logCollapsed));
-    node.title = state.logCollapsed ? "展开日志栏" : "折叠 / 展开日志栏";
-    if (!state.logCollapsed) applyAutoscroll(null);
-  });
-
+  // ---- 日志（详情页签） ----
   document.getElementById("log-follow").addEventListener("click", () => {
     state.logFollow = !state.logFollow;
     syncLogFollowButton();
@@ -1956,6 +2095,150 @@ function wire() {
     state.logAutoscroll = atBottom;
     syncAutoscrollButton();
   });
+
+  // ---- 规则库侧栏（规则集列表） ----
+  const ruleSearch = document.getElementById("rule-search");
+  const ruleSearchClear = document.getElementById("rule-search-clear");
+  ruleSearch.addEventListener("input", () => {
+    state.ruleSearch = ruleSearch.value;
+    ruleSearchClear.classList.toggle("is-hidden", !ruleSearch.value);
+    renderRuleSidebar(true);
+  });
+  ruleSearchClear.addEventListener("click", () => {
+    ruleSearch.value = "";
+    state.ruleSearch = "";
+    ruleSearchClear.classList.add("is-hidden");
+    renderRuleSidebar(true);
+    ruleSearch.focus();
+  });
+  document.getElementById("rule-new").addEventListener("click", () => {
+    field(document.getElementById("rules-form"), "name").focus();
+  });
+
+  // ---- 设置页（设计稿第 10 页：证书 / 通用 / 关于） ----
+  for (const tab of document.querySelectorAll(".stab")) {
+    tab.addEventListener("click", () => {
+      for (const other of document.querySelectorAll(".stab")) {
+        const active = other === tab;
+        other.classList.toggle("is-active", active);
+        other.setAttribute("aria-selected", String(active));
+      }
+      for (const panel of document.querySelectorAll(".spanel")) {
+        panel.classList.toggle("is-hidden", panel.dataset.spanel !== tab.dataset.stab);
+      }
+    });
+  }
+  document.getElementById("ca-qr").addEventListener("click", openQrModal);
+  document.getElementById("qr-close").addEventListener("click", closeQrModal);
+}
+
+// ---- 设置页渲染 ----
+
+/// 下载/二维码的地址都要能带 token（EventSource 同款限制：<img>/<a> 带不了
+/// 自定义头，token 只能走 query）。回环免鉴权档不带，URL 保持干净。
+function caUrl(path) {
+  return state.token ? `${path}?token=${encodeURIComponent(state.token)}` : path;
+}
+
+function renderCa() {
+  const status = document.getElementById("ca-status");
+  const text = document.getElementById("ca-status-text");
+  const info = state.ca;
+  if (!info) {
+    status.className = "badge warn";
+    text.textContent = "无法读取";
+    document.getElementById("ca-info").replaceChildren(
+      el("p", "empty-inline", "读不到共享 CA 的证书信息（confdir 里的证书缺失或形状异常）。"),
+    );
+    return;
+  }
+  status.className = "badge ok";
+  text.textContent = info.is_ca ? "已就绪" : "异常（非 CA）";
+
+  // 证书信息卡：基本信息 / 公钥 / 颁发者，全部来自服务端解析的证书 DER（只读）。
+  const host = document.getElementById("ca-info");
+  host.replaceChildren();
+  const basic = el("div", "kv-grid");
+  const basicCells = [
+    ["版本", `v${info.version}`, false],
+    ["是否根证书", info.is_ca ? "是" : "否", false],
+    ["序列号", info.serial_hex, true],
+    ["签名算法", info.sig_alg, false],
+    ["有效开始", info.not_before, true],
+    ["有效结束", info.not_after, true],
+  ];
+  for (const [label, value, mono] of basicCells) {
+    basic.appendChild(kvCell(label, value, mono));
+  }
+  host.appendChild(el("p", "kv-section", "基本信息"));
+  host.appendChild(basic);
+
+  const pubkeyText = [info.pubkey_alg, info.pubkey_curve, info.pubkey_bits ? `${info.pubkey_bits} 位` : null]
+    .filter(Boolean)
+    .join(" ");
+  host.appendChild(el("p", "kv-section", "公钥"));
+  const pub = el("div", "kv-grid");
+  pub.appendChild(kvCell("公钥算法", pubkeyText, false));
+  pub.appendChild(kvCell("SHA-256 指纹（公钥）", info.fingerprint || "—", true));
+  host.appendChild(pub);
+
+  host.appendChild(el("p", "kv-section", "颁发者信息"));
+  const issuer = el("div", "kv-grid");
+  issuer.appendChild(kvCell("国家 / Country", info.country || "—", false));
+  issuer.appendChild(kvCell("组织 / Organization", info.organization || "—", false));
+  issuer.appendChild(kvCell("通用名 / CommonName", info.common_name || "—", false));
+  issuer.appendChild(kvCell("使用者备用名称 / SAN", (info.san || []).join(" · ") || "—", true));
+  host.appendChild(issuer);
+}
+
+function kvCell(label, value, mono) {
+  const cell = el("div", "kv-cell");
+  cell.appendChild(el("span", "kv-label", label));
+  cell.appendChild(el("span", mono ? "kv-value mono" : "kv-value", value));
+  return cell;
+}
+
+/// 「通用」页签：只读的运行信息（能在 UI 改的当前版本只有证书这一块，
+/// 其余如实列出 —— 与设计稿的「当前版本仅支持证书配置」chip 同一句实话）。
+function renderGeneral() {
+  const status = state.status;
+  const host = document.getElementById("general-info");
+  if (!status) return;
+  const grid = el("div", "kv-grid");
+  const cells = [
+    ["工作台地址", `${location.host}（${exposureText()}）`, true],
+    ["代理核心", `${status.core.name} ${status.core.version}`, true],
+    ["状态目录", status.config.state_dir, true],
+    ["端口区间", status.config.port_range, true],
+  ];
+  for (const [label, value, mono] of cells) grid.appendChild(kvCell(label, value, mono));
+  host.replaceChildren(grid);
+}
+
+function renderAbout() {
+  const status = state.status;
+  const host = document.getElementById("about-info");
+  if (!status) return;
+  const grid = el("div", "kv-grid");
+  grid.appendChild(kvCell("产品", "envboard —— 一个环境 = 一个实例 = 一个端口", false));
+  grid.appendChild(kvCell("工作台版本", status.version || "—", true));
+  grid.appendChild(kvCell("代理核心", `${status.core.name} ${status.core.version}`, true));
+  host.replaceChildren(grid);
+}
+
+// ---- 根证书二维码弹窗 ----
+
+function openQrModal() {
+  // 二维码内容是"手机能直连的那个地址"：只有浏览器知道它用哪个 host 访问的
+  // 工作台，所以由前端拼 URL、服务端只负责编码（qrcode.svg 是无状态端点）。
+  const url = `${location.protocol}//${location.host}${caUrl("/api/ca.pem")}`;
+  document.getElementById("qr-img").src = `/api/ca/qrcode.svg?data=${encodeURIComponent(url)}`;
+  document.getElementById("qr-url").textContent = url;
+  openModal("modal-qr", document.activeElement, "#qr-close");
+}
+
+function closeQrModal() {
+  closeModal("modal-qr", { force: true });
 }
 
 function connectEvents() {

@@ -1360,7 +1360,7 @@ fn the_workbench_behaves_on_a_real_host() {
     // 这条是"新增端点忘了鉴权"的兜底。曾踩过：前端只有 mutate() 带凭据，所有 GET
     // （日志/规则原文/对比）在开 token 后静默 401，而页面看着"只有日志坏了"。
     // 白名单只有两个内嵌静态资产（不含数据，浏览器子资源带不了凭据）。
-    let endpoints: [(&str, &str); 18] = [
+    let endpoints: [(&str, &str); 21] = [
         ("GET", "/api/status"),
         ("GET", "/api/environments"),
         ("POST", "/api/environments"),
@@ -1379,6 +1379,10 @@ fn the_workbench_behaves_on_a_real_host() {
         ("GET", "/api/compare?host=probe.test"),
         ("GET", "/api/events"),
         ("POST", "/api/_fault"),
+        // 设置页「证书」三件套：摘要 / 下载 / 二维码，同样必须过鉴权。
+        ("GET", "/api/ca"),
+        ("GET", "/api/ca.pem"),
+        ("GET", "/api/ca/qrcode.svg?data=http://127.0.0.1/x"),
     ];
     let mut leaks: Vec<String> = Vec::new();
     for (method, path) in endpoints {

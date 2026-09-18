@@ -3,7 +3,7 @@
   "description": "空清单 = 一条都不放行（不是一个隐式的『全放行』）",
   "input": {
     "hosts": [],
-    "sni": "365.kdocs.cn"
+    "sni": "app.example.com"
   },
   "expect": {
     "ok": true,

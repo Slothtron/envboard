@@ -35,6 +35,7 @@
   --accent-fg: #ffffff;     /* 主色之上的前景（主按钮文字） */
   --accent-bg: rgba(42, 95, 232, 0.10);
   --accent-border: rgba(42, 95, 232, 0.30);
+  --accent-mark: rgba(42, 95, 232, 0.25); /* 日志搜索命中高亮底（规范 6.7 节：25%） */
 
   /* 语义：每个语义色都是「原色 + bg(10%) + border(30%)」三件套 */
   --ok: #15803d;      /* 5.0:1 运行中 / 成功 */
@@ -78,15 +79,16 @@
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
   --shadow: 0 4px 12px rgba(16, 24, 40, 0.10);
   --shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.16);
+  --overlay: rgba(16, 24, 40, 0.45);      /* 模态遮罩：冷灰，禁纯黑（规范 6.6.2 节） */
 
   /* 布局常量：与主题无关 */
   --sidebar-w: 260px;
   --topbar-h: 52px;
-  --logbar-h: 240px;
-  --logbar-h-collapsed: 36px;
-  --input-h: 32px;    /* 单行输入框高度（含 select） */
-  --btn-h: 30px;      /* 按钮三档：--btn-h / --btn-h-sm / --btn-h-sm（图标按钮同宽） */
+  --input-h: 32px;    /* 工具条档输入高度（搜索框）——规范 7.3 节 分层：工具条 32 */
+  --field-h: 36px;    /* 表单档字段控件高度——规范 6.6.2 节：控件高 36 */
+  --btn-h: 30px;      /* 按钮三档：默认 30 / sm 24 / 图标按钮 30×30 */
   --btn-h-sm: 24px;
+  --modal-w: 520px;   /* 模态面板宽（规范 6.6.2 节） */
 
   /* 字号尺度：全站只有这几档，本区就是它们的唯一定义处（也是唯一事实来源）。
      组件层不写裸 px 字号 —— 新增文本必须落在这些档位上，加档要先改这里。 */
@@ -123,17 +125,15 @@ body {
   color: var(--text);
   font: var(--text-body)/1.55 var(--font-ui);
   -webkit-font-smoothing: antialiased;
-  /* 固定视口框架：顶栏 / 侧栏 / 主区 / 日志栏四区，各自内部滚动 */
+  /* 固定视口框架：顶栏 / 侧栏 / 主区三区，各自内部滚动。
+     日志不再是第四区 —— 设计稿把日志收进环境详情的「日志」页签里。 */
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--logbar-h);
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
   grid-template-areas:
     "topbar  topbar"
-    "sidebar main"
-    "logbar  logbar";
+    "sidebar main";
 }
-
-body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--logbar-h-collapsed); }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -173,34 +173,32 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .brand-name { font-size: var(--text-xl); font-weight: 700; letter-spacing: 0.02em; line-height: 1.2; }
 .brand-sub { font-size: var(--text-xs); color: var(--muted); line-height: 1.3; }
 
-/* 视图切换：三选一，用 aria-pressed 表达选中 */
-.view-switch {
-  display: flex; gap: var(--space-1); flex: none;
-  margin-left: var(--space-3);
-  margin-right: auto;
-  padding: var(--space-1);
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+/* 侧栏主导航（设计稿 v3）：视图切换从顶栏移进侧栏顶部，纵向四项。
+   选中态用 --accent-bg 底 + 主色文字 + 左侧竖条，与设计稿「明亮版」一致。 */
+.side-nav {
+  display: flex; flex-direction: column; gap: 2px;
+  flex: none;
+  padding: var(--space-3) var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--line);
 }
-/* 高 30 与 .btn 同档：顶栏里所有控件同高，视觉才是一排而不是高低错落 */
-.seg-btn {
-  display: inline-flex; align-items: center; gap: var(--space-1);
-  height: var(--btn-h); padding: 0 var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius-xs);
+.nav-btn {
+  position: relative;
+  display: flex; align-items: center; gap: var(--space-3);
+  height: 34px; padding: 0 var(--space-3);
+  border: 0; border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted);
-  font: inherit; font-size: var(--text-base); font-weight: 500;
-  white-space: nowrap; cursor: pointer;
+  color: var(--text-2);
+  font: inherit; font-size: var(--text-body); font-weight: 500;
+  text-align: left; cursor: pointer;
 }
-.seg-btn:hover { background: var(--panel-hover); color: var(--text); }
-.seg-btn:active { background: var(--panel-hover); }
-.seg-btn.is-active {
-  background: var(--panel);
-  border-color: var(--line);
-  color: var(--accent);
-  box-shadow: var(--shadow-sm);
+.nav-btn:hover { background: var(--panel-hover); color: var(--text); }
+.nav-btn[aria-pressed="true"] { background: var(--accent-bg); color: var(--accent); }
+.nav-btn[aria-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0; top: var(--space-2); bottom: var(--space-2);
+  width: 2px; border-radius: var(--radius-pill);
+  background: var(--accent);
 }
 
 /* 顶栏的固有宽度**不该随状态文案变化**：SSE 断开时连接徽章的文字会变长
@@ -226,6 +224,15 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .sidebar-head {
   display: flex; align-items: center; gap: var(--space-2);
   padding: var(--space-3) var(--space-3) var(--space-2);
+}
+
+/* 侧栏的列表区：环境列表 / 规则集列表二选一显示（跟随当前视图）。
+   只让可见的那一块拿走剩余高度 —— is-hidden 是 display:none !important，
+   两个区块同时 flex:1 也不会互相分走空间。 */
+.side-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex; flex-direction: column;
 }
 .sidebar-title {
   font-size: var(--text-xs); font-weight: 600;
@@ -336,8 +343,18 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
   display: flex; align-items: center; gap: var(--space-2);
   margin: 0; font-size: var(--text-md); font-weight: 600; color: var(--text);
 }
-.panel-title .ic { color: var(--muted); }
 .panel-head .count { margin-left: auto; }
+
+/* 区块标题（13px/600）左侧 3px 主色竖条 —— 规范 3.1 节 层级表。
+   图标一律 currentColor 随文本继承（规范 5 节），所以这里删掉了给 .ic 单独配色的规则。 */
+.panel-title::before,
+.ca-title::before,
+.form-title::before {
+  content: "";
+  width: 3px; height: 1em; flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
 
 /* ============================================================ ③ 组件 */
 
@@ -401,16 +418,6 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
   margin-left: auto; flex-wrap: wrap;
 }
 
-/* 次级操作（更多操作）：就地展开的一行，而不是浮层 ——
-   浮层需要按锚点算坐标，而 CSP 不允许内联 style，也不宜在滚动容器里被裁切。 */
-.detail-more {
-  display: flex; align-items: center; gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-3);
-  flex-wrap: wrap;
-}
-
 .notice {
   display: flex; align-items: flex-start; gap: var(--space-2);
   margin: var(--space-3) var(--space-4) 0;
@@ -423,6 +430,7 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .notice.danger { background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad); }
 .notice.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn); }
 .notice.info { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent); }
+.notice.ok { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok); }
 
 .tabs {
   display: flex; gap: var(--space-1); flex-wrap: wrap;
@@ -432,7 +440,8 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
   background: var(--bg-2);
   border-bottom: 1px solid var(--line);
 }
-.tab {
+.tab,
+.stab {
   /* -1px：让激活下划线压住 .tabs 的 1px 下边框，两者合成一条 2px 线而不是并排两条 */
   margin-bottom: -1px;
   padding: var(--space-2) var(--space-3);
@@ -441,9 +450,9 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
   font: inherit; font-size: var(--text-base); font-weight: 500;
   color: var(--muted); cursor: pointer;
 }
-.tab:hover { color: var(--text); }
-.tab:active { color: var(--accent); }
-.tab.is-active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:hover, .stab:hover { color: var(--text); }
+.tab:active, .stab:active { color: var(--accent); }
+.tab.is-active, .stab.is-active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
 .tab-panels { padding: var(--space-4); min-width: 0; }
 
@@ -452,7 +461,8 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
    这 1px 是**边框模拟**而不是间距，不适用 4px 基数那条纪律（别误读成间距违规）。 */
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 设计稿概览信息格：4 列两行（8 格正好铺满，不留露底的空槽） */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
@@ -515,7 +525,9 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .form { display: grid; gap: var(--space-3); }
 .form.inline { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
 .field { display: grid; gap: var(--space-1); min-width: 0; }
-.field-label { font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.03em; color: var(--muted); }
+.field-label { font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.03em; color: var(--text-2); }
+/* 必填星号：规范 6.6.2 节 —— Label 用 --text-2，星号用 --bad */
+.field-label .req { color: var(--bad); font-weight: 700; }
 .field-hint { font-size: var(--text-xs); color: var(--muted-2); }
 /* 复选框字段：勾选框与标签同行，提示换行在下方 */
 .field-check { grid-template-columns: auto 1fr; align-items: center; }
@@ -529,7 +541,7 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 /* 代理凭据两栏并排（用户名 / 密码）；窄屏在下方媒体查询里退回单列 */
 .field-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 .form-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
-.form-title { font-size: var(--text-md); font-weight: 600; }
+.form-title { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-md); font-weight: 600; }
 .form-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 
 /* 单行控件固定高 32（规范：输入框 高 32），所以上下 padding 取 0 —— 让 flex/行高居中，
@@ -538,13 +550,13 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .form input, .form select, .form textarea {
   width: 100%;
   padding: 0 var(--space-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-2);
   border-radius: var(--radius-sm);
   background: var(--bg-3);
   color: var(--text);
   font: inherit; font-size: var(--text-base);
 }
-.form input, .form select { height: var(--input-h); }
+.form input, .form select { height: var(--field-h); }
 .form textarea { padding: var(--space-2); }
 .form input:focus, .form select:focus, .form textarea:focus {
   outline: none;
@@ -591,16 +603,15 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
   color: var(--text-2);
   font: inherit; font-size: var(--text-base); font-weight: 500;
   white-space: nowrap; cursor: pointer;
+  /* .btn 也挂在 <a> 上（下载根证书）：不重置 text-decoration 就会带链接下划线 */
+  text-decoration: none;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 .btn:hover { background: var(--panel-hover); border-color: var(--line-2); color: var(--text); }
 .btn:active { transform: translateY(1px); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
-/* 禁用态不该再响应 hover：半透明底色随鼠标变色会看着像"还能点"。
-   变体各写一条，否则会盖掉 primary / ghost 自己的底色。 */
-.btn:disabled:hover { background: var(--panel); border-color: var(--line); color: var(--text-2); }
-.btn.primary:disabled, .btn.primary:disabled:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-.btn.ghost:disabled:hover { background: transparent; border-color: transparent; color: var(--muted); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+/* 禁用态底色保持各变体本色（primary 压暗但仍识别得出是主按钮） */
+.btn.primary:disabled { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
@@ -618,8 +629,6 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
    规范只定义了三档（默认 30 / sm 24 / 图标按钮 30×30），这里补齐到 30。 */
 .btn.icon-btn.sm { width: var(--btn-h); height: var(--btn-h); }
 .btn.is-active { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent); }
-/* 复制成功后的瞬时反馈：按钮变绿 + 文案换成「已复制」，约 1.4s 后复原 */
-.btn.is-copied { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok); }
 /* 进行中：按钮禁用 + 图标呼吸，避免用户在等结果时重复点击 */
 .btn.is-busy { opacity: 0.6; cursor: progress; }
 .btn.is-busy .ic { animation: pulse 1.2s ease-in-out infinite; }
@@ -748,16 +757,6 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .rule-size { flex: none; font-size: var(--text-xs); color: var(--text-2); }
 .rule-actions { display: flex; align-items: center; gap: var(--space-1); margin-left: auto; flex-wrap: wrap; }
 
-/* 破坏性操作的二次确认：就地展开，不用原生 confirm（会阻塞且样式不可控） */
-.confirm {
-  display: flex; align-items: center; gap: var(--space-2);
-  margin-left: auto; flex-wrap: wrap;
-}
-/* 规则项里 .confirm 顶掉右侧的「载入 / 删除」按钮（整组右对齐），
-   而「更多操作」展开行是一排平铺按钮，确认块要跟在原位而不是被推到行尾。 */
-.detail-more .confirm { margin-left: 0; }
-.confirm-text { font-size: var(--text-xs); font-weight: 600; color: var(--bad); }
-
 /* ---- 绑定规则预览 ---- */
 .bound-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
 .bound-head .btn { margin-left: auto; }
@@ -789,11 +788,13 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 }
 .cmp-row.is-covered { background: var(--ok-bg); border-color: var(--ok-border); }
 .cmp-env {
-  min-width: 0; font-weight: 600;
+  flex: none; width: 180px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.cmp-value { margin-left: auto; flex: none; font-size: var(--text-sm); color: var(--muted); }
-.cmp-row.is-covered .cmp-value { color: var(--ok); }
+.cmp-arrow { flex: none; }
+.cmp-value { flex: none; font-size: var(--text-base); color: var(--text); }
+.cmp-row.is-covered .cmp-value { color: var(--accent); }
+.cmp-chip { margin-left: auto; }
 
 /* ---- 空状态 ---- */
 .empty-state {
@@ -819,20 +820,24 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
    取 --muted 两边都达标（4.66:1 / 5.5:1），取 --muted-2 则侧栏那侧掉到 3.91:1。 */
 .empty-inline { padding: var(--space-5) var(--space-3); font-size: var(--text-sm); color: var(--muted); text-align: center; }
 
-/* ========================================================== ④ 日志栏 */
+/* ========================================================== ④ 日志（详情页签）
+   设计稿 v3：日志不再是独立底栏，而是环境详情的第 4 个页签 —— 整块从
+   grid-area 收编成一个带边框的面板，滚动区固定高度。 */
 .logbar {
-  grid-area: logbar;
   display: flex; flex-direction: column;
   min-width: 0; min-height: 0;
   background: var(--bg-2);
-  border-top: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
 }
 .logbar-head {
   display: flex; align-items: center; gap: var(--space-2);
   flex: none;
   min-height: 36px;
-  padding: var(--space-1) var(--space-4);
+  padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--line);
+  background: var(--panel);
   overflow-x: auto;
 }
 .logbar-title {
@@ -856,10 +861,8 @@ body.log-collapsed { grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--lo
 .log-count { flex: none; font-size: var(--text-xs); color: var(--muted); }
 .log-actions { display: flex; align-items: center; gap: var(--space-1); flex: none; }
 
-body.log-collapsed .log-view { display: none; }
-
 .log-view {
-  flex: 1; min-height: 0;
+  height: 380px; min-height: 0;
   /* 上下留白不对称是刻意的：底部要多留 4px，滚到末行时那一行才不会被下边缘贴着 */
   padding: var(--space-2) var(--space-4) var(--space-3);
   overflow: auto;
@@ -915,20 +918,18 @@ body.log-collapsed .log-view { display: none; }
 /* 响应行是上一行请求的续行：缩进 + 不显示 peer（它继承上一条连接） */
 .log-line.is-cont .log-ts, .log-line.is-cont .log-peer { visibility: hidden; }
 
-mark { background: var(--accent-bg); color: var(--accent-2); border-radius: var(--radius-xs); }
+mark { background: var(--accent-mark); color: var(--accent-2); border-radius: var(--radius-xs); }
 
 /* ============================================================ ⑤ 提示 */
 .toasts {
   position: fixed;
+  top: calc(var(--topbar-h) + var(--space-4));
   right: var(--space-4);
-  bottom: calc(var(--logbar-h) + var(--space-4));
   z-index: 50;
   display: flex; flex-direction: column; gap: var(--space-2);
   max-width: 380px;
   pointer-events: none;
 }
-body.log-collapsed .toasts { bottom: calc(var(--logbar-h-collapsed) + var(--space-4)); }
-
 .toast {
   display: flex; align-items: flex-start; gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
@@ -937,17 +938,15 @@ body.log-collapsed .toasts { bottom: calc(var(--logbar-h-collapsed) + var(--spac
   background: var(--panel);
   color: var(--text);
   font-size: var(--text-base); line-height: 1.5;
+  min-width: 240px;
   box-shadow: var(--shadow-lg);
   pointer-events: auto;
-  animation: toast-in 0.18s ease-out;
+  animation: toast-in 0.2s ease-out;
 }
 .toast .ic { flex: none; margin-top: 2px; }
 .toast.ok { border-color: var(--ok-border); }
-.toast.ok .ic { color: var(--ok); }
 .toast.bad { border-color: var(--bad-border); }
-.toast.bad .ic { color: var(--bad); }
 .toast.info { border-color: var(--accent-border); }
-.toast.info .ic { color: var(--accent); }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(12px); }
@@ -981,7 +980,6 @@ body.log-collapsed .toasts { bottom: calc(var(--logbar-h-collapsed) + var(--spac
 .ic-sm { width: 14px; height: 14px; }
 .ic-lg { width: 18px; height: 18px; }
 .chev { transition: transform 0.15s ease; }
-body.log-collapsed .chev { transform: rotate(180deg); }
 
 .mono { font-family: var(--font-mono); }
 .hint { margin: var(--space-2) 0 0; font-size: var(--text-xs); line-height: 1.6; color: var(--muted); }
@@ -991,6 +989,139 @@ body.log-collapsed .chev { transform: rotate(180deg); }
   clip-path: inset(50%); white-space: nowrap;
 }
 
+/* ============================================================ ⑥b 设置视图 */
+/* 设计稿「设置」：说明 chip、页签面板、根证书卡、证书信息卡、常见问题卡。
+   信息格复用 .kv-grid，这里补专有结构件 —— 上一版 HTML 用了这些类名，
+   CSS 却没写，证书面板整个塌成无结构的裸块（用户截图里的"排版错误"）。 */
+.settings-chip { margin-left: auto; }
+
+/* 设置页签的面板：纵向堆叠卡片，间距一个区块级 --space-4 */
+.spanel {
+  display: flex; flex-direction: column; gap: var(--space-4);
+  padding: var(--space-4);
+}
+.spanel > .panel { margin: 0; }
+
+/* 根证书卡 */
+.ca-card {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.ca-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.ca-title {
+  display: flex; align-items: center; gap: var(--space-2);
+  font-size: var(--text-md); font-weight: 600; color: var(--text);
+}
+/* notice 的默认 margin 是给无内边距的详情面板用的；卡片自己已有 padding，
+   不抹掉的话会叠出 32px 的双份间距。 */
+.ca-card .notice { margin: 0; }
+
+.ca-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.kv-cell {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  min-width: 0;
+}
+/* 首行与首列不要重复描边（网格内侧由 cell 自己画，外框由容器画） */
+.kv-cell:nth-child(-n+2) { border-top: 0; }
+.kv-cell:nth-child(odd) { border-left: 0; }
+.kv-label { font-size: var(--text-xs); color: var(--muted); }
+.kv-value { font-size: var(--text-lg); color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.kv-value.mono { font-size: var(--text-base); }
+
+.faq { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-3); }
+.faq-item { display: flex; flex-direction: column; gap: var(--space-1); }
+.faq-q { display: flex; align-items: baseline; gap: var(--space-2); font-size: var(--text-md); font-weight: 600; color: var(--text); }
+.faq-q::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: var(--radius-pill); background: var(--accent); }
+.faq-q.is-danger::before { background: var(--bad); }
+.faq-a { margin: 0 0 0 var(--space-3); font-size: var(--text-sm); line-height: 1.7; color: var(--text-2); }
+
+/* 侧栏「规则集」列表（规则库视图下的侧栏形态，设计稿第 4 页） */
+.rule-side-item {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding-right: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+.rule-side-item:hover { background: var(--panel-hover); }
+.rule-side-main {
+  display: flex; flex-direction: column; gap: 2px;
+  flex: 1; min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0; border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.rule-side-name { font-size: var(--text-base); font-weight: 600; color: var(--text); }
+.rule-side-item.is-active .rule-side-name { color: var(--accent); }
+.rule-side-meta { font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-side-badge { margin-left: auto; flex: none; }
+
+/* 弹窗（创建环境 / 根证书二维码）。CSP 禁内联 style，遮罩与定位全在这里。 */
+.modal-overlay {
+  position: fixed; inset: 0;
+  z-index: 60;
+  display: grid; place-items: center;
+  padding: var(--space-4);
+  background: var(--overlay);
+}
+.modal {
+  width: var(--modal-w); max-width: 100%;
+  max-height: 86vh;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.modal-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  flex: none;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+.modal-title { margin: 0; font-size: var(--text-xl); font-weight: 600; color: var(--text); }
+/* 关闭按钮：32×32 / 圆角 6 / 描边 --line（规范 6.6.2 节）。不复用 .btn ——
+   按钮三档里没有 32 这一档，这是模态专有件。 */
+.modal-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; flex: none; margin-left: auto; padding: 0;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--panel); color: var(--text-2);
+  cursor: pointer;
+}
+.modal-close:hover { background: var(--panel-hover); border-color: var(--line-2); color: var(--text); }
+.modal-body { padding: var(--space-5); overflow-y: auto; }
+/* 字段区 gap 16（规范 6.6.2 节），比页内表单的 12 更松一档 */
+.modal-body.form { gap: var(--space-4); }
+.modal-foot {
+  display: flex; justify-content: flex-end; align-items: center; gap: var(--space-3);
+  flex: none;
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--line);
+}
+/* 确认模态：后果说明独立成区，danger 文案 + 建议动作（异常三通道） */
+.confirm-body { display: flex; flex-direction: column; gap: var(--space-3); }
+.confirm-text { font-size: var(--text-body); line-height: 1.65; color: var(--text-2); }
+.confirm-irreversible { font-size: var(--text-sm); color: var(--muted); }
+.modal-qr { display: flex; flex-direction: column; align-items: center; gap: var(--space-3); padding: var(--space-4) 0; }
+.modal-qr img { width: 240px; height: 240px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.modal-qr .modal-url { font-size: var(--text-sm); color: var(--muted); word-break: break-all; text-align: center; }
+
 /* ========================================================= ⑦ 响应式 */
 @media (max-width: 1200px) {
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -999,17 +1130,13 @@ body.log-collapsed .chev { transform: rotate(180deg); }
 }
 
 @media (max-width: 900px) {
-  /* 窄屏不再做三栏固定框架，改成单列纵向流：侧栏限高，其余按内容滚动 */
+  /* 窄屏不再做两栏固定框架，改成单列纵向流：侧栏限高，其余按内容滚动 */
   body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: var(--topbar-h) auto minmax(0, 1fr) var(--logbar-h);
-    grid-template-areas: "topbar" "sidebar" "main" "logbar";
-  }
-  body.log-collapsed {
-    grid-template-rows: var(--topbar-h) auto minmax(0, 1fr) var(--logbar-h-collapsed);
+    grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
+    grid-template-areas: "topbar" "sidebar" "main";
   }
   .topbar { gap: var(--space-2); padding: 0 var(--space-3); }
-  .view-switch { margin-left: 0; }
   .sidebar { max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--line); }
   .main { padding: var(--space-3) var(--space-3) var(--space-5); }
   .info-grid { grid-template-columns: minmax(0, 1fr); }
@@ -1020,26 +1147,29 @@ body.log-collapsed .chev { transform: rotate(180deg); }
   .toasts { left: var(--space-3); right: var(--space-3); max-width: none; }
 }
 
-/* 顶栏的固有最小宽度是 721px（品牌 + 三段视图切换 + 两枚状态徽章 + 刷新按钮），
+/* 顶栏的固有最小宽度是 721px（品牌 + 两枚状态徽章 + 刷新按钮），
    而它没有 overflow-x —— 一旦视口比它窄，多出来的部分会被 body 的 overflow: hidden
-   直接裁掉且**无法滚动到达**。实测：720px 溢出 1px、700px 溢出 21px、681px 起刷新
-   按钮完全移出视口。所以这里必须比 640 更早收一步，否则 641–720px 整段是死区。 */
+   直接裁掉且**无法滚动到达**。所以这里必须比 640 更早收一步，否则 641–720px 整段是死区。 */
 @media (max-width: 720px) {
   /* 版本徽章在侧栏页脚已有同样信息（core 名 + 版本 + 状态目录），这里先让位 */
   #core-badge { display: none; }
-  .seg-btn span { display: none; }
-  .seg-btn { padding: 0 var(--space-2); }
   /* 窄窗口很可能就是触屏（平板 / 手机横屏）。WCAG 2.5.5 要的 44px 属 AAA，
-     这里取 36px 做折中：热区明显放大，又不把刚收好的顶栏宽度顶回去。
-     只放大图标按钮与分段控件 —— 它们是这一档里最常被误触的目标。 */
+     这里取 36px 做折中：热区明显放大，又不把刚收好的顶栏宽度顶回去。 */
   .btn.icon-btn, .btn.icon-btn.sm { width: 36px; height: 36px; }
-  .seg-btn { height: 36px; }
 }
 
 @media (max-width: 640px) {
   .stats-grid { grid-template-columns: minmax(0, 1fr); }
   .log-search { display: none; }
-  .logbar-title > span:not(.env-tag) { display: none; }
+  /* 日志工具条在窄屏收掉图标动作组（导出/清空/暂停），只留过滤与搜索 */
+  .log-actions { display: none; }
+  /* 模态窄屏版（规范 6.6.7 节）：全宽（视口 − 16 边距）、圆角保持 14、
+     padding 20 → 16，底部按钮竖排全宽 —— column-reverse 让确认在上、取消在下 */
+  .modal-overlay { padding: var(--space-2); }
+  .modal { width: 100%; }
+  .modal-head, .modal-body, .modal-foot { padding: var(--space-4); }
+  .modal-foot { flex-direction: column-reverse; }
+  .modal-foot .btn { width: 100%; }
 }
 
 /* 动效降级：脉冲 / 呼吸 / 入场的动画对前庭敏感人群是干扰源 */

@@ -142,9 +142,15 @@ pub const BIT_STRING: u8 = 0x03;
 pub const OCTET_STRING: u8 = 0x04;
 #[allow(dead_code)]
 pub const OBJECT_ID: u8 = 0x06;
+const UTF8_STRING: u8 = 0x0c;
+const PRINTABLE_STRING: u8 = 0x13;
+const IA5_STRING: u8 = 0x16;
 #[allow(dead_code)]
 pub const CONTEXT_CONSTRUCTED_0: u8 = 0xa0;
 pub const CONTEXT_CONSTRUCTED_1: u8 = 0xa1;
+/// GeneralName 的 context 原语标签：dNSName 与 iPAddress。
+const DNS_NAME: u8 = 0x82;
+const IP_ADDRESS: u8 = 0x87;
 
 /// rsaEncryption 的完整 AlgorithmIdentifier（含 NULL parameters），15 字节常量。
 pub const RSA_ALG_IDENTIFIER: &[u8] = &[
@@ -321,6 +327,317 @@ impl PrivateKeyDerish {
         match self {
             Self::Pkcs1(b) | Self::Pkcs8(b) | Self::Sec1(b) => b,
         }
+    }
+}
+
+// ---- X.509 证书只读摘要（设置页「证书信息」的数据源）----
+
+/// 证书的只读展示字段。全部来自固定形状的结构遍历；私钥永不参与。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CertInfo {
+    /// 人读版本号（DER 里的 [0] INTEGER 是 0 基，展示时 +1）。
+    pub version: u8,
+    /// 序列号：大写十六进制（字节序，无分隔符）。
+    pub serial_hex: String,
+    /// 有效期（UTCTime/GeneralizedTime 归一成 YYYY-MM-DD HH:MM:SSZ 形态）。
+    pub not_before: String,
+    pub not_after: String,
+    /// 签名算法的人读名；不认识的 OID 落到点分十进制。
+    pub sig_alg: String,
+    /// 公钥算法名（RSA / EC / …）。
+    pub pubkey_alg: String,
+    /// EC 公钥的曲线名（RSA 时为 None）。
+    pub pubkey_curve: Option<String>,
+    /// RSA 公钥的模长位数（EC 时为 None）。
+    pub pubkey_bits: Option<u32>,
+    /// 颁发者 DN 字段（工作台展示的是自签 CA，与主体一致）。
+    pub country: Option<String>,
+    pub organization: Option<String>,
+    pub common_name: Option<String>,
+    /// subjectAltName 里的 DNS 名与 IP（按证书顺序）。
+    pub san: Vec<String>,
+    pub is_ca: bool,
+    /// 整张证书 DER 的 SHA-256 十六进制指纹。
+    pub fingerprint: String,
+}
+
+/// OID 内容字节 → 人读名。只列本仓实际会碰到的（rcgen 签发 + mitmproxy 兼容加载），
+/// 其余 OID 一律点分十进制 —— 如实显示好过编造名字。
+fn oid_name(oid: &[u8]) -> String {
+    match oid {
+        [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02] => "ECDSA with SHA-256".into(),
+        [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03] => "ECDSA with SHA-384".into(),
+        [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04] => "ECDSA with SHA-512".into(),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b] => "SHA-256 with RSA".into(),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c] => "SHA-384 with RSA".into(),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d] => "SHA-512 with RSA".into(),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05] => "SHA-1 with RSA".into(),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01] => "RSA".into(),
+        [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01] => "EC".into(),
+        _ => oid_dotted(oid),
+    }
+}
+
+/// OID 内容字节 → 点分十进制（base-128 解码；首字节把前两个子标识符合编）。
+fn oid_dotted(oid: &[u8]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut acc = 0u64;
+    for (index, byte) in oid.iter().enumerate() {
+        acc = (acc << 7) | u64::from(byte & 0x7f);
+        if byte & 0x80 == 0 {
+            if index == 0 {
+                let (first, second) = if acc < 80 {
+                    (acc / 40, acc % 40)
+                } else {
+                    (2, acc - 80)
+                };
+                parts.push(first.to_string());
+                parts.push(second.to_string());
+            } else {
+                parts.push(acc.to_string());
+            }
+            acc = 0;
+        }
+    }
+    parts.join(".")
+}
+
+/// Name（RDN 序列）里找指定 OID 的第一个字符串值。
+fn rdn_value(name: &Tlv, oid: &[u8]) -> Option<String> {
+    if name.0 != SEQUENCE {
+        return None;
+    }
+    for (_, rdn, _) in children(name.1) {
+        for (_, atv, _) in children(rdn) {
+            let parts = children(atv);
+            let [entry_oid, value] = parts.as_slice() else {
+                continue;
+            };
+            if entry_oid.0 != OBJECT_ID || entry_oid.1 != oid {
+                continue;
+            }
+            // 字符串形态随签发方变化（Printable / UTF8 / IA5）；展示统一按文本读。
+            if matches!(value.0, UTF8_STRING | PRINTABLE_STRING | IA5_STRING) {
+                return Some(String::from_utf8_lossy(value.1).into_owned());
+            }
+        }
+    }
+    None
+}
+
+const OID_COUNTRY: &[u8] = &[0x55, 0x04, 0x06];
+const OID_ORGANIZATION: &[u8] = &[0x55, 0x04, 0x0a];
+const OID_SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];
+
+/// UTCTime（YYMMDDHHMMSSZ）与 GeneralizedTime（YYYYMMDDHHMMSS[.f]Z）归一成
+/// YYYY-MM-DD HH:MM:SSZ。UTCTime 的两位年份按 X.680 界定：00-49 = 20xx。
+fn time_text(t: &Tlv) -> Option<String> {
+    if t.0 != UTC_TIME && t.0 != GENERALIZED_TIME {
+        return None;
+    }
+    let ascii = String::from_utf8_lossy(t.1);
+    let digits: String = ascii.chars().filter(|c| c.is_ascii_digit()).collect();
+    let (year, rest) = if t.0 == GENERALIZED_TIME {
+        (digits.get(0..4)?.to_string(), digits.get(4..)?.to_string())
+    } else {
+        let yy = digits.get(0..2)?.parse::<u32>().ok()?;
+        let century = if yy >= 50 { "19" } else { "20" };
+        (format!("{century}{yy}"), digits.get(2..)?.to_string())
+    };
+    if rest.len() < 6 {
+        return None;
+    }
+    Some(format!(
+        "{year}-{}-{} {}:{}:{}Z",
+        &rest[0..2],
+        &rest[2..4],
+        &rest[4..6],
+        rest.get(6..8).unwrap_or("00"),
+        rest.get(8..10).unwrap_or("00"),
+    ))
+}
+
+/// subjectPKInfo 的算法标识 → (算法名, 曲线名, RSA 模长位数)。
+fn pki_alg(pki: &Tlv) -> (String, Option<String>, Option<u32>) {
+    let Some(alg) = children(pki.1).first().cloned() else {
+        return ("未知".into(), None, None);
+    };
+    let parts = children(alg.1);
+    let Some((tag, oid, _)) = parts.first() else {
+        return ("未知".into(), None, None);
+    };
+    if *tag != OBJECT_ID {
+        return ("未知".into(), None, None);
+    }
+    let name = oid_name(oid);
+    if name == "RSA" {
+        // RSA：模长在 BIT STRING 的 SEQUENCE{INTEGER modulus, INTEGER e} 里。
+        let bits = children(pki.1)
+            .last()
+            .and_then(|bit| bit.1.split_first().map(|(_, octets)| octets))
+            .and_then(|octets| read_tlv(octets))
+            .and_then(|(inner_tag, inner, _)| (inner_tag == SEQUENCE).then_some(inner))
+            .and_then(|seq| children(seq).first().cloned())
+            .and_then(|modulus| rsa_modulus_bits(modulus.1));
+        return (name, None, bits);
+    }
+    if name == "EC" {
+        // EC：曲线 OID 在 AlgorithmIdentifier 的 parameters 里。
+        let curve = parts.get(1).map(|param| match param.1 {
+            [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => "P-256".to_string(),
+            [0x2b, 0x81, 0x04, 0x00, 0x22] => "P-384".to_string(),
+            [0x2b, 0x81, 0x04, 0x00, 0x23] => "P-521".to_string(),
+            other => oid_dotted(other),
+        });
+        return (name, curve, None);
+    }
+    (name, None, None)
+}
+
+/// RSA 模长位数：跳过符号字节 0x00 后，位数 = 字节数 × 8 − 首字节前导零。
+fn rsa_modulus_bits(modulus: &[u8]) -> Option<u32> {
+    let mut m = modulus;
+    while m.len() > 1 && m[0] == 0 {
+        m = &m[1..];
+    }
+    let lz = m.first()?.leading_zeros();
+    Some(m.len() as u32 * 8 - lz)
+}
+
+/// subjectAltName 扩展 → ["localhost", "127.0.0.1", …]。没有该扩展即空表。
+fn cert_san(cert_der: &[u8]) -> Vec<String> {
+    let Some(names) = extension_value(cert_der, OID_SUBJECT_ALT_NAME) else {
+        return Vec::new();
+    };
+    let Some((seq_tag, seq, _)) = read_tlv(&names) else {
+        return Vec::new();
+    };
+    if seq_tag != SEQUENCE {
+        return Vec::new();
+    }
+    children(seq)
+        .into_iter()
+        .filter_map(|(tag, value, _)| match tag {
+            DNS_NAME => Some(String::from_utf8_lossy(value).into_owned()),
+            IP_ADDRESS => Some(ip_text(value)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ip_text(bytes: &[u8]) -> String {
+    match bytes.len() {
+        4 => bytes
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join("."),
+        16 => bytes
+            .chunks(2)
+            .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
+            .collect::<Vec<_>>()
+            .join(":"),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// 找到指定 OID 扩展的 extnValue（OCTET STRING 内容）。结构与 cert_is_ca 同款：
+/// [3] → SEQUENCE → 扩展条目（OID + optional BOOLEAN critical + OCTET STRING）。
+fn extension_value(cert_der: &[u8], oid: &[u8]) -> Option<Vec<u8>> {
+    let kids = after_version(cert_der)?;
+    let exts = kids
+        .iter()
+        .find(|(tag, _, _)| *tag == CONTEXT_CONSTRUCTED_3)?;
+    let (_, ext_seq, _) = children(exts.1)
+        .into_iter()
+        .find(|(tag, _, _)| *tag == SEQUENCE)?;
+    for (_, body, _) in children(ext_seq) {
+        let parts = children(body);
+        let Some((oid_tag, entry_oid, _)) = parts.first() else {
+            continue;
+        };
+        if *oid_tag != OBJECT_ID || *entry_oid != oid {
+            continue;
+        }
+        if let Some((_, value, _)) = parts.iter().find(|(tag, _, _)| *tag == OCTET_STRING) {
+            return Some(value.to_vec());
+        }
+    }
+    None
+}
+
+/// 证书只读摘要：形状不对即 None（调用方决定如何降级展示）。
+pub fn cert_info(cert_der: &[u8]) -> Option<CertInfo> {
+    let (tag, cert_seq, rest) = read_tlv(cert_der)?;
+    if tag != SEQUENCE || !rest.is_empty() {
+        return None;
+    }
+    let outer = children(cert_seq);
+    let (tbs_tag, tbs, _) = read_tlv(outer.first()?.2)?;
+    if tbs_tag != SEQUENCE {
+        return None;
+    }
+    let kids = children(tbs);
+    let has_version = kids.first()?.0 == CONTEXT_CONSTRUCTED_0;
+    let version = if has_version {
+        let (inner_tag, inner, _) = read_tlv(kids[0].1)?;
+        (inner_tag == INTEGER).then_some(inner)?;
+        inner.last()?.wrapping_add(1)
+    } else {
+        1
+    };
+    let fixed = kids.get(usize::from(has_version)..)?;
+    if fixed.len() < 6 {
+        return None;
+    }
+    let serial = fixed.first()?;
+    if serial.0 != INTEGER {
+        return None;
+    }
+    let serial_hex: String = serial.1.iter().map(|b| format!("{b:02X}")).collect();
+    let sig_alg = alg_name_of(fixed.get(1)?);
+    let issuer = fixed.get(2)?;
+    let country = rdn_value(issuer, OID_COUNTRY);
+    let organization = rdn_value(issuer, OID_ORGANIZATION);
+    let common_name = rdn_value(issuer, OID_COMMON_NAME);
+    let validity = fixed.get(3)?;
+    if validity.0 != SEQUENCE {
+        return None;
+    }
+    let times = children(validity.1);
+    let not_before = time_text(times.first()?)?;
+    let not_after = time_text(times.get(1)?)?;
+    let pki = fixed.get(5)?;
+    if pki.0 != SEQUENCE {
+        return None;
+    }
+    let (pubkey_alg, pubkey_curve, pubkey_bits) = pki_alg(pki);
+    Some(CertInfo {
+        version,
+        serial_hex,
+        not_before,
+        not_after,
+        sig_alg,
+        pubkey_alg,
+        pubkey_curve,
+        pubkey_bits,
+        country,
+        organization,
+        common_name,
+        san: cert_san(cert_der),
+        is_ca: cert_is_ca(cert_der),
+        fingerprint: envboard_core_api::sha256::hex(cert_der),
+    })
+}
+
+/// signature/algorithm 这类 AlgorithmIdentifier SEQUENCE 的 OID → 人读名。
+fn alg_name_of(alg: &Tlv) -> String {
+    if alg.0 != SEQUENCE {
+        return "未知".into();
+    }
+    match children(alg.1).first() {
+        Some((tag, oid, _)) if *tag == OBJECT_ID => oid_name(oid),
+        _ => "未知".into(),
     }
 }
 

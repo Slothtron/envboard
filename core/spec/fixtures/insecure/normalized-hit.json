@@ -3,9 +3,9 @@
   "description": "命中前两侧都归一化：大小写与尾部根点不影响判定",
   "input": {
     "hosts": [
-      "365.kdocs.cn"
+      "app.example.com"
     ],
-    "sni": "365.KDocs.CN."
+    "sni": "App.Example.COM."
   },
   "expect": {
     "ok": true,

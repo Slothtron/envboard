@@ -4,9 +4,9 @@
 //! 与 [`crate::host`] 的规则归一化**刻意不同**的两点，写在这里免得被"顺手统一"掉：
 //!
 //! * **不剥 `*.`**：出现 `*` 或 `?` 一律判非法（契约要求逐条列出完整域名，
-//!   把 `*.kdocs.cn` 偷偷存成 `kdocs.cn` 会让"没生效"变成"生效范围比你以为的大"）；
+//!   把 `*.example.com` 偷偷存成 `example.com` 会让"没生效"变成"生效范围比你以为的大"）；
 //! * 匹配是**完全相等**：没有子域继承，也没有后缀匹配
-//!   （`kdocs.cn` 既不匹配 `365.kdocs.cn`，也不匹配 `kdocs.cn.evil`）。
+//!   （`example.com` 既不匹配 `app.example.com`，也不匹配 `example.com.evil`）。
 
 /// 列表长度上限。放宽上游校验是安全控制，不是配置项，所以有硬上限。
 pub const INSECURE_HOSTS_MAX: usize = 200;
@@ -77,40 +77,51 @@ mod tests {
 
     #[test]
     fn normalizes_case_and_root_dots_without_touching_wildcards() {
-        assert_eq!(normalize_insecure_host("  365.KDocs.CN.  "), "365.kdocs.cn");
+        assert_eq!(
+            normalize_insecure_host("  App.Example.COM.  "),
+            "app.example.com"
+        );
         // 与 rules 的 normalize_host 相反：不剥 `*.`，交由校验拒绝
-        assert_eq!(normalize_insecure_host("*.kdocs.cn"), "*.kdocs.cn");
-        assert!(validate_insecure_host("*.kdocs.cn").is_none());
-        assert!(validate_insecure_host("a?.kdocs.cn").is_none());
+        assert_eq!(normalize_insecure_host("*.example.com"), "*.example.com");
+        assert!(validate_insecure_host("*.example.com").is_none());
+        assert!(validate_insecure_host("a?.example.com").is_none());
     }
 
     #[test]
     fn rejects_invalid_labels_but_accepts_ip_literals() {
         assert!(validate_insecure_host("-lead.example.com").is_none());
         assert!(validate_insecure_host("a..b").is_none());
-        assert!(validate_insecure_host("10.13.34.11").is_some());
-        assert!(validate_insecure_host("365.kdocs.cn").is_some());
+        assert!(validate_insecure_host("10.0.0.8").is_some());
+        assert!(validate_insecure_host("app.example.com").is_some());
     }
 
     #[test]
     fn matching_is_exact_and_never_inherits_subdomains() {
-        let hosts = list(&["365.kdocs.cn"]);
-        assert!(matches(&hosts, Some("365.kdocs.cn"), None));
-        assert!(matches(&hosts, Some("365.KDocs.CN."), None));
-        assert!(!matches(&hosts, Some("web.wps.cn"), None));
+        let hosts = list(&["app.example.com"]);
+        assert!(matches(&hosts, Some("app.example.com"), None));
+        assert!(matches(&hosts, Some("App.Example.COM."), None));
+        assert!(!matches(&hosts, Some("web.example.net"), None));
         // 不做子域继承，也不做后缀匹配
-        assert!(!matches(&list(&["kdocs.cn"]), Some("365.kdocs.cn"), None));
-        assert!(!matches(&list(&["kdocs.cn"]), Some("kdocs.cn.evil"), None));
-        assert!(!matches(&[], Some("365.kdocs.cn"), None));
+        assert!(!matches(
+            &list(&["example.com"]),
+            Some("app.example.com"),
+            None
+        ));
+        assert!(!matches(
+            &list(&["example.com"]),
+            Some("example.com.evil"),
+            None
+        ));
+        assert!(!matches(&[], Some("app.example.com"), None));
     }
 
     #[test]
     fn falls_back_to_the_address_only_without_sni() {
-        let hosts = list(&["10.13.34.11"]);
-        assert!(matches(&hosts, None, Some("10.13.34.11")));
-        assert!(matches(&hosts, Some(""), Some("10.13.34.11")));
+        let hosts = list(&["10.0.0.8"]);
+        assert!(matches(&hosts, None, Some("10.0.0.8")));
+        assert!(matches(&hosts, Some(""), Some("10.0.0.8")));
         // SNI 存在但没命中：不退回地址
-        assert!(!matches(&hosts, Some("365.kdocs.cn"), Some("10.13.34.11")));
+        assert!(!matches(&hosts, Some("app.example.com"), Some("10.0.0.8")));
         // 两边都没有 → 不放行
         assert!(!matches(&hosts, None, None));
     }

@@ -885,12 +885,12 @@ mod tests {
         let env = Environment::from_json(&json!({
             "name": "gray",
             "listen": {"port": 16600},
-            "insecure_hosts": [" Web.WPS.cn. ", "365.kdocs.cn", "365.KDocs.CN"]
+            "insecure_hosts": [" Web.Example.NET. ", "app.example.com", "App.Example.COM"]
         }))
         .unwrap();
         assert_eq!(
             env.insecure_hosts(),
-            ["365.kdocs.cn".to_string(), "web.wps.cn".to_string()]
+            ["app.example.com".to_string(), "web.example.net".to_string()]
         );
         // 缺省 = 空列表（不是"全都放行"）
         let env =
@@ -904,11 +904,11 @@ mod tests {
     #[test]
     fn insecure_hosts_reject_wildcards_and_bad_shapes() {
         for (value, expected_field) in [
-            (json!(["*.kdocs.cn"]), "environment.insecure_hosts.0"),
-            (json!(["a?.kdocs.cn"]), "environment.insecure_hosts.0"),
+            (json!(["*.example.com"]), "environment.insecure_hosts.0"),
+            (json!(["a?.example.com"]), "environment.insecure_hosts.0"),
             (json!(["-lead.example.com"]), "environment.insecure_hosts.0"),
             (json!([42]), "environment.insecure_hosts.0"),
-            (json!("365.kdocs.cn"), "environment.insecure_hosts"),
+            (json!("app.example.com"), "environment.insecure_hosts"),
             (
                 json!(
                     (0..=envboard_rules::INSECURE_HOSTS_MAX)

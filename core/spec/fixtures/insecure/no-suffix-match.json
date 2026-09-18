@@ -1,11 +1,11 @@
 {
   "capability": "insecure.hosts",
-  "description": "不做后缀匹配：kdocs.cn 不匹配 kdocs.cn.evil",
+  "description": "不做后缀匹配：example.com 不匹配 example.com.evil",
   "input": {
     "hosts": [
-      "kdocs.cn"
+      "example.com"
     ],
-    "sni": "kdocs.cn.evil"
+    "sni": "example.com.evil"
   },
   "expect": {
     "ok": true,

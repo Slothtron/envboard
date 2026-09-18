@@ -43,6 +43,9 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "s
 clap = { version = "4.6.6", features = ["derive"] }
 # 只被工程门禁用来解析各 crate 的 Cargo.toml（依赖方向、发布标识）；产品代码不用它。
 toml = "1.1.4"
+# 工作台「设置 · 证书」的根证书二维码：纯 Rust、零传递依赖（default-features 关掉
+# image 只留 svg 渲染），加入前核对过 Cargo.lock 增量只有它自己。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # v3 引擎（envboard-core，M-P1 起）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
 # 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA

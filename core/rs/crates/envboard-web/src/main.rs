@@ -17,7 +17,7 @@ use envboard_core::{CaOutcome, EngineBackend, SharedCa};
 use envboard_core_api::{ClockPort, Error, ErrorCode, LoggerPort, ProxyEngine};
 use envboard_manager::infra::{RealFiles, SocketPortProbe, StderrLogger, SystemClock};
 use envboard_manager::{JsonFileStateRepo, Manager, ManagerConfig, StateRepo};
-use envboard_web::{WebConfig, serve};
+use envboard_web::{CaAssets, WebConfig, serve};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -93,7 +93,7 @@ fn run(cli: Cli) -> Result<(), Error> {
 
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
     let logger: Arc<dyn LoggerPort> = Arc::new(StderrLogger);
-    let core = build_engine(&config)?;
+    let (core, ca_assets) = build_engine(&config)?;
 
     let state_file = config.state_file();
     let manager = Manager::new(
@@ -121,14 +121,16 @@ fn run(cli: Cli) -> Result<(), Error> {
     })?;
 
     let web_config = WebConfig::parse(&cli.listen, cli.token.clone(), &manager.config().state_dir)?;
-    runtime.block_on(serve(Arc::new(manager), web_config))
+    runtime.block_on(serve(Arc::new(manager), web_config, ca_assets))
 }
 
 /// v3 引擎构造：进程内纯库引擎，共享 CA 在 confdir 就绪（兼容既有 mitmproxy
 /// 生成的 CA 文件，已装证书的客户端零感知）。
 ///
 /// CA 被重新物化时**必须**把警告打出来 —— 已装证书的客户端要重装，这条不能静默。
-fn build_engine(config: &ManagerConfig) -> Result<Arc<dyn ProxyEngine>, Error> {
+/// 引擎构造同时带回共享 CA 的**公开面**（证书摘要 + 证书 PEM）交给 web 层：
+/// 设置页展示与下载用。私钥不进 CaAssets，也就永远到不了 HTTP 面。
+fn build_engine(config: &ManagerConfig) -> Result<(Arc<dyn ProxyEngine>, CaAssets), Error> {
     let (ca, outcome) = SharedCa::load_or_create(&config.confdir)?;
     if let CaOutcome::Regenerated {
         fingerprint,
@@ -141,7 +143,11 @@ fn build_engine(config: &ManagerConfig) -> Result<Arc<dyn ProxyEngine>, Error> {
             config.confdir.display()
         );
     }
-    Ok(Arc::new(EngineBackend::new(ca)))
+    let assets = CaAssets {
+        info: ca.info().and_then(|info| serde_json::to_value(info).ok()),
+        pem: Arc::new(ca.ca_cert_pem().into_bytes()),
+    };
+    Ok((Arc::new(EngineBackend::new(ca)), assets))
 }
 
 fn state_dir(cli: &Cli) -> Result<PathBuf, Error> {

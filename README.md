@@ -234,6 +234,9 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 | GET/DELETE | `/api/rules/:name` | 规则原文 / 删除（仍被绑定时 `conflict`） |
 | GET | `/api/compare?host=<域名>` | 跨环境静态对比：该域名在各环境被覆盖成什么（不发请求） |
 | GET | `/api/events` | SSE 快照（每秒一次全量环境视图） |
+| GET | `/api/ca` | 共享 CA 证书只读摘要（版本 / 序列号 / 有效期 / 指纹 / 颁发者 / SAN） |
+| GET | `/api/ca.pem` | 下载根证书（只含证书，不带私钥；`Content-Disposition: attachment`） |
+| GET | `/api/ca/qrcode.svg?data=<url>&token=<t>` | 把传入 URL（≤512 字节）编码成二维码 SVG，供手机扫码下载证书 |
 | POST | `/api/_fault` | 故障注入旋钮（live 断言"实例崩溃"组的面；转给引擎的注入接缝） |
 
 ## 验证

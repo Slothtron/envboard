@@ -7,7 +7,7 @@
       "port": 16301
     },
     "insecure_hosts": [
-      "a?.kdocs.cn"
+      "a?.example.com"
     ]
   },
   "expect": {

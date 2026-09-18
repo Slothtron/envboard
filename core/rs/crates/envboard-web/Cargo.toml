@@ -27,6 +27,8 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "time", "sync", "macros"] }
 tokio-stream.workspace = true
+# 设置页根证书二维码（svg 渲染在 crate 内，无额外传递依赖）。
+qrcode.workspace = true
 
 [dev-dependencies]
 envboard-core-fake.workspace = true

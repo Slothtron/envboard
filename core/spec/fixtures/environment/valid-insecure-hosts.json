@@ -7,16 +7,16 @@
       "port": 16301
     },
     "insecure_hosts": [
-      " Web.WPS.cn. ",
-      "365.kdocs.cn",
-      "365.KDocs.CN"
+      " Web.Example.NET. ",
+      "app.example.com",
+      "App.Example.COM"
     ]
   },
   "expect": {
     "ok": true,
     "insecure_hosts": [
-      "365.kdocs.cn",
-      "web.wps.cn"
+      "app.example.com",
+      "web.example.net"
     ]
   }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -31,13 +31,24 @@ const APP_JS: &str = include_str!("../assets/app.js");
 pub struct AppState {
     pub manager: Arc<Manager>,
     pub config: WebConfig,
+    /// 设置页「证书信息」的只读摘要（组合根从共享 CA 读出后转成 JSON）。
+    pub ca: Option<Value>,
+    /// 根证书 PEM 字节（下载端点的载荷）。
+    pub ca_pem: Arc<Vec<u8>>,
+}
+
+/// 组合根交进来的共享 CA 资产：只有证书的公开面，私钥永不经过 web 层。
+#[derive(Clone)]
+pub struct CaAssets {
+    pub info: Option<Value>,
+    pub pem: Arc<Vec<u8>>,
 }
 
 /// 日志体积的照看间隔：全进程**只起一个**照看者（挂在 SSE 里就会每个客户端各干一遍）。
 const LOG_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// 起 HTTP 服务并常驻（先 reconcile，再监听）。
-pub async fn serve(manager: Arc<Manager>, config: WebConfig) -> Result<(), Error> {
+pub async fn serve(manager: Arc<Manager>, config: WebConfig, ca: CaAssets) -> Result<(), Error> {
     let report = manager.reconcile().await?;
     for (env, action) in &report.actions {
         println!("reconcile: {action:<14} {env}");
@@ -58,6 +69,8 @@ pub async fn serve(manager: Arc<Manager>, config: WebConfig) -> Result<(), Error
     let state = AppState {
         manager,
         config: config.clone(),
+        ca: ca.info,
+        ca_pem: ca.pem,
     };
     let app = router(state);
 
@@ -103,6 +116,10 @@ pub fn router(state: AppState) -> Router {
         .route("/app.css", get(css))
         .route("/app.js", get(js))
         .route("/api/status", get(api_status))
+        // 设置页「证书」：只读摘要 + 下载 + 二维码（全部走统一门禁，token 档照常 401）。
+        .route("/api/ca", get(api_ca))
+        .route("/api/ca.pem", get(api_ca_pem))
+        .route("/api/ca/qrcode.svg", get(api_ca_qrcode))
         .route("/api/environments", get(api_list).post(api_create))
         .route(
             "/api/environments/:name",
@@ -314,6 +331,7 @@ async fn api_status(State(state): State<AppState>) -> Response {
     let capabilities = manager.capabilities();
     match manager.list() {
         Ok(views) => Json(json!({
+            "version": env!("CARGO_PKG_VERSION"),
             "core": {"name": core.name, "version": core.version},
             "capabilities": {
                 "listen": capabilities.listen,
@@ -333,6 +351,71 @@ async fn api_status(State(state): State<AppState>) -> Response {
         .into_response(),
         Err(error) => error_response(error),
     }
+}
+
+/// 设置页「证书信息」：组合根在启动时读出的只读摘要，原样透出。
+/// CA 是进程常量（运行期不轮换），所以不走 manager、也不做逐次重读。
+async fn api_ca(State(state): State<AppState>) -> Response {
+    match &state.ca {
+        Some(info) => Json(info.clone()).into_response(),
+        None => failure(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "shared CA certificate is not readable".to_string(),
+        ),
+    }
+}
+
+/// 下载根证书：mitmproxy 兼容形态的 -ca-cert.pem 内容（只含证书，不含私钥）。
+async fn api_ca_pem(State(state): State<AppState>) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-pem-file"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=envboard-root-ca.pem"),
+    );
+    (headers, state.ca_pem.to_vec()).into_response()
+}
+
+/// 根证书下载地址的二维码（SVG）。内容是浏览器传入的下载 URL —— 服务端不猜
+/// 谁在访问（手机要扫到的是它能直连的那个地址，只有浏览器知道），只做长度
+/// 限制防滥用。前端直接放进 <img>（CSP 的 img-src 允许 'self'）。
+async fn api_ca_qrcode(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let data = params.get("data").cloned().unwrap_or_default();
+    if data.is_empty() || data.len() > 512 {
+        return failure(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidConfig,
+            "qrcode data must be 1..=512 bytes".to_string(),
+        );
+    }
+    let code =
+        qrcode::QrCode::with_error_correction_level(data.as_bytes(), qrcode::types::EcLevel::M);
+    let Ok(code) = code else {
+        return failure(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidConfig,
+            "cannot encode qrcode".to_string(),
+        );
+    };
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .dark_color(qrcode::render::svg::Color("#141a24"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build();
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("image/svg+xml"),
+        )],
+        svg,
+    )
+        .into_response()
 }
 
 async fn api_list(State(state): State<AppState>) -> Response {

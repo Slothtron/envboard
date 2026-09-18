@@ -232,6 +232,17 @@ impl SharedCa {
         &self.ca_cert_der
     }
 
+    /// 设置页「证书信息」卡的只读摘要。证书形状在 load/生成时都已过校验，
+    /// 理论上不会是 None；万一结构异常就返回 None，由工作台降级展示。
+    pub fn info(&self) -> Option<crate::der::CertInfo> {
+        crate::der::cert_info(&self.ca_cert_der)
+    }
+
+    /// 证书 PEM（下载端点的载荷）。DER → base64 就地二十行，不为此引依赖。
+    pub fn ca_cert_pem(&self) -> String {
+        pem("CERTIFICATE", &self.ca_cert_der)
+    }
+
     /// 为 host 产出（或复用）一张叶子证书。
     pub fn issue(&self, host: &str) -> Result<Arc<CertifiedKey>, Error> {
         let now = OffsetDateTime::now_utc();
@@ -472,4 +483,95 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 
 fn internal(message: String) -> Error {
     Error::new(ErrorCode::InternalError, message)
+}
+
+// ---- PEM 编码（只服务 ca_cert_pem；RFC 7468 的固定形状子集）----
+
+const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b1 = u32::from(chunk[0]);
+        let b2 = u32::from(*chunk.get(1).unwrap_or(&0));
+        let b3 = u32::from(*chunk.get(2).unwrap_or(&0));
+        let n = (b1 << 16) | (b2 << 8) | b3;
+        out.push(BASE64_TABLE[(n >> 18) as usize & 63] as char);
+        out.push(BASE64_TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn pem(label: &str, der: &[u8]) -> String {
+    let mut out = format!("-----BEGIN {label}-----\n");
+    let b64 = base64(der);
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(line).unwrap_or(""));
+        out.push('\n');
+    }
+    out.push_str("-----END ");
+    out.push_str(label);
+    out.push_str("-----\n");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_ca() -> SharedCa {
+        let key = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mitmproxy-compat/mitmproxy-ca.pem"
+        ))
+        .expect("测试资产 mitmproxy-ca.pem 不在仓库里");
+        let cert = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mitmproxy-compat/mitmproxy-ca-cert.pem"
+        ))
+        .expect("测试资产 mitmproxy-ca-cert.pem 不在仓库里");
+        SharedCa::load(&key, &cert).expect("fixture CA 必须能加载")
+    }
+
+    /// 设置页「证书信息」的数据源钉在仓库里的假 CA 上：形状读取一旦被
+    /// 上游结构变化打破，这里先红。
+    #[test]
+    fn cert_info_reads_the_fixture_ca() {
+        let info = fixture_ca().info().expect("fixture CA 的 DER 形状必须可读");
+        assert_eq!(info.version, 3);
+        assert!(info.is_ca);
+        assert!(!info.serial_hex.is_empty());
+        assert_eq!(info.not_before.len(), "YYYY-MM-DD HH:MM:SSZ".len());
+        assert_eq!(info.not_after.len(), "YYYY-MM-DD HH:MM:SSZ".len());
+        assert!(!info.sig_alg.is_empty());
+        assert!(!info.pubkey_alg.is_empty());
+        assert!(
+            !info.common_name.unwrap_or_default().is_empty(),
+            "fixture CA 必须有 CN"
+        );
+    }
+
+    /// PEM 载荷的形状：BEGIN/END 成对、正文行不超过 64 字符（RFC 7468 惯例）。
+    #[test]
+    fn ca_cert_pem_has_canonical_shape() {
+        let pem_text = fixture_ca().ca_cert_pem();
+        assert!(pem_text.starts_with("-----BEGIN CERTIFICATE-----\n"));
+        assert!(pem_text.ends_with("-----END CERTIFICATE-----\n"));
+        for line in pem_text.lines() {
+            assert!(
+                line.starts_with("-----") || line.len() <= 64,
+                "PEM 正文行超长：{line}"
+            );
+        }
+    }
 }

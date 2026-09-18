@@ -658,9 +658,9 @@ async fn insecure_hosts_are_persisted_and_hot_editable() {
     let harness = Harness::new();
     let created = create_beta_with(
         &harness,
-        serde_json::json!({"insecure_hosts": ["365.kdocs.cn"]}),
+        serde_json::json!({"insecure_hosts": ["app.example.com"]}),
     );
-    assert_eq!(created.insecure_hosts, ["365.kdocs.cn"]);
+    assert_eq!(created.insecure_hosts, ["app.example.com"]);
 
     let started = harness.manager.start("beta").await.unwrap();
     assert_eq!(started.health.as_str(), "running");
@@ -670,16 +670,19 @@ async fn insecure_hosts_are_persisted_and_hot_editable() {
         .manager
         .update(
             "beta",
-            &serde_json::json!({"insecure_hosts": ["web.wps.cn", "365.kdocs.cn"]}),
+            &serde_json::json!({"insecure_hosts": ["web.example.net", "app.example.com"]}),
         )
         .unwrap();
-    assert_eq!(updated.insecure_hosts, ["365.kdocs.cn", "web.wps.cn"]);
+    assert_eq!(
+        updated.insecure_hosts,
+        ["app.example.com", "web.example.net"]
+    );
     assert_eq!(updated.health.as_str(), "running");
 
     let state = harness.saved();
     assert_eq!(
         state.find("beta").unwrap()["insecure_hosts"],
-        serde_json::json!(["365.kdocs.cn", "web.wps.cn"])
+        serde_json::json!(["app.example.com", "web.example.net"])
     );
 
     // 凭据是停机字段（v2 划分保留：v3 凭据已不经 argv，但字段矩阵不漂移）。
