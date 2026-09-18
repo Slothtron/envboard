@@ -19,7 +19,7 @@
 | **热应用同步生效**：PATCH 返回后的第一个请求就是新配置（无轮询、无收敛窗） | ✅ |
 | 按域名放宽上游证书校验（`insecure_hosts`：精确匹配，运行中改立即生效） | ✅ |
 | 端口自动分配（区间内随机试绑，新建冲突自动重试一次） | ✅ |
-| 按 host 改写上连目标（内置插件 `hosts-rules`，只改 `ConnectTarget.resolved_addr`） | ✅ |
+| 按 host 改写上连目标（hosts 规则，只改 `ConnectTarget.resolved_addr`） | ✅ |
 | CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；absolute-URI 正向代理；101 透传 | ✅ |
 | 代理访问鉴权（`proxy_user` / `proxy_password` → 407 门；**凭据只在内存**，不进 argv / 视图 / SSE） | ✅ |
 | 共享 CA（所有实例一张；兼容加载 mitmproxy 形状的同名 CA 文件，已装证书的客户端零感知） | ✅ |
@@ -43,20 +43,10 @@
 那一条连接；引擎线程整体 panic 才让实例进入 `failed`，由 reconcile 按期望状态拉回。
 这要求 release 构建**保持 unwind**（`panic = "abort"` 会让任务级隔离失效）—— 属构建契约。
 
-**三层能力模型**：内核能力（监听、407 门、TLS 策略、共享 CA、协议面）是原生快路径；
-内置插件（`hosts-rules`、`request-log`）与扩展插件走**完全相同**的接口 —— 产品功能
-自举验证接口；`debug-inject` 是测试 / 故障注入接缝，产品装配路径恒为空。内核 id 出现
-在插件链里是装配错误。注册表 = `core/rs/crates/envboard-core/src/plugin.rs` 的静态只读
-`CAPABILITIES`，逐项语义与阶段以 core/spec/capabilities.md 的「v3 插件与能力注册表」
-为准；**注册表 ↔ 内置实现 ↔ 契约表三方一致**由 policy 门禁判定
-（`cargo test -p envboard-policy-tests --test registry`）。
-
-**阶段管道**写死：`connect → request_head → request_body →（上游）→ response_head →
-response_body → log`。插件执行序 = 配置声明序，依赖约束 > 声明序。装配期校验：id 未注册 /
-内核冒充插件 / 缺依赖 / 依赖环 → `invalid_config` 点名双方，**没有"静默等待依赖"**。
-错误两档：connect / 改写钩子 Err → fail-closed 502（带插件名）；显式 bypass 的插件跳过并
-强制 WARN + 逐插件计数；每钩子超时（connect/head 1s、body 5s）按 Err；`on_log` 在类型上
-就不可外溢。
+**内置能力**：监听、407 门、TLS 策略、共享 CA、协议面是引擎原生快路径；hosts 规则
+改写（connect 路径直调修订 `resolved_addr`，规则脏数据 fail-closed 502）与请求终局
+日志（有界总线投递，写失败丢行不阻断流量）是引擎内置步骤，不是可插拔接口。
+逐项语义以 core/spec/capabilities.md 的「引擎能力矩阵」为准。
 
 **ConnectTarget 是唯一接缝**：`authority / sni / resolved_addr / tls_policy /
 chained_proxy`（恒 None 的扩展位）。改写语义只有一件事：不动请求内容、不动 Host 头、
@@ -81,7 +71,7 @@ core/rs/crates/
   envboard-domain     环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
   envboard-rules      hosts 解析 + 确定性渲染（全仓唯一一份解析实现）              ← 纯逻辑
   envboard-core       引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
-                      插件管道与能力注册表、有界日志总线
+                      hosts 改写、请求终局日志、有界日志总线
   envboard-core-fake  ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
   envboard-manager    环境 CRUD、端口分配、账本持久化、锁、健康判定、reconcile、
                       规则账本、EngineSpec 编译与热装配接线
@@ -264,7 +254,7 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 常用的引擎侧单跑（全部 hermetic，不需要网络与宿主）：
 
 ```bash
-cargo test -p envboard-core                    # 单测 + data_plane / plugins / backend / mitm
+cargo test -p envboard-core                    # 单测 + data_plane / backend / mitm
 cargo test -p envboard-core --test data_plane  # 规则命中、502、407、insecure 热翻转、port_conflict、隧道保活
 cargo test -p envboard-core --test plugins     # fail-closed 带名、bypass+计数、钩子超时、Early 不触上游
 cargo test -p envboard-policy-tests --test registry   # 注册表 ↔ 内置实现 ↔ 契约表 三方一致

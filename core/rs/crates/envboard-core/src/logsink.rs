@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
-use crate::plugin::LogWriter;
+use envboard_core_api::ports::LineWriter;
 
 /// 队列容量：单机调试代理的突发日志以千行计足够吸收；超出即丢（并计数）。
 pub const QUEUE_LINES: usize = 1024;
@@ -28,7 +28,7 @@ impl std::fmt::Debug for BoundedLinePump {
 
 impl BoundedLinePump {
     /// 起一条泵线程（阻塞写交给它；泵线程随最后一个句柄析构自然收尾）。
-    pub fn start(writer: Arc<dyn LogWriter>) -> Arc<Self> {
+    pub fn start(writer: Arc<dyn LineWriter>) -> Arc<Self> {
         let (tx, rx) = sync_channel::<String>(QUEUE_LINES);
         let pump = Arc::new(BoundedLinePump {
             tx,
@@ -47,7 +47,7 @@ impl BoundedLinePump {
         pump
     }
 
-    /// 交给引擎/插件链的写端。
+    /// 交给引擎的写端。
     pub fn writer(self: &Arc<Self>) -> Arc<BusWriter> {
         Arc::new(BusWriter { pump: self.clone() })
     }
@@ -62,7 +62,7 @@ pub struct BusWriter {
     pump: Arc<BoundedLinePump>,
 }
 
-impl LogWriter for BusWriter {
+impl LineWriter for BusWriter {
     fn write_line(&self, line: &str) {
         if self.pump.tx.try_send(line.to_string()).is_err() {
             self.pump.dropped.fetch_add(1, Ordering::Relaxed);
@@ -79,7 +79,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct SlowWriter(Mutex<Vec<String>>);
 
-    impl LogWriter for SlowWriter {
+    impl LineWriter for SlowWriter {
         fn write_line(&self, line: &str) {
             std::thread::sleep(Duration::from_millis(2));
             self.0.lock().unwrap().push(line.to_string());

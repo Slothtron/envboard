@@ -120,7 +120,7 @@ async fn backend_lifecycle_through_the_trait_face() {
         String::from_utf8_lossy(&raw)
     );
 
-    // 日志经总线落地（终局行由 request-log 内置插件写）。
+    // 日志经总线落地（终局行由引擎请求终点写）。
     for _ in 0..50 {
         if !capture.0.lock().unwrap().is_empty() {
             break;

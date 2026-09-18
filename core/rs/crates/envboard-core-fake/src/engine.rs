@@ -42,7 +42,6 @@ impl FakeEngine {
             config_hash: sha256::hex(spec.hashable_json().as_bytes()),
             epoch: 1,
             last_error: None,
-            bypass_counts: Vec::new(),
             log_drops: 0,
         }
     }
@@ -210,7 +209,6 @@ impl ProxyEngine for FakeEngine {
                 config_hash: String::new(),
                 epoch: 0,
                 last_error: None,
-                bypass_counts: Vec::new(),
                 log_drops: 0,
             },
         }

@@ -192,9 +192,8 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 一次同步装配。
 
 - **装配（compile）**：归一化后的环境字段 + 规则正文 → `EngineSpec` →
-  `envboard-core` 编译：凭据成对校验、规则文本解析成查找表、插件链装配与注册表
-  校验（见「v3 插件与能力注册表」）、config_hash 计算。**任何一步失败即
-  `invalid_config`（附字段路径），整套拒绝**。
+  `envboard-core` 编译：凭据成对校验、规则文本解析成查找表、config_hash 计算。
+  **任何一步失败即 `invalid_config`（附字段路径），整套拒绝**。
 - **生效（apply）**：`ProxyEngine::apply` 把新快照原子换入（ArcSwap），返回新的
   `config_hash`；**装配即生效，没有轮询间隔、没有收敛窗口**。运行中的请求按
   进入时取到的旧快照跑完（每请求 `load_full`，单请求内配置一致）。
@@ -296,7 +295,7 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 
 - **数据面永不阻塞在写日志上**。v2 的实测教训（64 KiB 管道写满 → 子进程事件循环挂住 →
   所有客户端一起停服，约 213 个请求即可复现）是这条约束存在的理由；v3 从结构上排除：
-  request-log 插件在 log 阶段把单行摘要投递进**有界总线**（容量 1024 行），投递是
+  引擎在请求终点把单行摘要投递进**有界总线**（容量 1024 行），投递是
   try_send —— 满了就地**丢弃并计数**（EngineReport.log_drops 可见），专用泵线程把行落盘。
   请求路径上没有管道、没有同步磁盘 IO。
 - **文件形态**：每环境一份 <log_dir>/<env>.log（默认 <state_dir>/logs，--log-dir 可改，
@@ -307,56 +306,23 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
   **禁止 rename 轮转** —— 写方还持着旧 inode 的 fd，改名后新文件永远是空的。
 - **读尾部必须是有界的**：只从文件末尾读一个窗口（256 KiB）再切行，允许跨 .1；
   API 的 /logs?lines=N 靠它，不给"整文件读进内存"留路径。
-- **行内容由 request-log 插件定义**（单行、机器可扫）：时间、方法、host+path、状态码、
+- **行格式稳定**（单行、机器可扫）：时间、方法、host+path、状态码、
   请求/响应字节、耗时，附"改写命中 / 证书放宽 / 错误"的标记。
-
-## v3 插件与能力注册表（envboard-core）
-
-引擎三层能力模型：**内核能力**（原生快路径）/ **内置插件** / **扩展插件**。
-注册表是静态只读清单（core/rs/crates/envboard-core/src/plugin.rs 的
-CAPABILITIES）：只参与装配期校验，不参与请求路径查找；热路径走装配后的
-扁平链，避免与 ArcSwap 快照形成第二真相。内核条目登记在此是为了可见性
-（能力清单有唯一出处），它们的实现必须保持原生 —— 插件链里出现内核
-id 是装配错误。
-
-| id | layer | phase | depends_on | 语义与载体 |
-|---|---|---|---|---|
-| kernel:listen | kernel | startup | — | listen.host/port；绑定即真相，EADDRINUSE → port_conflict（不换端口、不试绑） |
-| kernel:proxy-auth | kernel | startup | — | proxy_user/proxy_password 的 407 门；凭据只在内存，定长时间比对 |
-| kernel:tls-policy | kernel | connect | — | insecure_hosts → ConnectTarget.tls_policy 两档；无全局关校验 |
-| kernel:mitm-ca | kernel | startup | — | confdir 共享 CA 的加载/物化（已装客户端零感知判据见代码与「引擎能力矩阵」） |
-| kernel:protocol | kernel | request | — | HTTP/1.1 协议面与引擎侧超时常量；101 透传 |
-| hosts-rules | builtin | connect | — | 消费环境 rules 字段（hosts 文本）；只改 resolved_addr |
-| request-log | builtin | log | — | 默认启用；终局记录写日志通道；on_error = bypass |
-| debug-inject | extension | request | — | 测试/故障注入旋钮（对齐 envboard-core-fake 先例）：行为由持有者指定，产品装配路径恒为空 |
-
-**装配与错误契约**
-
-- 插件执行序 = 配置声明序；**依赖约束 > 声明序**（同层同依赖内保持声明序）。
-- 装配期校验：id 未注册、内核冒充插件、缺依赖、依赖环 → invalid_config，
-  消息点名双方。**没有**"静默等待依赖"的语义 —— 缺依赖必须当场可见。
-- 错误档位：connect/改写钩子 Err → fail-closed 502（带插件名）；显式声明
-  bypass 的插件跳过并强制 WARN + 逐插件计数；每钩子超时（connect/head 1s、
-  body 5s）按 Err 处理；on_log 错误永不外溢（类型即契约：同步、返回 unit）。
-- 热更新：配置编译通过 → ArcSwap 原子换入新的插件集快照；任一插件构建/校验
-  失败 → 整套拒绝（invalid_config），旧快照继续服务。
-- 门禁：注册表 ↔ 内置插件实现 ↔ 本节表格一一对应，由 policy 层的注册表
-  门禁判定（core/rs/crates/envboard-policy-tests/tests/registry.rs）。
 
 ## 引擎能力矩阵（v3；换实现时要重新满足的清单）
 
 v3 只有一种 core（进程内纯库引擎，`envboard-core`）。矩阵保留的意义：**任何未来
-替换（含插件化内核的再分层）必须逐项重新满足这张表**，否则契约不许落地。
+替换必须逐项重新满足这张表**，否则契约不许落地。
 
 | 能力 | 契约要求 | v3 实现位置 |
 |---|---|---|
 | 监听 | bind listen.host:port；EADDRINUSE → `port_conflict`（不试绑、不换端口） | 引擎线程内 `TcpListener::bind`，绑定即 `running` |
-| 代理鉴权 | Basic 407；CONNECT 与 absolute-URI 同一条门；凭据不进 argv/状态文件/视图 | 内核门（`kernel:proxy-auth`），内存定长时间比对 |
-| TLS 中间人 | 加载/兼容既有 confdir CA；按 SNI 现签叶子证书；已装客户端零感知 | `ca::SharedCa`（`kernel:mitm-ca`）+ `tls::SniResolver` |
-| 上游证书策略 | `insecure_hosts` 精确匹配语义不变：SNI 优先、无 SNI 回退上连地址、SNI 存在未命中不回退；无全局关校验 | `ConnectTarget.tls_policy` + 连接执行器两档位（`kernel:tls-policy`） |
-| 改写 | hosts 规则只改连接目标：不动请求内容、不动 Host 头、不动 SNI 基准 | **内置插件 hosts-rules**（`on_connect` 修订 `resolved_addr`） |
-| 日志 | 文件直写 `<log_dir>/<env>.log`、copytruncate 轮转、有界尾读；**数据面永不阻塞在写日志上** | request-log 内置插件 + 有界总线（丢弃计数入 `EngineReport.log_drops`） |
-| 协议面 | HTTP/1.1（CONNECT 隧道 + absolute-URI）；ALPN 只协商 h1；101 透传 | `kernel:protocol`；强制 h2 的客户端失败 = 已登记的已知限制，非静默降级 |
+| 代理鉴权 | Basic 407；CONNECT 与 absolute-URI 同一条门；凭据不进 argv/状态文件/视图 | 引擎鉴权门，内存定长时间比对 |
+| TLS 中间人 | 加载/兼容既有 confdir CA；按 SNI 现签叶子证书；已装客户端零感知 | `ca::SharedCa` + `tls::SniResolver` |
+| 上游证书策略 | `insecure_hosts` 精确匹配语义不变：SNI 优先、无 SNI 回退上连地址、SNI 存在未命中不回退；无全局关校验 | `ConnectTarget.tls_policy` + 连接执行器两档位 |
+| 改写 | hosts 规则只改连接目标：不动请求内容、不动 Host 头、不动 SNI 基准 | 引擎 connect 路径直调（`hosts::apply` 修订 `resolved_addr`） |
+| 日志 | 文件直写 `<log_dir>/<env>.log`、copytruncate 轮转、有界尾读；**数据面永不阻塞在写日志上** | 请求终局日志 + 有界总线（丢弃计数入 `EngineReport.log_drops`） |
+| 协议面 | HTTP/1.1（CONNECT 隧道 + absolute-URI）；ALPN 只协商 h1；101 透传 | 引擎协议面；强制 h2 的客户端失败 = 已登记的已知限制，非静默降级 |
 | 配置生效 | 装配即生效；失败整套拒绝 + 旧快照继续 + 标记可见 | `ProxyEngine::apply`（ArcSwap） |
 
 **已知限制（必须随 README 发布）**：v1 引擎只实现 HTTP/1.1 —— 客户端 ALPN 只协商

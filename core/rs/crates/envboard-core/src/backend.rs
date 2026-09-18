@@ -72,7 +72,6 @@ fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> Engine
         rules_text: spec.rules_text.clone(),
         max_buffered_body: None,
         log_writer: log,
-        extra_plugins: Vec::new(),
     }
 }
 
@@ -183,7 +182,6 @@ impl ProxyEngine for EngineBackend {
                 config_hash: String::new(),
                 epoch: 0,
                 last_error: None,
-                bypass_counts: Vec::new(),
                 log_drops: 0,
             };
         };
@@ -195,11 +193,6 @@ impl ProxyEngine for EngineBackend {
                     config_hash: entry.receipt.lock().unwrap().clone(),
                     epoch: status.epoch,
                     last_error: status.last_error,
-                    bypass_counts: engine
-                        .bypass_counts()
-                        .into_iter()
-                        .map(|(id, count)| (id.to_string(), count))
-                        .collect(),
                     log_drops: entry.pump.dropped(),
                 }
             }
@@ -213,7 +206,6 @@ impl ProxyEngine for EngineBackend {
                 config_hash: entry.receipt.lock().unwrap().clone(),
                 epoch: 0,
                 last_error: entry.injected.clone(),
-                bypass_counts: Vec::new(),
                 log_drops: entry.pump.dropped(),
             },
         }

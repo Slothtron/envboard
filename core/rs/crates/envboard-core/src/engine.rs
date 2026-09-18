@@ -2,16 +2,14 @@
 //! 一个监听端口。崩溃隔离是任务级的：请求任务 panic 只死这一条连接（tokio
 //! 逐任务捕获），引擎线程整体 panic 才让实例进入 failed。
 //!
-//! 请求管线（阶段模型；插件链与内核快路径的分工见 core/spec/capabilities.md
-//! 的「v3 插件与能力注册表」）：
+//! 请求管线：
 //!
-//! 1. 鉴权门（内核）：CONNECT 与 absolute-URI 同一道门，不过即 407。
+//! 1. 鉴权门：CONNECT 与 absolute-URI 同一道门，不过即 407。
 //! 2. 隧道/直连分流：CONNECT → MITM 按 SNI 现签；absolute-URI → 明文上游。
-//! 3. 每请求取环境快照 → ConnectTarget 播种（内核）→ 插件 connect 链修订
-//!    → 内核按最终地址做 insecure 判定 → 上游建连（TLS 依 tls_policy）。
-//! 4. request_head/body → 上游 → response_head/body 插件链（Early 短路给
-//!    mock 类插件；错误按 fail-closed/Bypass 两档）。
-//! 5. 终局 LogRecord 扇出给 log 阶段（request-log 默认启用）。
+//! 3. 每请求取环境快照 → ConnectTarget 播种 → hosts 规则修订 resolved_addr
+//!    → 按最终地址做 insecure 判定 → 上游建连（TLS 依 tls_policy）。
+//! 4. 请求体缓冲 → 上游交换 → 响应写回。
+//! 5. 终局 LogRecord 投递进日志出口（有界总线）。
 
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
@@ -34,8 +32,9 @@ use envboard_core_api::{Error, ErrorCode};
 use crate::auth;
 use crate::ca::SharedCa;
 use crate::config::{self, CompiledConfig, EngineConfig};
+use crate::hosts;
 use crate::http::{self, HttpError, Message};
-use crate::plugin::{self, Flow, LogRecord, RequestView};
+use crate::request_log::LogRecord;
 use crate::target::{ConnectTarget, TlsPolicy};
 use crate::tls;
 
@@ -226,21 +225,6 @@ impl EngineInstance {
 
     pub fn status(&self) -> EngineStatus {
         self.shared.status.lock().unwrap().clone()
-    }
-
-    /// 当前链上各插件的 bypass 计数（工作台状态视图的接线点在管理面）。
-    pub fn bypass_counts(&self) -> Vec<(&'static str, u64)> {
-        let cfg = self.shared.configs.load_full();
-        cfg.plugins
-            .entries
-            .iter()
-            .map(|entry| {
-                (
-                    entry.descriptor.id,
-                    cfg.plugins.bypass_count(entry.descriptor.id).unwrap_or(0),
-                )
-            })
-            .collect()
     }
 
     /// 等实例离开 starting（绑定成功或冲突/失败都是"定态"）。
@@ -560,21 +544,12 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         .header("connection")
         .is_some_and(|value| value.to_ascii_lowercase().contains("close"));
 
-    // 内核播种 → 插件 connect 修订 → 内核按最终地址做 insecure 判定。
+    // 内核播种 → hosts 规则修订连接目标 → 按最终地址做 insecure 判定。
     let mut target = ConnectTarget::seed(&origin.host, origin.port);
     let seed_addr = target.resolved_addr;
-    if let Err(fault) = plugin::run_connect(&cfg.plugins, &cfg.log_writer, &mut target).await {
+    if let Err(reason) = hosts::apply(&cfg.rules, &mut target) {
         return fail(
-            cfg,
-            io,
-            started_ms,
-            clock,
-            &method,
-            &authority,
-            &path,
-            &target,
-            seed_addr,
-            &fault.to_report(),
+            cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr, &reason,
         )
         .await;
     }
@@ -610,180 +585,67 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    // request 阶段插件链（head → 可能 Early；body 改写）。
-    let mut request_body = request_bytes;
-    let early = {
-        let view = RequestView {
-            target: &target,
-            method: &method,
-            path: &path,
-            headers: &head.headers,
-            client_sni: origin.sni.as_deref(),
-        };
-        match plugin::run_request_head(&cfg.plugins, &cfg.log_writer, &view).await {
-            Err(fault) => {
-                return fail(
-                    cfg,
-                    io,
-                    started_ms,
-                    clock,
-                    &method,
-                    &authority,
-                    &path,
-                    &target,
-                    seed_addr,
-                    &fault.to_report(),
-                )
-                .await;
-            }
-            Ok(Flow::Early(planned)) => Some(planned),
-            Ok(Flow::Continue) => None,
-        }
-    };
-    if early.is_none()
-        && let Err(fault) =
-            plugin::run_request_body(&cfg.plugins, &cfg.log_writer, &mut request_body).await
-    {
-        return fail(
-            cfg,
-            io,
-            started_ms,
-            clock,
-            &method,
-            &authority,
-            &path,
-            &target,
-            seed_addr,
-            &fault.to_report(),
-        )
-        .await;
-    }
-
-    let mut status;
-    let mut response_headers;
-    let mut response_body;
-    if let Some(planned) = early {
-        status = planned.status;
-        response_headers = planned.headers;
-        response_body = planned.body;
-    } else {
-        let upstream = match connect_upstream(shared, &target, origin.with_tls).await {
-            Err(fault) => {
-                return fail(
-                    cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr,
-                    &fault,
-                )
-                .await;
-            }
-            Ok(upstream) => upstream,
-        };
-        match exchange(io, upstream, &head, &method, &path, &request_body).await {
-            Err(fault) => {
-                return fail(
-                    cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr,
-                    &fault,
-                )
-                .await;
-            }
-            Ok(Exchange::Tunneled) => {
-                // 101 的响应写出与双向透传都在 exchange 内完成（缓冲的 WS
-                // 帧要跟着走）。这里只补终局记录。
-                record(
-                    cfg,
-                    started_ms,
-                    clock,
-                    &method,
-                    &authority,
-                    &path,
-                    101,
-                    &request_body,
-                    &[],
-                    &target,
-                    seed_addr,
-                );
-                return Ok(true);
-            }
-            Ok(Exchange::Parts(part)) => {
-                status = part.0;
-                response_headers = part.1;
-                response_body = part.2;
-            }
-        }
-    }
-
-    // response 阶段插件链（head 可整条替换；body 可改写）。
-    let replacement = match plugin::run_response_head(
-        &cfg.plugins,
-        &cfg.log_writer,
-        &method,
-        &authority,
-        status,
-        &mut response_headers,
-    )
-    .await
-    {
+    let request_body = request_bytes;
+    let upstream = match connect_upstream(shared, &target, origin.with_tls).await {
         Err(fault) => {
             return fail(
+                cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr, &fault,
+            )
+            .await;
+        }
+        Ok(upstream) => upstream,
+    };
+    match exchange(io, upstream, &head, &method, &path, &request_body).await {
+        Err(fault) => {
+            return fail(
+                cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr, &fault,
+            )
+            .await;
+        }
+        Ok(Exchange::Tunneled) => {
+            // 101 的响应写出与双向透传都在 exchange 内完成（缓冲的 WS
+            // 帧要跟着走）。这里只补终局记录。
+            record(
                 cfg,
-                io,
                 started_ms,
                 clock,
                 &method,
                 &authority,
                 &path,
+                101,
+                &request_body,
+                &[],
                 &target,
                 seed_addr,
-                &fault.to_report(),
-            )
-            .await;
+            );
+            return Ok(true);
         }
-        Ok(replacement) => replacement,
-    };
-    if let Some(planned) = replacement {
-        status = planned.status;
-        response_headers = planned.headers;
-        response_body = planned.body;
+        Ok(Exchange::Parts(part)) => {
+            let (status, response_headers, response_body) = part;
+            let first = format!("HTTP/1.1 {status} {}", reason_for_status(status));
+            http::write_message(
+                io.get_mut(),
+                &first,
+                &response_headers,
+                &response_body,
+                !(100..200).contains(&status),
+            )
+            .await?;
+            record(
+                cfg,
+                started_ms,
+                clock,
+                &method,
+                &authority,
+                &path,
+                status,
+                &request_body,
+                &response_body,
+                &target,
+                seed_addr,
+            );
+        }
     }
-    if let Err(fault) =
-        plugin::run_response_body(&cfg.plugins, &cfg.log_writer, &mut response_body).await
-    {
-        return fail(
-            cfg,
-            io,
-            started_ms,
-            clock,
-            &method,
-            &authority,
-            &path,
-            &target,
-            seed_addr,
-            &fault.to_report(),
-        )
-        .await;
-    }
-
-    let first = format!("HTTP/1.1 {status} {}", reason_for_status(status));
-    http::write_message(
-        io.get_mut(),
-        &first,
-        &response_headers,
-        &response_body,
-        !(100..200).contains(&status),
-    )
-    .await?;
-    record(
-        cfg,
-        started_ms,
-        clock,
-        &method,
-        &authority,
-        &path,
-        status,
-        &request_body,
-        &response_body,
-        &target,
-        seed_addr,
-    );
     Ok(!keep_alive)
 }
 
@@ -814,7 +676,7 @@ fn record(
         insecure: matches!(target.tls_policy, TlsPolicy::Insecure),
         error: None,
     };
-    plugin::run_log(&cfg.plugins, Arc::new(event));
+    event.emit(&cfg.log_writer);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -843,7 +705,7 @@ async fn fail<W: AsyncRead + AsyncWrite + Unpin>(
         insecure: matches!(target.tls_policy, TlsPolicy::Insecure),
         error: Some(reason.to_string()),
     };
-    plugin::run_log(&cfg.plugins, Arc::new(event));
+    event.emit(&cfg.log_writer);
     let _ = write_status(io.get_mut(), 502, reason).await;
     Ok(true)
 }
@@ -866,7 +728,7 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
-/// 按描述符建上游：地址（插件链修订后的终值）+ TLS（依策略）。
+/// 按描述符建上游：地址（hosts 规则修订后的终值）+ TLS（依策略）。
 ///
 /// with_tls 由流量形态决定：CONNECT 隧道内必然 TLS；absolute-URI 是 http
 /// scheme 的明文代理语义。校验档位始终由 target.tls_policy 决定。
@@ -942,7 +804,7 @@ enum Exchange {
     Parts((u16, Vec<(String, String)>, Vec<u8>)),
 }
 
-/// 一问一答的转发内核（插件链包裹在外层 serve_request 里）。
+/// 一问一答的转发内核（外层 serve_request 负责门禁与终局记录）。
 async fn exchange<W: AsyncRead + AsyncWrite + Unpin>(
     io: &mut BufReader<W>,
     mut upstream: Upstream,

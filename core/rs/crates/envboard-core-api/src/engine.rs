@@ -110,8 +110,6 @@ pub struct EngineReport {
     /// 单调递增的装配代次（回执确认用；概念沿用 v2 的 config_epoch）。
     pub epoch: u64,
     pub last_error: Option<String>,
-    /// 逐插件 bypass 计数（错误契约的可见面）。
-    pub bypass_counts: Vec<(String, u64)>,
     /// 日志总线累计丢弃行数（数据面永不阻塞的代价必须可见）。
     pub log_drops: u64,
 }
