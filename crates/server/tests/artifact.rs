@@ -157,6 +157,38 @@ fn the_release_artifact_contains_only_expected_files() {
         }
     }
 
+    // 导航项与视图主体必须**一一对应**，且主体开关**由 data-view 派生**。
+    // 曾经的坏法：setView 逐个枚举 `getElementById("view-xxx")`，加「调试」视图时漏写
+    // 一行 —— 导航点亮、内容区因 is-hidden 初值永远空白，而默认层全绿。
+    let nav_views = nav_view_names(&index_html);
+    let body_views = body_view_names(&index_html);
+    for name in &nav_views {
+        if !body_views.contains(name) {
+            problems.push(format!(
+                "导航项 data-view={name:?} 没有对应的 `id=\"view-{name}\"` 主体 —— 点它必然白屏"
+            ));
+        }
+    }
+    for name in &body_views {
+        if !nav_views.contains(name) {
+            problems.push(format!(
+                "视图主体 `id=\"view-{name}\"` 没有对应的导航项 —— 这个视图永远进不去"
+            ));
+        }
+    }
+    if !app_js.contains("view-${node.dataset.view}") {
+        problems.push(
+            "setView 没有按 data-view 派生视图主体的开关 —— 新增视图极易漏 toggle（整页空白）"
+                .to_string(),
+        );
+    }
+    if app_js.contains("getElementById(\"view-") {
+        problems.push(
+            "setView 又出现逐个枚举 getElementById(\"view-…\") —— 开关只允许由 data-view 派生"
+                .to_string(),
+        );
+    }
+
     if !problems.is_empty() {
         println!("artifact FAILED ({} problem(s)):", problems.len());
         for problem in &problems {
@@ -170,10 +202,40 @@ fn the_release_artifact_contains_only_expected_files() {
         .unwrap_or(0);
     println!(
         "artifact OK (binary {} KiB、{} 个必需工件在位、{} 个 v1 残留、\
-         发布工件清单 {} 项齐全、无 adapters/ 角落)",
+         发布工件清单 {} 项齐全、导航 ↔ 视图主体 {} 对、无 adapters/ 角落)",
         size / 1024,
         REQUIRED.len(),
         REMOVED_IN_V2.len(),
-        RELEASE_ARTIFACTS.len()
+        RELEASE_ARTIFACTS.len(),
+        nav_views.len()
     );
+}
+
+/// 取 `prefix` 之后到下一个引号之间的全部取值（属性值的极简提取：这两个资产文件
+/// 里的写法固定，够用即可，不为它引入 HTML 解析依赖）。
+fn attribute_values(html: &str, prefix: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find(prefix) {
+        rest = &rest[pos + prefix.len()..];
+        let Some(end) = rest.find('"') else { break };
+        values.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    values.sort();
+    values.dedup();
+    values
+}
+
+/// 导航项声明的视图名（`data-view="x"`）。
+fn nav_view_names(html: &str) -> Vec<String> {
+    attribute_values(html, "data-view=\"")
+}
+
+/// 视图主体声明的视图名（`id="view-x"`）；`view-switch` 是导航容器本身，不是主体。
+fn body_view_names(html: &str) -> Vec<String> {
+    attribute_values(html, "id=\"view-")
+        .into_iter()
+        .filter(|name| name != "switch")
+        .collect()
 }

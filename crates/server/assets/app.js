@@ -2129,19 +2129,19 @@ function syncAutoscrollButton() {
 
 function setView(view) {
   state.view = view;
-  // 设计稿 v3：主导航在侧栏（.nav-btn），视图主体四选一。
+  // 设计稿 v3：主导航在侧栏（.nav-btn）。视图主体的开关**由 data-view 派生**，
+  // 不逐个枚举：枚举漏掉一个视图时，它的 section 会因标记里的 is-hidden 初值
+  // 永远不显示，表现是「导航点亮、内容区整块空白」，而测试仍然全绿。
   for (const node of document.querySelectorAll("#view-switch .nav-btn")) {
     const active = node.dataset.view === view;
     node.classList.toggle("is-active", active);
     node.setAttribute("aria-pressed", String(active));
+    document
+      .getElementById(`view-${node.dataset.view}`)
+      .classList.toggle("is-hidden", !active);
   }
-  document.getElementById("view-environments").classList.toggle("is-hidden", view !== "environments");
-  document.getElementById("view-rules").classList.toggle("is-hidden", view !== "rules");
-  document.getElementById("view-compare").classList.toggle("is-hidden", view !== "compare");
-  document.getElementById("view-settings").classList.toggle("is-hidden", view !== "settings");
-  document.getElementById("view-activity").classList.toggle("is-hidden", view !== "activity");
   // 侧栏列表区：环境视图给环境列表，规则库视图给规则集列表（设计稿第 4 页），
-  // 对比与设置视图不带列表区。
+  // 其余视图（对比 / 活动 / 调试 / 设置）不带列表区。
   document.getElementById("side-env").classList.toggle("is-hidden", view !== "environments");
   document.getElementById("side-rules").classList.toggle("is-hidden", view !== "rules");
   if (view === "rules") renderRuleSidebar(true);
