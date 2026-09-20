@@ -16,6 +16,7 @@ path = "src/bin/render_fixture.rs"
 [dependencies]
 async-trait.workspace = true
 envboard-events.workspace = true
+envboard-protocol.workspace = true
 arc-swap.workspace = true
 rcgen.workspace = true
 rustls.workspace = true

@@ -15,6 +15,7 @@ use crate::error::Error;
 use crate::ports::LineWriter;
 use crate::proxy::{CoreInfo, Listen};
 use crate::sha256;
+use crate::{CaptureDelta, CaptureView};
 
 /// 启动/热更一个引擎实例所需的全部输入（一等字段，没有透传通道）。
 #[derive(Clone)]
@@ -155,36 +156,6 @@ pub struct EngineReport {
     pub log_drops: u64,
     /// 轨迹总线累计丢弃行数（与 log_drops 同一有界纪律）。
     pub trajectory_drops: u64,
-}
-
-/// 抓包会话视图（Manager 经 ProxyEngine 面读取；引擎内部实现）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CaptureView {
-    pub session: SessionInfo,
-    pub captured: u64,
-    pub dropped: u64,
-    pub records: Vec<serde_json::Value>,
-}
-
-/// 抓包增量视图（调试实时流的读侧原语）：会话元数据 + 计数 + 游标之后的新记录。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CaptureDelta {
-    pub session: SessionInfo,
-    pub captured: u64,
-    pub dropped: u64,
-    /// 缓冲内最旧的 request_id（None = 空缓冲）。
-    pub oldest: Option<u64>,
-    /// request_id 严格大于游标的记录（时间序，至多 limit 条）。
-    pub records: Vec<serde_json::Value>,
-}
-
-/// 会话元数据：会话 = 实例生命周期；停止/重启即消失。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: u64,
-    pub started_at: u64,
-    /// 手动清空的代次（clear 一次 +1；用于 UI 区分前后两段）。
-    pub generation: u64,
 }
 
 /// 运行中的引擎实例句柄。无进程身份：实例不是进程。

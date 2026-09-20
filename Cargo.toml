@@ -20,13 +20,15 @@ envboard-engine = { path = "crates/engine" }
 envboard-events = { path = "crates/events" }
 envboard-engine-fake = { path = "crates/engine-fake" }
 envboard-manager = { path = "crates/manager" }
+envboard-protocol = { path = "crates/protocol" }
 envboard-server = { path = "crates/server" }
+envboard-web = { path = "crates/web" }
 
 # 外部依赖：版本写在这里，成员一律 `workspace = true`。
 #
 # 两条纪律：
 #   1. `Cargo.lock` 必须入库，`cargo build --offline` 是验收项 —— 依赖要克制；
-#   2. 不引模板引擎/WASM/前端构建链；CLI 之外不引大框架（web 层到 M3 再说）。
+#   2. 不引模板引擎/WASM/前端构建链；CLI 之外不引大框架。
 async-trait = "0.1.92"
 axum = "0.7.9"
 futures-util = "0.3.34"

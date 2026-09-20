@@ -335,6 +335,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "envboard-events",
+ "envboard-protocol",
  "rcgen",
  "rustls",
  "rustls-native-certs",
@@ -373,6 +374,7 @@ dependencies = [
  "envboard-engine",
  "envboard-engine-fake",
  "envboard-events",
+ "envboard-protocol",
  "libc",
  "serde",
  "serde_json",
@@ -387,17 +389,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "envboard-protocol"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "envboard-server"
 version = "0.3.0"
 dependencies = [
- "axum",
  "clap",
  "envboard-engine",
- "envboard-engine-fake",
+ "envboard-manager",
+ "envboard-web",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "envboard-web"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "envboard-engine",
  "envboard-events",
  "envboard-manager",
+ "envboard-protocol",
  "futures-util",
- "libc",
  "qrcode",
  "serde",
  "serde_json",
