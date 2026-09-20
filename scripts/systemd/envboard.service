@@ -13,7 +13,7 @@
 #     退出，端口即刻释放，不存在"孤儿代理"）；
 #   * 崩溃隔离是任务级的（请求任务 panic 只死那一条连接）；引擎线程 panic 会
 #     把该实例记为 failed，reconcile 按期望状态自动重拉 —— 因此 release 构建
-#     必须保持 panic=unwind（禁止 abort），这条写在 core/spec/capabilities.md
+#     必须保持 panic=unwind（禁止 abort），这条写在 spec/capabilities.md
 #     的「实例生命周期」，是构建契约不是实现细节。
 #
 # 只监听回环 —— 回环档默认免鉴权（本机即本机用户）。要让别的机器用：显式改监听

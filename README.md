@@ -3,7 +3,7 @@
 多环境代理管理器：**一个环境 = 一个进程内引擎实例 + 一个端口**。客户端把代理指到
 `127.0.0.1:<环境端口>` 就是在用那个环境，所以多个环境可以**同时活着**、直接对比。
 
-数据面是**纯 Rust 进程内引擎**（`envboard-core`）：没有子进程、没有轮询、没有第二种
+数据面是**纯 Rust 进程内引擎**（`envboard-engine`）：没有子进程、没有轮询、没有第二种
 语言 —— 配置生效塌缩成一次**同步装配**，PATCH 返回后的第一个请求就是新配置。
 
 规则是 hosts 风格的静态覆盖表，在**建连时改写上连目标** —— 客户端看到的一切
@@ -20,13 +20,17 @@
 | 按域名放宽上游证书校验（`insecure_hosts`：精确匹配，运行中改立即生效） | ✅ |
 | 端口自动分配（区间内随机试绑，新建冲突自动重试一次） | ✅ |
 | **上游代理（二级代理）**：按名管理的代理账本 + 环境按名绑定（热字段）；TLS 目标走 CONNECT 隧道（内层 TLS 与 `insecure_hosts` 语义不变），明文 http 按 absolute-URI 转发；删除被引用的代理拒绝并点名 | ✅ |
-| 按 host 改写上连目标（内置插件 `hosts-rules`，只改 `ConnectTarget.resolved_addr`） | ✅ |
+| 按 host 改写上连目标（hosts 规则，只改 `ConnectTarget.resolved_addr`） | ✅ |
+| 请求轨迹（每请求一条 append-only 事件流，SSE 实时跟随） | ✅ |
+| 抓包（请求/响应详情，实例内存会话：默认关、热开关、停止/重启即丢弃、HAR/JSONL 导出） | ✅ |
+| 调试页（工作区级调试会话单例：切换环境即停旧+清旧+开新）+ HAR 导入会话（多个并存，只读）+ 抓包实时推送（`/api/debug/stream`） | ✅ |
+| 控制面审计事件（权威仍在 state.json；`GET /api/history` + 工作台「活动」） | ✅ |
 | CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；absolute-URI 正向代理；101 透传 | ✅ |
 | 代理访问鉴权（`proxy_user` / `proxy_password` → 407 门；**凭据只在内存**，不进 argv / 视图 / SSE） | ✅ |
 | 共享 CA（所有实例一张；兼容加载 mitmproxy 形状的同名 CA 文件，已装证书的客户端零感知） | ✅ |
 | 规则库账本（`state.json` 的 `rules[]` 是唯一真相；物化文件可再生；启动对账回填） | ✅ |
 | 期望状态 reconcile（引擎线程 panic → `failed` → 按 desired 自动重启 = 崩溃自愈） | ✅ |
-| 工作台（三视图：环境 / 规则库 / 跨环境对比；详情、可折叠日志栏、SSE 每秒快照） | ✅ |
+| 工作台（环境 / 规则库 / 跨环境对比 / 活动 / 设置；详情含轨迹页签、可折叠日志栏、SSE 每秒快照） | ✅ |
 | 工作台鉴权档位（回环默认免鉴权；非回环必须显式 `--token`；header 与 `?token=` 等效） | ✅ |
 | 对外服务开关（环境监听 `0.0.0.0`，默认 `127.0.0.1`） | ✅ |
 | 单实例锁、状态原子写 + 0600 | ✅ |
@@ -44,20 +48,10 @@
 那一条连接；引擎线程整体 panic 才让实例进入 `failed`，由 reconcile 按期望状态拉回。
 这要求 release 构建**保持 unwind**（`panic = "abort"` 会让任务级隔离失效）—— 属构建契约。
 
-**三层能力模型**：内核能力（监听、407 门、TLS 策略、共享 CA、协议面）是原生快路径；
-内置插件（`hosts-rules`、`request-log`）与扩展插件走**完全相同**的接口 —— 产品功能
-自举验证接口；`debug-inject` 是测试 / 故障注入接缝，产品装配路径恒为空。内核 id 出现
-在插件链里是装配错误。注册表 = `core/rs/crates/envboard-core/src/plugin.rs` 的静态只读
-`CAPABILITIES`，逐项语义与阶段以 core/spec/capabilities.md 的「v3 插件与能力注册表」
-为准；**注册表 ↔ 内置实现 ↔ 契约表三方一致**由 policy 门禁判定
-（`cargo test -p envboard-policy-tests --test registry`）。
-
-**阶段管道**写死：`connect → request_head → request_body →（上游）→ response_head →
-response_body → log`。插件执行序 = 配置声明序，依赖约束 > 声明序。装配期校验：id 未注册 /
-内核冒充插件 / 缺依赖 / 依赖环 → `invalid_config` 点名双方，**没有"静默等待依赖"**。
-错误两档：connect / 改写钩子 Err → fail-closed 502（带插件名）；显式 bypass 的插件跳过并
-强制 WARN + 逐插件计数；每钩子超时（connect/head 1s、body 5s）按 Err；`on_log` 在类型上
-就不可外溢。
+**内置能力**：监听、407 门、TLS 策略、共享 CA、协议面是引擎原生快路径；hosts 规则
+改写（connect 路径直调修订 `resolved_addr`，规则脏数据 fail-closed 502）与请求终局
+日志（有界总线投递，写失败丢行不阻断流量）是引擎内置步骤，不是可插拔接口。
+逐项语义以 spec/capabilities.md 的「引擎能力矩阵」为准。
 
 **ConnectTarget 是唯一接缝**：`authority / sni / resolved_addr / tls_policy /
 chained_proxy`（恒 None 的扩展位）。改写语义只有一件事：不动请求内容、不动 Host 头、
@@ -75,18 +69,18 @@ previous snapshot still serving" 呈现。
 落盘是 `<log_dir>/<env>.log`（管理器侧单一写者）、copytruncate 轮转、有界尾读。
 
 ```
-core/spec/            语言中立契约：能力清单、错误码、规则语法 BNF、66 个 golden fixture
-core/rs/crates/
-  envboard-core-api   ProxyEngine 接缝（EngineSpec / EngineHandle / EngineReport /
+spec/            语言中立契约：能力清单、错误码、规则语法 BNF、66 个 golden fixture
+crates/
+  engine              ProxyEngine 接缝（EngineSpec / EngineHandle / EngineReport /
                       InstanceState）、错误码、端口（时钟 / 日志 LineWriter）      ← 根
-  envboard-domain     环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
-  envboard-rules      hosts 解析 + 确定性渲染（全仓唯一一份解析实现）              ← 纯逻辑
-  envboard-core       引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
-                      插件管道与能力注册表、有界日志总线
-  envboard-core-fake  ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
+  │ domain             环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
+  │ rules              hosts 解析 + 确定性渲染（全仓唯一一份解析实现）              ← 纯逻辑
+  │ 引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
+                      hosts 改写、请求终局日志、有界日志总线
+  engine-fake         ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
   envboard-manager    环境 CRUD、端口分配、账本持久化、锁、健康判定、reconcile、
                       规则账本、EngineSpec 编译与热装配接线
-  envboard-web        axum API + 内嵌前端（index.html / app.css / app.js）+ envboard
+  server              axum API + 内嵌前端（index.html / app.css / app.js）+ envboard
                       二进制（唯一发布产物；组合根在本 crate 的 src/main.rs）
   envboard-contract-tests   消费全部 66 个契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
@@ -104,6 +98,8 @@ core-api 是根；domain / rules 是纯逻辑（不得依赖 tokio / libc）；�
 ├── lock              单实例锁（flock）
 ├── rules/<name>.rules    规则物化文件（可再生；给人看，运行时输入是账本 rendered）
 ├── logs/<env>.log    实例日志（copytruncate 轮转，保留一份 .1）
+├── events.jsonl      控制面审计事件（权威仍是 state.json；8 MiB 轮转，见 spec/events.md）
+├── trajectories/<env>.jsonl  请求轨迹（append-only 事件流，见 spec/events.md）
 └── shared/confdir/   共享 CA（mitmproxy-ca.pem / mitmproxy-ca-cert.pem）
 ```
 
@@ -229,17 +225,27 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 |---|---|---|
 | GET | `/` | 工作台页面（内嵌 HTML 外壳） |
 | GET | `/app.css` / `/app.js` | 内嵌静态资产（唯一豁免 token 的两个路径） |
-| GET | `/api/status` | 管理器与引擎概况、`port_range` 等配置回显 |
+| GET | `/api/status` | 管理器与引擎概况、`port_range` 等配置回显、`events_dropped` |
 | GET/POST | `/api/environments` | 列表 / 建环境（`name` 必填；端口缺省 = 自动分配） |
 | GET/PATCH/DELETE | `/api/environments/:name` | 详情 / 改环境（PATCH 未提及不动、`null` 清空） / 删除（须先停止） |
 | POST | `/api/environments/:name/{start,stop,restart,reallocate}` | 启停 / 重启 / 显式重分配端口 |
 | GET | `/api/environments/:name/logs?lines=N` | 实例日志尾部 |
+| GET | `/api/environments/:name/trajectory?limit=N` | 请求轨迹尾部（拉取式） |
+| GET | `/api/environments/:name/trajectory/stream` | SSE 实时轨迹（`baseline` 尾部窗口 + `events` 增量；断线带 `?cursor=` 续传） |
+| GET | `/api/history?name=<env>&limit=N` | 控制面审计事件（只读；`name` 缺省 = 全部） |
+| GET | `/api/environments/:name/captures?limit=N` | 抓包会话尾部（易失，会话 = 实例生命周期） |
+| GET | `/api/environments/:name/captures/:request_id` | 单条抓包详情 |
+| POST | `/api/environments/:name/capture/clear` | 手动清空抓包会话（会话延续） |
+| GET | `/api/environments/:name/captures/export?format=har\|jsonl` | 导出当前抓包会话（HAR 1.2 / JSONL 下载） |
+| POST/GET | `/api/debug`、`POST /api/debug/stop` | 开启/切换调试会话（单例，切换即停旧+清旧+开新）/ 停止并清空 / 当前视图 |
+| POST | `/api/har/import?name=<file>` | 导入 HAR 会话（HAR 1.2；多个并存只读，最多 8 个） |
+| GET/DELETE | `/api/har`、`GET/DELETE /api/har/:id` | 导入会话列表 / 条目窗口 / 删除 |
 | GET/POST | `/api/rules` | 规则账本列表（名字 + 条数） / 导入（覆盖同名 = 对绑定环境热应用） |
 | GET/DELETE | `/api/rules/:name` | 规则原文 / 删除（仍被绑定时 `conflict`） |
 | GET/POST | `/api/proxies` | 上游代理账本清单（含 `references[]`） / 保存（同名整体替换，凭据只写不读） |
 | GET/DELETE | `/api/proxies/:name` | 上游代理详情（凭据永不回显，只有 `has_auth`） / 删除（被环境引用时 `conflict` 并点名） |
 | GET | `/api/compare?host=<域名>` | 跨环境静态对比：该域名在各环境被覆盖成什么（不发请求） |
-| GET | `/api/events` | SSE 快照（每秒一次全量环境视图） |
+| GET | `/api/events` | SSE 快照（每秒一次全量环境视图，附 `generation`：未变更可跳过重渲） |
 | GET | `/api/ca` | 共享 CA 证书只读摘要（版本 / 序列号 / 有效期 / 指纹 / 颁发者 / SAN） |
 | GET | `/api/ca.pem` | 下载根证书（只含证书，不带私钥；`Content-Disposition: attachment`） |
 | GET | `/api/ca/qrcode.svg?data=<url>&token=<t>` | 把传入 URL（≤512 字节）编码成二维码 SVG，供手机扫码下载证书 |
@@ -263,16 +269,15 @@ bash ci/verify.sh policy     # 只跑仓库纪律那一层
 | `policy` | `cargo test -p envboard-policy-tests` | 工具链收敛（toolchain）、命名（naming）、文本自包含（doc_scope）、依赖方向（deps）、注册表三方一致（registry）—— 一文件一门禁，可单跑 |
 | `rust` | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` | 编译、lint、单测 + 冒烟（鉴权档位、非回环拒启、单写者；端口分配、reconcile、锁、健康判定、日志尾部与轮转、环境编辑热/停机） |
 | `contract` | `cargo test -p envboard-contract-tests` | 66 个 fixture 的形状与语义都由实现消费；失败用例钉住错误码，成功用例钉归一化字段 |
-| `artifact` | `cargo test -p envboard-web --test artifact` | 声明的发布工件逐项在位、内嵌前端资产完整（行数 + 关键符号）、二进制里真的带着进程内引擎 |
-| `live` | `cargo test -p envboard-web --test live_workbench -- --ignored` | 29 条实机断言逐条点名打印：双环境对照、规则热重载与热生效时延、`insecure_hosts` 三态对照、既有 CA 零感知、凭据 argv 审计、407/200、鉴权四档（含非回环拒启负向）、CSP、320 连打、注入 failed 与端口释放、崩溃自愈、编辑热生效 |
-| `live` | `cargo test -p envboard-core --test live_manager -- --ignored` | 引擎直驱三组：预放 CA 加载复用 + 回执如实 + curl 验链；注入 failed 可见、端口释放、重拉回 running；insecure 名单外 502 → 热 apply 第一次请求即 200 |
+| `artifact` | `cargo test -p envboard-server --test artifact` | 声明的发布工件逐项在位、内嵌前端资产完整（行数 + 关键符号）、二进制里真的带着进程内引擎 |
+| `live` | `cargo test -p envboard-server --test live_workbench -- --ignored` | 29 条实机断言逐条点名打印：双环境对照、规则热重载与热生效时延、`insecure_hosts` 三态对照、既有 CA 零感知、凭据 argv 审计、407/200、鉴权四档（含非回环拒启负向）、CSP、320 连打、注入 failed 与端口释放、崩溃自愈、编辑热生效 |
+| `live` | `cargo test -p envboard-engine --test live_manager -- --ignored` | 引擎直驱三组：预放 CA 加载复用 + 回执如实 + curl 验链；注入 failed 可见、端口释放、重拉回 running；insecure 名单外 502 → 热 apply 第一次请求即 200 |
 
 常用的引擎侧单跑（全部 hermetic，不需要网络与宿主）：
 
 ```bash
-cargo test -p envboard-core                    # 单测 + data_plane / plugins / backend / mitm
-cargo test -p envboard-core --test data_plane  # 规则命中、502、407、insecure 热翻转、port_conflict、隧道保活
-cargo test -p envboard-core --test plugins     # fail-closed 带名、bypass+计数、钩子超时、Early 不触上游
+cargo test -p envboard-engine                  # 单测 + data_plane / backend / mitm
+cargo test -p envboard-engine --test data_plane  # 规则命中、502、407、insecure 热翻转、port_conflict、隧道保活
 cargo test -p envboard-policy-tests --test registry   # 注册表 ↔ 内置实现 ↔ 契约表 三方一致
 ```
 
@@ -325,12 +330,12 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
   别人的进程时，对应环境以 `port_conflict` 如实呈现。
 
 工作台界面的视觉令牌、CSP 约束与交互纪律以
-`core/rs/crates/envboard-web/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）；
-改 UI 前先读 `core/spec/ui.md`（机检条目 UI-1…UI-8 由 policy 门禁执行，违反即 `verify` 红）。
+`crates/server/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）；
+改 UI 前先读 `spec/ui.md`（机检条目 UI-1…UI-8 由 policy 门禁执行，违反即 `verify` 红）。
 
 ## 健康与错误码
 
-环境实际状态全部来自**内存报告**（契约见 core/spec/errors.md 的「健康状态」）：
+环境实际状态全部来自**内存报告**（契约见 spec/errors.md 的「健康状态」）：
 
 | 状态 | 含义 |
 |---|---|
@@ -344,7 +349,7 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
 判定次序：**标记 → desired → 引擎内存报告**；视图层与权威判定是同一个函数。
 错误码：`invalid_config`（含热更被拒）/ `not_found` / `conflict` / `port_conflict` /
 `port_range_exhausted` / `store_failure` / `internal_error` —— 语义、HTTP 映射与
-可重试性以 core/spec/errors.md 为准。
+可重试性以 spec/errors.md 为准。
 
 ## 已知限制
 
@@ -368,7 +373,7 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
   就是为此。
 - **PAC / 透明代理 / SOCKS 未做**。上游代理只做 HTTP 形态（CONNECT 隧道 +
   absolute-URI + Basic 鉴权）：`https://` 代理（与代理本身的 TLS）、按域名分流、
-  代理链都是写明的非目标，语义见 core/spec/capabilities.md 的「上游代理」。
+  代理链都是写明的非目标，语义见 spec/capabilities.md 的「上游代理」。
 
 ## 版本与发布
 

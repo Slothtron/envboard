@@ -1,0 +1,14 @@
+[package]
+name = "envboard-contract-tests"
+description = "消费 spec/fixtures 的 Rust 侧契约测试（只有测试目标）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+envboard-engine.workspace = true
+serde_json.workspace = true

@@ -4,7 +4,7 @@
 # 托管方无关：任何 CI 直接调用 `bash ci/verify.sh` 即可；本仓库不绑定 GitHub Actions。
 #
 # 本脚本**只做编排**：分层、顺序、依赖探测与响亮失败。判据一律在 Rust 测试里
-# （`core/rs/crates/envboard-policy-tests` 一门禁一文件，可单跑），脚本里不写断言。
+# （`tests/policy-tests` 一门禁一文件，可单跑），脚本里不写断言。
 #
 # 层：
 #   policy   仓库纪律（工具链收敛 / 命名 / 文本自包含 / 依赖方向）—— 纯 Rust，无外部语言
@@ -85,15 +85,15 @@ step_contract() {
 # --------------------------------------------------------------------------- #
 
 step_artifact() {
-  run "artifact" cargo test -p envboard-web --test artifact "${LOCKED[@]}"
+  run "artifact" cargo test -p envboard-server --test artifact "${LOCKED[@]}"
 }
 
 # --------------------------------------------------------------------------- #
 # live 层：真宿主（真网络、真进程起停；仅需 openssl/curl）。默认**不进 all**。
 # --------------------------------------------------------------------------- #
 
-step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-web --test live_workbench -- --ignored --nocapture; }
-step_live_manager()   { cargo test "${LOCKED[@]}" -p envboard-core --test live_manager -- --ignored --nocapture; }
+step_live_workbench() { cargo test "${LOCKED[@]}" -p envboard-server --test live_workbench -- --ignored --nocapture; }
+step_live_manager()   { cargo test "${LOCKED[@]}" -p envboard-engine --test live_manager -- --ignored --nocapture; }
 
 step_live() {
   run "live/workbench"   step_live_workbench

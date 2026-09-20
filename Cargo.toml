@@ -1,29 +1,26 @@
 # envboard —— 多语言仓库的 workspace 根。
 #
-# Rust 布局：workspace 根**必须唯一且全仓一致**，二选一（包根 virtual
-# manifest 或 `core/rs/`）。这里选**包根**：`cargo test` 在本目录即可跑全量，
-# `core/rs/` 下不放第二份 workspace `Cargo.toml`。
+# Rust 布局：workspace 根在包根，成员在 `crates/`（产品 crate）与
+# `tests/`（纯测试 crate）。`cargo test` 在本目录即可跑全量。
 #
 # 成员用 glob，加 crate 不需要改这里。
 [workspace]
 resolver = "3"
-members = ["core/rs/crates/*"]
+members = ["crates/*", "tests/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
 
 [workspace.dependencies]
 # 内部 crate：只写 path，避免版本漂移
-envboard-core-api = { path = "core/rs/crates/envboard-core-api" }
-envboard-domain = { path = "core/rs/crates/envboard-domain" }
-envboard-rules = { path = "core/rs/crates/envboard-rules" }
-envboard-core-fake = { path = "core/rs/crates/envboard-core-fake" }
-envboard-core = { path = "core/rs/crates/envboard-core" }
-envboard-manager = { path = "core/rs/crates/envboard-manager" }
-envboard-web = { path = "core/rs/crates/envboard-web" }
+envboard-engine = { path = "crates/engine" }
+envboard-events = { path = "crates/events" }
+envboard-engine-fake = { path = "crates/engine-fake" }
+envboard-manager = { path = "crates/manager" }
+envboard-server = { path = "crates/server" }
 
 # 外部依赖：版本写在这里，成员一律 `workspace = true`。
 #
@@ -39,7 +36,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-# 成员可以再追加 features（如 envboard-core 给 rustls 追加 ring/std）。
+# 成员可以再追加 features（如 envboard-engine 给 rustls 追加 ring/std）。
 clap = { version = "4.6.6", features = ["derive"] }
 # 只被工程门禁用来解析各 crate 的 Cargo.toml（依赖方向、发布标识）；产品代码不用它。
 toml = "1.1.4"
@@ -47,7 +44,7 @@ toml = "1.1.4"
 # image 只留 svg 渲染），加入前核对过 Cargo.lock 增量只有它自己。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
-# v3 引擎（envboard-core，M-P1 起）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
+# 引擎（envboard-engine）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
 # 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA
 # 用 ECDSA P-256，加载既有 RSA CA 不受影响）。
 # x509-parser 与 time 是 rcgen 的**同版本可选传递依赖**，被本仓直接 used 的两条：
@@ -57,7 +54,7 @@ tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 rustls-native-certs = "0.8.4"
 rustls-pemfile = "2.2.0"
-# x509-parser 不作直接依赖：证书结构的读取由 envboard-core 的 der 模块自己做
+# x509-parser 不作直接依赖：证书结构的读取由 envboard-engine 的 der 模块自己做
 # （固定形状、可单测），它只是 rcgen 的可选传递依赖随 feature 进入。
 time = { version = "0.3", default-features = false, features = ["std"] }
 # 热更新单快照：数据面每请求 load_full，装配即整体换入，无文件通道、无轮询。
