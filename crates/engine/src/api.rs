@@ -10,7 +10,8 @@ pub mod sha256;
 pub mod text;
 
 pub use engine::{
-    CaptureView, EngineHandle, EngineReport, EngineSpec, InstanceState, ProxyEngine, SessionInfo,
+    CaptureDelta, CaptureView, EngineHandle, EngineReport, EngineSpec, InstanceState, ProxyEngine,
+    SessionInfo,
 };
 pub use error::{Error, ErrorCode, Retryability};
 pub use ports::{

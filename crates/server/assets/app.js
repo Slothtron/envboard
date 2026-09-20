@@ -78,6 +78,13 @@ const state = {
   ca: null,
   // ---- 规则库侧栏搜索 ----
   ruleSearch: "",
+  // ---- 调试实时流（SSE：抓包记录自动推送） ----
+  debugEs: null,
+  debugRows: [],
+  /// 会话身份 {env, id, generation}；null = 无会话。snapshot 帧重建，events 帧沿用。
+  debugSession: null,
+  debugCaptured: 0,
+  debugDropped: 0,
 };
 
 // --------------------------------------------------------------------------- //
@@ -1860,43 +1867,111 @@ function emptyState(host, iconName, title, hint) {
   host.replaceChildren(box);
 }
 
-async function refreshDebug() {
-  if (state.view !== "debug") return;
-  renderDebugView();
+function debugCountText() {
+  const session = state.debugSession;
+  if (!session) return "";
+  const dropped = state.debugDropped ? ` · 已淘汰 ${state.debugDropped}` : "";
+  return (
+    `会话 #${session.id} · gen ${session.generation} · ` +
+    `已捕获 ${state.debugCaptured}${dropped} · 目标 ${session.env}`
+  );
+}
+
+/// snapshot 帧（形状 = GET /api/debug 的整幅视图）：重建徽章、计数与记录列表。
+function renderDebugSession(view) {
   const records = document.getElementById("debug-records");
   const count = document.getElementById("debug-count");
-  try {
-    const view = await get("/api/debug?limit=500");
-    if (!view.env) {
-      setDebugBadge(false);
-      count.textContent = "";
-      emptyState(
-        records,
-        "play",
-        "还没有调试会话",
-        "在上方选一个运行中的环境，点「开启 / 切换」。该环境的流量会被捕获进这个会话。",
-      );
+  if (!view || !view.env) {
+    state.debugSession = null;
+    state.debugRows = [];
+    setDebugBadge(false);
+    count.textContent = "";
+    emptyState(
+      records,
+      "play",
+      "还没有调试会话",
+      "在上方选一个运行中的环境，点「开启 / 切换」。该环境的流量会被捕获进这个会话。",
+    );
+    return;
+  }
+  state.debugSession = {
+    env: view.env,
+    id: view.capture.session.id,
+    generation: view.capture.session.generation,
+  };
+  state.debugCaptured = view.capture.captured;
+  state.debugDropped = view.capture.dropped;
+  state.debugRows = view.capture.records || [];
+  setDebugBadge(true);
+  renderDebugView();
+  selectDebugTarget(view.env);
+  count.textContent = debugCountText();
+  if (!state.debugRows.length) {
+    emptyState(
+      records,
+      "search",
+      "还没有抓包记录",
+      "经过目标环境的请求会实时出现在这里。点击一行展开请求 / 响应详情。",
+    );
+    return;
+  }
+  records.replaceChildren(...state.debugRows.map(recordRow));
+  records.scrollTop = records.scrollHeight;
+}
+
+// ---- 调试实时流：抓包记录自动上屏（SSE；契约见 spec/events.md「调试实时流」） ---- //
+
+function startDebugStream() {
+  stopDebugStream();
+  renderDebugView();
+  const source = new EventSource(
+    state.token
+      ? `/api/debug/stream?token=${encodeURIComponent(state.token)}`
+      : "/api/debug/stream",
+  );
+  state.debugEs = source;
+  source.addEventListener("snapshot", (event) => {
+    try {
+      renderDebugSession(JSON.parse(event.data));
+    } catch (error) {
+      reportError(error);
+    }
+  });
+  source.addEventListener("events", (event) => {
+    let frame;
+    try {
+      frame = JSON.parse(event.data);
+    } catch {
       return;
     }
-    setDebugBadge(true);
-    const dropped = view.capture.dropped ? ` · 已淘汰 ${view.capture.dropped}` : "";
-    count.textContent =
-      `会话 #${view.capture.session.id} · gen ${view.capture.session.generation} · ` +
-      `已捕获 ${view.capture.captured}${dropped} · 目标 ${view.env}`;
-    selectDebugTarget(view.env);
-    if (!view.capture.records?.length) {
-      emptyState(
-        records,
-        "search",
-        "还没有抓包记录",
-        "经过目标环境的请求会实时出现在这里。点击一行展开请求 / 响应详情。",
-      );
-    } else {
-      records.replaceChildren(...view.capture.records.map(recordRow));
+    // events 只追加在已建立的会话上；换代由服务端重发 snapshot 负责。
+    if (!state.debugSession) return;
+    state.debugCaptured = frame.captured;
+    state.debugDropped = frame.dropped;
+    document.getElementById("debug-count").textContent = debugCountText();
+    const incoming = frame.records || [];
+    if (!incoming.length) return;
+    const host = document.getElementById("debug-records");
+    // 原本贴在底部才跟随；用户往上看旧记录时不打扰（也不丢展开的详情）。
+    const atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 40;
+    if (host.firstElementChild?.classList.contains("empty-state")) {
+      host.replaceChildren();
     }
-  } catch {
-    setDebugBadge(false);
-  }
+    for (const record of incoming) {
+      state.debugRows.push(record);
+      host.appendChild(recordRow(record));
+    }
+    if (atBottom) host.scrollTop = host.scrollHeight;
+  });
+  // 网络抖动：EventSource 自动重连，重连后服务端必发 snapshot → 自愈，无需手动重试。
+  source.addEventListener("error", () => {});
+}
+
+function stopDebugStream() {
+  state.debugEs?.close();
+  state.debugEs = null;
+  state.debugSession = null;
+  state.debugRows = [];
 }
 
 function selectDebugTarget(env) {
@@ -2202,8 +2277,11 @@ function setView(view) {
   if (view === "rules") renderRuleSidebar(true);
   if (view === "activity") loadActivity();
   if (view === "debug") {
-    refreshDebug().catch(reportError);
+    // 抓包记录走实时流（服务端 500ms 推增量），不再一次性拉取；离开视图即断流。
+    startDebugStream();
     refreshHarList().catch(reportError);
+  } else {
+    stopDebugStream();
   }
   // 规则数计数 chip 跟着视图亮起来（计数 chip 的激活态定义见 app.css 的 .count.is-active）
   document.getElementById("rules-count").classList.toggle("is-active", view === "rules");
@@ -2496,7 +2574,10 @@ function wire() {
   document.getElementById("debug-start").addEventListener("click", () => {
     const env = document.getElementById("debug-env").value;
     if (!env) { toast("没有运行中的环境可调试。", "info"); return; }
-    mutate("/api/debug", "POST", { env }).then(refreshDebug).catch(reportError);
+    // 响应即 DebugView：先就地渲染拿即时反馈，流的 snapshot 帧随后接管换代。
+    mutate("/api/debug", "POST", { env })
+      .then((view) => renderDebugSession(view))
+      .catch(reportError);
   });
   // 停止与清空都会不可逆地丢掉抓包记录 —— 规范 7.2 节：破坏性操作必须走确认模态，
   // 写明后果与建议动作（先导出），不允许点击即执行。
@@ -2508,7 +2589,7 @@ function wire() {
         "想保留就先点「导出 HAR」。",
       actionLabel: "确认停止",
       actionKey: "debug/stop",
-      run: () => mutate("/api/debug/stop", "POST").then(refreshDebug),
+      run: () => mutate("/api/debug/stop", "POST").then(() => renderDebugSession({ env: null })),
     });
   });
   document.getElementById("debug-clear").addEventListener("click", () => {
@@ -2522,8 +2603,17 @@ function wire() {
       actionLabel: "确认清空",
       actionKey: "debug/clear",
       run: () =>
-        mutate(`/api/environments/${encodeURIComponent(env)}/capture/clear`, "POST")
-          .then(refreshDebug),
+        mutate(`/api/environments/${encodeURIComponent(env)}/capture/clear`, "POST").then(() => {
+          // 就地清列表；换代（generation+1）的 snapshot 帧最迟 500ms 后到达对齐计数。
+          state.debugRows = [];
+          const host = document.getElementById("debug-records");
+          emptyState(
+            host,
+            "search",
+            "还没有抓包记录",
+            "经过目标环境的请求会实时出现在这里。点击一行展开请求 / 响应详情。",
+          );
+        }),
     });
   });
   document.getElementById("debug-export").addEventListener("click", () => {

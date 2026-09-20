@@ -224,6 +224,24 @@ fn the_release_artifact_contains_only_expected_files() {
         }
     }
 
+    // 抓包记录必须走实时流自动上屏 —— 曾经的坏法是进页一次性拉取、之后永不刷新
+    // 且处处绿灯。接线两端各钉一枚：前端连流 + 服务端路由在场。
+    for (needle, where_) in [
+        ("startDebugStream", "app.js"),
+        ("/api/debug/stream", "app.js"),
+    ] {
+        if !app_js.contains(needle) {
+            problems.push(format!(
+                "{where_} 缺 {needle:?} —— 调试页实时推送接线退场，抓包记录不会再自动上屏"
+            ));
+        }
+    }
+    let api_rs =
+        std::fs::read_to_string(root.join("crates/server/src/api.rs")).expect("api.rs 必须存在");
+    if !api_rs.contains("\"/api/debug/stream\"") {
+        problems.push("api.rs 没有 /api/debug/stream 路由 —— 实时流端点退场".to_string());
+    }
+
     if !problems.is_empty() {
         println!("artifact FAILED ({} problem(s)):", problems.len());
         for problem in &problems {

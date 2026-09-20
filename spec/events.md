@@ -108,7 +108,8 @@ request/end | custom`
   （utf8 直存 / 二进制 base64 标注），解码延迟到展示端。
 - 缓冲按字节预算淘汰（默认 256 MiB/环境，`--capture-budget` 可调），**满即淘最旧**，
   `captured/dropped` 计数随 API 可见——内存占用恒定，长会话不丢记录的出路是导出。
-- 消费：`GET .../captures?limit=`、`GET .../captures/:request_id`、
+- 消费：`GET .../captures?limit=`、`GET .../captures/:request_id`（全缓冲查找；
+  已被淘汰或不存在 → 404）、
   `GET .../captures/export?format=har|jsonl`（HAR 1.2，对齐 mitmproxy savehar 形状）。
 
 ## 会话双轨：调试会话（live）与导入会话（HAR）
@@ -117,6 +118,14 @@ request/end | custom`
   **切换即换代 —— 原目标环境的抓包停止并清空**（capture=false + 清缓冲），新环境开启。
   `POST /api/debug/stop` 停止并清空；`GET /api/debug` 返回当前会话视图。
   环境字段 `capture` 仍是 per-env 开关（API 用户可用），调试页经 debug 端点驱动它。
+- **调试实时流**（`GET /api/debug/stream`，SSE）：抓包记录自动上屏的推送通道。
+  连接即发 `snapshot` 帧（形状 = `GET /api/debug` 的会话视图，整幅替换；无目标时
+  `{env: null}`）；此后每 500ms 轮询内存缓冲，有增量发
+  `events` 帧 `{records, cursor, captured, dropped}`。游标（`request_id`）由流
+  自己维护 —— 淘汰只会移除游标之前的记录，增量无缺口，断线重连只需重收一次
+  `snapshot`。会话换代（实例重启或 clear，即 `session.id`/`generation` 变化）或
+  目标消失 → 重发 `snapshot`。轨迹流里的 `capture/saved` 通知保留不变（轨迹只
+  回答"发生了什么"），**记录正文只经本流与拉取端点出口**。
 - **导入会话（HAR）**：`POST /api/har/import`（HAR 1.2）——多个并存、只读、
   进程生命周期内易失；entries 反向映射成抓包记录形状（与调试会话同一渲染组件）。
   有界：最多 8 个会话 / 总量 256 MiB，超限**拒收**（显式动作拒绝比静默淘汰合适）。
@@ -129,4 +138,5 @@ request/end | custom`
 - 数据面：`GET /api/environments/:name/trajectory?limit=N`（拉取式）；
   `GET /api/environments/:name/trajectory/stream`（SSE：连接即发
   `baseline` 尾部窗口，此后 `events` 增量，断线带 `?cursor=` 续传）；
-  工作台环境详情「轨迹」页签。
+  工作台环境详情「轨迹」页签。抓包实时推送见「调试实时流」
+  （`GET /api/debug/stream`），工作台「调试」视图消费它。

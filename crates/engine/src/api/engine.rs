@@ -131,6 +131,18 @@ pub struct CaptureView {
     pub records: Vec<serde_json::Value>,
 }
 
+/// 抓包增量视图（调试实时流的读侧原语）：会话元数据 + 计数 + 游标之后的新记录。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureDelta {
+    pub session: SessionInfo,
+    pub captured: u64,
+    pub dropped: u64,
+    /// 缓冲内最旧的 request_id（None = 空缓冲）。
+    pub oldest: Option<u64>,
+    /// request_id 严格大于游标的记录（时间序，至多 limit 条）。
+    pub records: Vec<serde_json::Value>,
+}
+
 /// 会话元数据：会话 = 实例生命周期；停止/重启即消失。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -170,6 +182,16 @@ pub trait ProxyEngine: Send + Sync {
     /// 抓包会话视图（易失：会话 = 实例生命周期）。None = 实例不在跑。
     /// 默认 None：不支持抓包的实现不必假装。
     fn capture_view(&self, _env: &str, _limit: usize) -> Option<CaptureView> {
+        None
+    }
+
+    /// 抓包增量（调试实时流用）：游标之后的新记录 + 会话/计数。None = 实例不在跑。
+    fn capture_delta(&self, _env: &str, _after: u64, _limit: usize) -> Option<CaptureDelta> {
+        None
+    }
+
+    /// 单条抓包详情（全缓冲查找；后写优先）。None = 记录不在缓冲或实例不在跑。
+    fn capture_get(&self, _env: &str, _request_id: u64) -> Option<serde_json::Value> {
         None
     }
 

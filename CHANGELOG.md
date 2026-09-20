@@ -6,6 +6,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.0] - 2026-09-18
 
+### Added（调试实时流：抓包记录自动上屏）
+
+- **`GET /api/debug/stream`（SSE）**：调试页不再靠进页时一次性拉取 ——
+  连接即发 `snapshot` 帧（整幅会话视图），此后 500ms 一轮询内存缓冲、有增量发
+  `events` 帧 `{records, cursor, captured, dropped}`；会话换代或目标消失重发
+  `snapshot`。游标（request_id）由流自己维护：淘汰只移除游标之前的记录，增量
+  无缺口，断线重连自愈。前端在「调试」视图维持一条连接（离开即断），记录追加
+  就地渲染、原本贴底才自动跟随；「开启 / 停止 / 清空」按钮即时反馈。
+  契约见 `spec/events.md`「调试实时流」。
+
+### Fixed（续）
+
+- **`GET .../captures/:request_id` 全缓冲查找**：曾经的实现是「取尾部 1 条再
+  比对」—— 只有最新一条查得到，其余一律 404。改走引擎缓冲的按 id 查找。
+
 ### Fixed（调试页恒空的两个根因：capture 不热应用 + 轨迹窗口被账本读者整份拒绝）
 
 - **`capture` 真正热应用**：`capture` 是契约声明的热字段（调试页「开启 / 切换」

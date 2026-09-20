@@ -205,6 +205,29 @@ impl ProxyEngine for EngineBackend {
         })
     }
 
+    fn capture_delta(&self, env: &str, after: u64, limit: usize) -> Option<crate::CaptureDelta> {
+        let guard = self.entries.lock().unwrap();
+        let engine = guard.get(env)?.engine.as_ref()?;
+        let shared = engine.shared_handle();
+        Some(crate::CaptureDelta {
+            session: crate::SessionInfo {
+                id: shared.capture.session_id(),
+                started_at: shared.capture.started_at(),
+                generation: shared.capture.generation(),
+            },
+            captured: shared.capture.captured(),
+            dropped: shared.capture.dropped(),
+            oldest: shared.capture.oldest(),
+            records: shared.capture.since(after, limit),
+        })
+    }
+
+    fn capture_get(&self, env: &str, request_id: u64) -> Option<serde_json::Value> {
+        let guard = self.entries.lock().unwrap();
+        let engine = guard.get(env)?.engine.as_ref()?;
+        engine.shared_handle().capture.get(request_id)
+    }
+
     fn clear_capture(&self, env: &str) -> bool {
         let guard = self.entries.lock().unwrap();
         let Some(engine) = guard.get(env).and_then(|entry| entry.engine.as_ref()) else {

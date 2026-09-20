@@ -108,6 +108,24 @@ impl CaptureBuffer {
             .collect()
     }
 
+    /// 游标增量（request_id 严格大于 `after` 的记录，时间序，至多 limit 条）。
+    /// 调试实时流的推送原语：游标由读侧（服务端流）自己维护，淘汰只会移除
+    /// 游标之前的记录，因此增量永不出现缺口。
+    pub fn since(&self, after: u64, limit: usize) -> Vec<serde_json::Value> {
+        let records = self.records.lock().unwrap();
+        records
+            .iter()
+            .filter(|(id, _, _)| *id > after)
+            .take(limit)
+            .map(|(_, r, _)| r.clone())
+            .collect()
+    }
+
+    /// 缓冲内最旧的 request_id（空缓冲 = None）。
+    pub fn oldest(&self) -> Option<u64> {
+        self.records.lock().unwrap().front().map(|(id, _, _)| *id)
+    }
+
     /// 单条详情（按 request_id；后写优先——重启后 id 复位时新记录覆盖旧认知）。
     pub fn get(&self, request_id: u64) -> Option<serde_json::Value> {
         let records = self.records.lock().unwrap();
@@ -233,6 +251,32 @@ mod tests {
         buffer.push(1, json!({"big": true}), 200);
         assert_eq!(buffer.tail(10).len(), 0);
         assert_eq!(buffer.dropped(), 1);
+    }
+
+    #[test]
+    fn since_returns_the_increment_and_survives_eviction() {
+        let roomy = buffer(0);
+        for id in [3, 5, 8] {
+            // request_id 允许有洞（并非每个请求都产生抓包记录）。
+            roomy.push(id, json!({ "n": id }), 10);
+        }
+        assert_eq!(roomy.oldest(), Some(3));
+        let delta: Vec<u64> = roomy
+            .since(3, 10)
+            .iter()
+            .map(|r| r["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(delta, vec![5, 8], "严格大于游标，时间序");
+        assert!(roomy.since(8, 10).is_empty());
+        assert_eq!(roomy.since(0, 2).len(), 2, "limit 生效");
+
+        // 淘汰只移除游标之前的记录：增量视角下无缺口可言。
+        let tight = buffer(20);
+        for id in 1..=5 {
+            tight.push(id, json!({ "n": id }), 10);
+        }
+        assert_eq!(tight.oldest(), Some(4), "预算 20 = 留 2 条");
+        assert_eq!(tight.since(3, 10).len(), 2, "游标 3 之后的记录都还在");
     }
 
     #[test]

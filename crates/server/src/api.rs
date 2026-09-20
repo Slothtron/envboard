@@ -140,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/debug", get(api_debug).post(api_debug_start))
         .route("/api/debug/stop", post(api_debug_stop))
+        .route("/api/debug/stream", get(api_debug_stream))
         .route("/api/har", get(api_har_list).post(api_har_import))
         .route("/api/har/:id", get(api_har_get).delete(api_har_delete))
         .route(
@@ -421,15 +422,9 @@ async fn api_capture(
             format!("request_id must be an integer, got {request_id:?}"),
         ));
     };
-    match state.manager.captures(&name, 1) {
-        Ok(Some(view)) => match view
-            .records
-            .iter()
-            .find(|r| r.get("request_id") == Some(&serde_json::json!(request_id)))
-        {
-            Some(record) => Json(record.clone()).into_response(),
-            None => not_found_response(&name),
-        },
+    // 全缓冲查找（曾经的实现是 tail(1) 再比对 —— 只有最新一条查得到，旧的必 404）。
+    match state.manager.capture_detail(&name, request_id) {
+        Ok(Some(record)) => Json(record).into_response(),
         Ok(None) => not_found_response(&name),
         Err(error) => error_response(error),
     }
@@ -673,6 +668,98 @@ async fn api_debug(State(state): State<AppState>) -> Response {
         Some(view) => Json(serde_json::to_value(view).unwrap_or(Value::Null)).into_response(),
         None => Json(json!({"env": null})).into_response(),
     }
+}
+
+/// GET /api/debug/stream —— 调试会话的抓包实时推送（SSE）。
+///
+/// 协议（契约见 `spec/events.md`「调试实时流」）：连接即发 `snapshot` 帧
+/// （形状 = `GET /api/debug` 的 DebugView，整幅替换）；此后每 500ms 轮询内存
+/// 缓冲，有增量发 `events` 帧 `{records, cursor, captured, dropped}`。
+/// 游标（request_id）由流自己维护 —— 淘汰只会移除游标之前的记录，增量无缺口，
+/// 所以断线重连（EventSource 自动）只需重新收一次 snapshot。
+/// 会话换代（实例重启 / clear，即 session.id 或 generation 变化）→ 重发
+/// `snapshot`；目标消失（停止/删除）→ `snapshot` 帧 `{env:null}`。
+async fn api_debug_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let manager = state.manager.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+    tokio::spawn(async move {
+        let encode = |event: &str, value: &serde_json::Value| {
+            Ok(Event::default().event(event).data(value.to_string()))
+        };
+        let mut cursor = 0u64;
+        let mut session_key: Option<(u64, u64)> = None;
+        let mut last_counts: Option<(u64, u64)> = None;
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let Some((env, delta)) = manager.debug_delta(cursor, 500) else {
+                if session_key.is_some() {
+                    session_key = None;
+                    cursor = 0;
+                    last_counts = None;
+                    if tx
+                        .send(encode("snapshot", &json!({ "env": Value::Null })))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                continue;
+            };
+            let key = (delta.session.id, delta.session.generation);
+            if session_key != Some(key) {
+                // 新会话/换代：snapshot 用尾部窗口（与拉取端点同形），
+                // 游标推进到窗口内最新一条；本 tick 的 delta 记录被窗口覆盖，丢弃。
+                let Some(view) = manager.captures(&env, 500).ok().flatten() else {
+                    continue; // 目标实例刚好停了：下个 tick 走 idle 分支
+                };
+                cursor = view
+                    .records
+                    .last()
+                    .and_then(|record| record.get("request_id"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(cursor);
+                session_key = Some(key);
+                last_counts = Some((view.captured, view.dropped));
+                // 与 GET /api/debug 的 DebugView 同形（snapshot 帧 = 整幅替换）。
+                let payload = json!({
+                    "env": env,
+                    "capture": serde_json::to_value(&view).unwrap_or(Value::Null),
+                });
+                if tx.send(encode("snapshot", &payload)).await.is_err() {
+                    return;
+                }
+            } else {
+                let counts = (delta.captured, delta.dropped);
+                if delta.records.is_empty() && last_counts == Some(counts) {
+                    continue;
+                }
+                if let Some(id) = delta
+                    .records
+                    .last()
+                    .and_then(|record| record.get("request_id"))
+                    .and_then(Value::as_u64)
+                {
+                    cursor = id;
+                }
+                last_counts = Some(counts);
+                let payload = json!({
+                    "records": delta.records,
+                    "cursor": cursor,
+                    "captured": counts.0,
+                    "dropped": counts.1,
+                });
+                if tx.send(encode("events", &payload)).await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 /// POST /api/har/import —— 导入 HAR 会话（body = HAR 1.2 JSON；name 走查询参数）。

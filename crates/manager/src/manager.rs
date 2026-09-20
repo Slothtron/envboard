@@ -31,8 +31,9 @@ use envboard_engine::domain::{
     plan_reconcile, seed_from, select_port,
 };
 use envboard_engine::{
-    CaptureView as EngineCaptureView, ClockPort, CoreCapabilities, EngineHandle, EngineSpec, Error,
-    ErrorCode, InstanceState, LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine,
+    CaptureDelta as EngineCaptureDelta, CaptureView as EngineCaptureView, ClockPort,
+    CoreCapabilities, EngineHandle, EngineSpec, Error, ErrorCode, InstanceState, LineWriter,
+    Listen, LogLevel, LoggerPort, ProxyEngine,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -1275,6 +1276,12 @@ impl Manager {
         Ok(self.engine.capture_view(name, limit))
     }
 
+    /// 单条抓包详情（全缓冲查找；被淘汰/不存在 → None）。
+    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Value>, Error> {
+        self.require(name)?;
+        Ok(self.engine.capture_get(name, request_id))
+    }
+
     /// 手动清空抓包会话（generation +1，会话延续）。
     pub fn clear_capture(&self, name: &str) -> Result<bool, Error> {
         self.require(name)?;
@@ -1352,6 +1359,14 @@ impl Manager {
             env: target,
             capture,
         })
+    }
+
+    /// 调试实时流的轮询原语：目标 + 游标之后的增量记录。
+    /// None = 没有调试会话（未设目标，或目标实例不在跑）。
+    pub fn debug_delta(&self, after: u64, limit: usize) -> Option<(String, EngineCaptureDelta)> {
+        let target = self.debug_target.lock().unwrap().clone()?;
+        let delta = self.engine.capture_delta(&target, after, limit)?;
+        Some((target, delta))
     }
 
     // ---- 导入会话（HAR；只读、多会话并存） ---- //

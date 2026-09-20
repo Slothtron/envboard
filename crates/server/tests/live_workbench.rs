@@ -338,6 +338,95 @@ fn proxy_get(proxy_port: u16, url: &str, auth: Option<&str>) -> Response {
     parse_response(&raw)
 }
 
+/// 最小 SSE 读者：保持一条连接，累积 `event:`/`data:` 帧（keepalive 注释行与
+/// 无 JSON data 的帧忽略）。SSE 响应体永不结束，**不能**用 api() 读到底。
+struct SseReader {
+    stream: TcpStream,
+    buf: Vec<u8>,
+    /// HTTP 头块是否已摘除（摘除后正文里不会再有 \r\n\r\n，不能每轮都靠它定位）。
+    header_done: bool,
+    frames: Vec<(String, serde_json::Value)>,
+}
+
+impl SseReader {
+    fn open(port: u16, path: &str) -> Self {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect sse");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("sse read timeout");
+        // HTTP/1.0：响应不得用 chunked 分帧（1.1 下正文是十六进制块流，
+        // 裸 SSE 解析会一帧都取不出）。1.0 让正文就是事件流本身。
+        let request = format!(
+            "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).expect("sse request");
+        SseReader {
+            stream,
+            buf: Vec::new(),
+            header_done: false,
+            frames: Vec::new(),
+        }
+    }
+
+    /// 从缓冲里取走完整帧（以空行分隔）；HTTP 头块整体跳过后才解析。
+    fn drain(&mut self) {
+        if !self.header_done {
+            let Some(header_end) = self.buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                return;
+            };
+            self.buf.drain(..header_end + 4);
+            self.header_done = true;
+        }
+        while let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
+            let frame = String::from_utf8_lossy(&self.buf[..end]).to_string();
+            self.buf.drain(..end + 2);
+            let mut event = "message".to_string();
+            let mut data = String::new();
+            for line in frame.split('\n') {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                if let Some(value) = line.strip_prefix("event:") {
+                    event = value.trim().to_string();
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data.push_str(value.trim());
+                }
+            }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+                self.frames.push((event, value));
+            }
+        }
+    }
+
+    /// 轮询到 want(frames) 成立或超时；返回是否满足。
+    fn wait_until(
+        &mut self,
+        budget: Duration,
+        want: impl Fn(&[(String, serde_json::Value)]) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + budget;
+        loop {
+            let mut chunk = [0u8; 8192];
+            match self.stream.read(&mut chunk) {
+                Ok(n) if n > 0 => self.buf.extend_from_slice(&chunk[..n]),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return want(&self.frames),
+            }
+            self.drain();
+            if want(&self.frames) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 /// "这个域名没被本环境覆盖"的判据：请求失败（502 页面或空响应）。
 ///
 /// 注意别用"响应体为空"当判据 —— 明文 HTTP 场景下代理会回一页 502 文本，
@@ -1830,6 +1919,124 @@ fn the_workbench_behaves_on_a_real_host() {
     wb_ca.kill();
     let _ = wb_ca.child.wait();
     let _ = std::fs::remove_dir_all(&state_ca);
+
+    // ---- 16 调试实时流：抓包记录自动上屏（snapshot 首帧 / events 增量 / 换代重置） ----
+    // 3c 把 beta 真停了（那是 CSRF 断言的代价）：调试目标必须在跑，先拉回来。
+    let rebeta = api(
+        web_port,
+        "POST",
+        "/api/environments/beta/start",
+        None,
+        true,
+        None,
+        None,
+    );
+    assert_eq!(rebeta.status, 200, "重启 beta 失败：{}", rebeta.body);
+    let beta_view = json(&api(
+        web_port,
+        "GET",
+        "/api/environments/beta",
+        None,
+        true,
+        None,
+        None,
+    ));
+    assert_eq!(beta_view["health"], "running", "beta 没回到 running");
+    let beta_proxy = beta_view["listen"]["port"].as_u64().unwrap_or(0) as u16;
+    let debug_on = api(
+        web_port,
+        "POST",
+        "/api/debug",
+        None,
+        true,
+        None,
+        Some(r#"{"env":"beta"}"#),
+    );
+    let mut sse = SseReader::open(web_port, "/api/debug/stream");
+    // ① 连接第一帧必须是 snapshot（整幅会话视图）。
+    let got_snapshot = sse.wait_until(Duration::from_secs(3), |frames| !frames.is_empty());
+    let snapshot_ok = got_snapshot
+        && sse.frames[0].0 == "snapshot"
+        && sse.frames[0].1["env"] == "beta"
+        && sse.frames[0].1["capture"]["session"]["id"].is_number();
+    // ② 过代理发两个请求 → events 帧自动带出记录（500ms 轮询，页面不刷新也该看到）。
+    let beta_url = format!("http://beta.test:{beta_upstream}/");
+    proxy_get(beta_proxy, &beta_url, None);
+    proxy_get(beta_proxy, &beta_url, None);
+    let got_events = sse.wait_until(Duration::from_secs(5), |frames| {
+        frames.iter().any(|(event, value)| {
+            event == "events"
+                && value["records"]
+                    .as_array()
+                    .is_some_and(|records| !records.is_empty())
+        })
+    });
+    let pushed: Vec<serde_json::Value> = sse
+        .frames
+        .iter()
+        .filter(|(event, _)| event == "events")
+        .flat_map(|(_, value)| value["records"].as_array().cloned().unwrap_or_default())
+        .collect();
+    let events_ok = got_events
+        && pushed.len() >= 2
+        && pushed
+            .iter()
+            .all(|record| record["request"]["method"] == "GET")
+        && pushed
+            .windows(2)
+            .all(|pair| pair[0]["request_id"].as_u64() <= pair[1]["request_id"].as_u64());
+    // ③ 单条详情走全缓冲查找：第一条已不是最新，也必须查得到（曾经 tail(1) 必 404）。
+    let first_id = pushed
+        .first()
+        .and_then(|record| record["request_id"].as_u64())
+        .unwrap_or(0);
+    let detail = api(
+        web_port,
+        "GET",
+        &format!("/api/environments/beta/captures/{first_id}"),
+        None,
+        true,
+        None,
+        None,
+    );
+    let detail_ok = detail.status == 200 && json(&detail)["request_id"].as_u64() == Some(first_id);
+    // ④ 换代（clear → generation+1）→ 流重发 snapshot 整幅重置。
+    api(
+        web_port,
+        "POST",
+        "/api/environments/beta/capture/clear",
+        None,
+        true,
+        None,
+        None,
+    );
+    let reset = sse.wait_until(Duration::from_secs(3), |frames| {
+        frames
+            .iter()
+            .rev()
+            .find(|(event, _)| event == "snapshot")
+            .is_some_and(|(_, value)| {
+                value["capture"]["session"]["generation"].as_u64() >= Some(2)
+                    && value["capture"]["records"]
+                        .as_array()
+                        .is_some_and(|records| records.is_empty())
+            })
+    });
+    // ⑤ 停止调试 → snapshot {env:null}，页面回到无会话。
+    api(web_port, "POST", "/api/debug/stop", None, true, None, None);
+    let idle = sse.wait_until(Duration::from_secs(3), |frames| {
+        frames.iter().rev().any(|(event, value)| {
+            event == "snapshot" && value.get("env").is_some_and(serde_json::Value::is_null)
+        })
+    });
+    checks.record(
+        "16 调试实时流：snapshot 首帧 / 抓包 events 自动推送 / 单条全缓冲查找 / clear 换代重置 / 停止回无会话",
+        debug_on.status == 200 && snapshot_ok && events_ok && detail_ok && reset && idle,
+        format!(
+            "snapshot={snapshot_ok} events={events_ok}(pushed={}) detail={detail_ok}(#{first_id}) reset={reset} idle={idle}",
+            pushed.len()
+        ),
+    );
 
     api(
         web_port,
