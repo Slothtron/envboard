@@ -69,6 +69,7 @@ fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> Engine
         insecure_hosts: spec.insecure_hosts.clone(),
         proxy_user: spec.proxy_user.clone(),
         proxy_password: spec.proxy_password.clone(),
+        upstream: spec.upstream.clone(),
         rules_text: spec.rules_text.clone(),
         max_buffered_body: None,
         log_writer: log,

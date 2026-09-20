@@ -22,5 +22,5 @@ pub use ports::{
 };
 pub use reconcile::{Action, Desired, InstanceRecord, ReconcilePlan, plan_reconcile};
 pub use upstream::{
-    PASSWORD_MAX_LEN, UPSTREAM_KNOWN_FIELDS, UPSTREAM_PATH, UpstreamProxy, USER_MAX_LEN,
+    PASSWORD_MAX_LEN, UPSTREAM_KNOWN_FIELDS, UPSTREAM_PATH, USER_MAX_LEN, UpstreamProxy,
 };

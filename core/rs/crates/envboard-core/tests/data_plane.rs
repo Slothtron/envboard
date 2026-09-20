@@ -451,3 +451,265 @@ async fn listen_is_a_stop_time_field_for_hot_update() {
     engine.stop();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --------------------------------------------------------------------------- //
+// 二级代理（chained proxy）
+// --------------------------------------------------------------------------- //
+
+use envboard_core::auth;
+use envboard_core_api::UpstreamSpec;
+
+/// 进程内迷你二级代理的行为模式。
+#[derive(Clone)]
+enum ChainedBehavior {
+    /// 直通（不要求鉴权）。
+    Open,
+    /// 要求 Basic 鉴权（缺失或错误一律 407）。
+    RequireAuth(String, String),
+    /// 一律以指定状态码拒绝。
+    Reject(u16),
+}
+
+async fn spawn_chained_proxy(behavior: ChainedBehavior) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let behavior = behavior.clone();
+            tokio::spawn(async move {
+                serve_chained(socket, behavior).await;
+            });
+        }
+    });
+    port
+}
+
+fn deny_head(status: u16) -> String {
+    if status == 407 {
+        "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"chained\"\r\nContent-Length: 0\r\n\r\n".to_string()
+    } else {
+        format!("HTTP/1.1 {status} Forbidden\r\nContent-Length: 0\r\n\r\n")
+    }
+}
+
+/// 迷你二级代理：CONNECT 隧道裸字节互抄；absolute-URI 转发到真实目标。
+async fn serve_chained(mut socket: TcpStream, behavior: ChainedBehavior) {
+    let mut reader = BufReader::new(&mut socket);
+    let Ok(Some(head)) = http::read_head(&mut reader).await else {
+        return;
+    };
+    let auth_ok = match &behavior {
+        ChainedBehavior::RequireAuth(user, password) => head
+            .header("proxy-authorization")
+            .and_then(auth::parse_basic)
+            .is_some_and(|(name, secret)| name == *user && secret == password.as_bytes()),
+        _ => true,
+    };
+    if !auth_ok {
+        drop(reader);
+        let _ = socket.write_all(deny_head(407).as_bytes()).await;
+        return;
+    }
+    let is_connect = head.method().unwrap_or("").eq_ignore_ascii_case("CONNECT");
+    if let ChainedBehavior::Reject(status) = behavior {
+        drop(reader);
+        let _ = socket.write_all(deny_head(status).as_bytes()).await;
+        return;
+    }
+    if is_connect {
+        // CONNECT：解析 authority（测试域名一律映射 127.0.0.1），建隧道后裸互抄。
+        let uri = head.uri().unwrap_or_default().to_string();
+        drop(reader);
+        let (host, port) = split_authority(&uri);
+        let Ok(mut origin) = TcpStream::connect((host.as_str(), port)).await else {
+            return;
+        };
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await;
+        let _ = tokio::io::copy_bidirectional(&mut socket, &mut origin).await;
+        return;
+    }
+    // absolute-URI：解析目标 → 转发（去掉代理鉴权头）→ 回传响应。
+    let uri = head.uri().unwrap_or_default().to_string();
+    let Some((host, port, path)) = http::parse_absolute_http_uri(&uri) else {
+        return;
+    };
+    let framing = http::request_framing(head.method().unwrap_or("GET"), &head)
+        .unwrap_or(http::Framing::Empty);
+    let Ok(body) = http::read_body(&mut reader, framing, http::MAX_BODY_BYTES).await else {
+        return;
+    };
+    drop(reader);
+    let host_ip = if host.parse::<IpAddr>().is_ok() {
+        host.clone()
+    } else {
+        "127.0.0.1".to_string()
+    };
+    let Ok(mut origin) = TcpStream::connect((host_ip.as_str(), port)).await else {
+        let _ = http::write_message(
+            &mut socket,
+            "HTTP/1.1 502 Bad Gateway",
+            &[],
+            b"chained: origin unreachable",
+            true,
+        )
+        .await;
+        return;
+    };
+    let mut headers = http::forward_request_headers(&head);
+    headers.retain(|(name, _)| name != "proxy-authorization");
+    headers.push(("connection".to_string(), "close".to_string()));
+    let first = format!("{} {path} HTTP/1.1", head.method().unwrap_or("GET"));
+    if http::write_message(&mut origin, &first, &headers, &body, true)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut origin_reader = BufReader::new(&mut origin);
+    let Ok(Some(response)) = http::read_head(&mut origin_reader).await else {
+        return;
+    };
+    let status = response.status().unwrap_or(502);
+    let response_framing =
+        http::response_framing(head.method().unwrap_or("GET"), status, &response);
+    let Ok(response_body) =
+        http::read_body(&mut origin_reader, response_framing, http::MAX_BODY_BYTES).await
+    else {
+        return;
+    };
+    drop(origin_reader);
+    let response_headers = http::forward_response_headers(&response);
+    let _ = http::write_message(
+        &mut socket,
+        &response.first,
+        &response_headers,
+        &response_body,
+        true,
+    )
+    .await;
+}
+
+fn split_authority(uri: &str) -> (String, u16) {
+    let (host, port) = uri.rsplit_once(':').unwrap_or((uri, "443"));
+    let port = port.parse().unwrap_or(443);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    (host.to_string(), port)
+}
+
+fn chained_config(proxy_port: u16, chained_port: u16, behavior_auth: bool) -> EngineConfig {
+    EngineConfig {
+        listen: envboard_core_api::proxy::Listen::new(IpAddr::V4(Ipv4Addr::LOCALHOST), proxy_port),
+        upstream: Some(UpstreamSpec {
+            host: "127.0.0.1".to_string(),
+            port: chained_port,
+            user: behavior_auth.then(|| "alice".to_string()),
+            password: behavior_auth.then(|| "s3cret".to_string()),
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn tls_traffic_tunnels_through_the_chained_proxy() {
+    let origin = spawn_echo(true).await;
+    let chained = spawn_chained_proxy(ChainedBehavior::RequireAuth(
+        "alice".to_string(),
+        "s3cret".to_string(),
+    ))
+    .await;
+    let dir = temp("chained-tls");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let mut cfg = chained_config(proxy, chained, true);
+    cfg.rules_text = Some("127.0.0.1 upstream.test".to_string());
+    cfg.insecure_hosts = vec!["upstream.test".to_string()];
+    let engine = start_engine(cfg, ca.clone()).await;
+
+    // 规则改写 resolved_addr → CONNECT 走改写后的 127.0.0.1:origin；隧道内
+    // rustls 握手 + 请求与直连完全一致（insecure 名单语义不变）。
+    let (established, status, body) =
+        connect_get(proxy, &format!("upstream.test:{origin}"), None, &ca).await;
+    assert_eq!(established, 200, "chained proxy must admit the tunnel");
+    assert_eq!(status, 200, "tunneled request must be served: {body}");
+    assert!(body.contains("path=/hello"), "{body}");
+    engine.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn chained_proxy_refusal_becomes_502_with_the_status() {
+    let origin = spawn_echo(true).await;
+    let chained = spawn_chained_proxy(ChainedBehavior::Reject(403)).await;
+    let dir = temp("chained-refuse");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let mut cfg = chained_config(proxy, chained, false);
+    cfg.rules_text = Some("127.0.0.1 upstream.test".to_string());
+    cfg.insecure_hosts = vec!["upstream.test".to_string()];
+    let engine = start_engine(cfg, ca.clone()).await;
+
+    let (_, status, body) = connect_get(proxy, &format!("upstream.test:{origin}"), None, &ca).await;
+    assert_eq!(status, 502, "{body}");
+    assert!(
+        body.contains("refused CONNECT with 403"),
+        "error must name the proxy's answer: {body}"
+    );
+    engine.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn missing_upstream_credentials_surface_the_407() {
+    let origin = spawn_echo(true).await;
+    let chained = spawn_chained_proxy(ChainedBehavior::RequireAuth(
+        "alice".to_string(),
+        "s3cret".to_string(),
+    ))
+    .await;
+    let dir = temp("chained-407");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let mut cfg = chained_config(proxy, chained, false);
+    cfg.rules_text = Some("127.0.0.1 upstream.test".to_string());
+    cfg.insecure_hosts = vec!["upstream.test".to_string()];
+    let engine = start_engine(cfg, ca.clone()).await;
+
+    let (_, status, body) = connect_get(proxy, &format!("upstream.test:{origin}"), None, &ca).await;
+    assert_eq!(status, 502, "{body}");
+    assert!(
+        body.contains("refused CONNECT with 407"),
+        "missing credentials must be actionable: {body}"
+    );
+    engine.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn plain_http_forwards_as_absolute_uri_through_the_chained_proxy() {
+    let origin = spawn_echo(false).await;
+    let chained = spawn_chained_proxy(ChainedBehavior::Open).await;
+    let dir = temp("chained-plain");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let cfg = chained_config(proxy, chained, false);
+    let engine = start_engine(cfg, ca.clone()).await;
+
+    // 目标域名不可解析（svc.test）：直连必然 502，经代理由代理侧解析转发。
+    let (status, body, _) = absolute_get(
+        proxy,
+        &format!("http://svc.test:{origin}/x"),
+        &format!("svc.test:{origin}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "chained plain http must be served: {body}");
+    assert!(body.contains("path=/x"), "{body}");
+    assert!(body.contains("host=svc.test"), "Host 头不被改写: {body}");
+    engine.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}

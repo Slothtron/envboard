@@ -1164,7 +1164,10 @@ fn proxy_put_creates_replaces_and_never_echoes_credentials() {
     assert!(view.has_auth);
     // 视图永不回显凭据
     let rendered = view.to_json().to_string();
-    assert!(!rendered.contains("s3cret") && !rendered.contains("alice"), "{rendered}");
+    assert!(
+        !rendered.contains("s3cret") && !rendered.contains("alice"),
+        "{rendered}"
+    );
 
     // 同名即整体替换（与规则导入同构）
     let updated = harness
@@ -1240,7 +1243,10 @@ fn proxy_view_lists_references_and_the_ledger_survives_a_restart() {
         .create(&serde_json::json!({"name": "gamma", "upstream": "corp"}))
         .unwrap();
     let view = harness.manager.proxy_get("corp").unwrap();
-    assert_eq!(view.references, vec!["beta".to_string(), "gamma".to_string()]);
+    assert_eq!(
+        view.references,
+        vec!["beta".to_string(), "gamma".to_string()]
+    );
 
     // 账本落盘，重启后原样活过来
     assert_eq!(harness.saved().proxies.len(), 1);
@@ -1258,7 +1264,10 @@ async fn binding_the_upstream_is_hot_and_reaches_the_engine_spec() {
             "user": "alice", "password": "s3cret"
         }))
         .unwrap();
-    let _ = harness.manager.create(&serde_json::json!({"name": "beta"})).unwrap();
+    let _ = harness
+        .manager
+        .create(&serde_json::json!({"name": "beta"}))
+        .unwrap();
     let started = harness.manager.start("beta").await.unwrap();
     assert_eq!(started.health.as_str(), "running");
     let hash_before = harness.engine().config_hash_of("beta").unwrap();
@@ -1270,7 +1279,10 @@ async fn binding_the_upstream_is_hot_and_reaches_the_engine_spec() {
         .unwrap();
     assert_eq!(updated.health.as_str(), "running");
     let hash_after = harness.engine().config_hash_of("beta").unwrap();
-    assert_ne!(hash_before, hash_after, "upstream binding must enter the spec hash");
+    assert_ne!(
+        hash_before, hash_after,
+        "upstream binding must enter the spec hash"
+    );
 
     // 改代理实体本身（host/port/凭据）→ 引用环境再次热应用
     let hash_proxy_before = harness.engine().config_hash_of("beta").unwrap();
@@ -1279,13 +1291,19 @@ async fn binding_the_upstream_is_hot_and_reaches_the_engine_spec() {
         .proxy_put(&serde_json::json!({"name": "corp", "host": "10.0.0.10", "port": 3128}))
         .unwrap();
     let hash_proxy_after = harness.engine().config_hash_of("beta").unwrap();
-    assert_ne!(hash_proxy_before, hash_proxy_after, "editing the proxy entity must hot-apply");
+    assert_ne!(
+        hash_proxy_before, hash_proxy_after,
+        "editing the proxy entity must hot-apply"
+    );
 }
 
 #[test]
 fn a_dangling_upstream_reference_in_the_state_file_refuses_to_load() {
     let harness = Harness::new();
-    let _ = harness.manager.create(&serde_json::json!({"name": "beta"})).unwrap();
+    let _ = harness
+        .manager
+        .create(&serde_json::json!({"name": "beta"}))
+        .unwrap();
     // 手工把悬空引用写进状态文件（绕过 create/update 的校验）——账本里没有 ghost
     prepare_state(&harness, |state| {
         state.environments[0]["upstream"] = serde_json::json!("ghost");
@@ -1299,8 +1317,9 @@ fn a_dangling_upstream_reference_in_the_state_file_refuses_to_load() {
         Arc::new(RealFiles),
         harness.clock.clone() as Arc<dyn envboard_core_api::ClockPort>,
         harness.logger.clone() as Arc<dyn envboard_core_api::LoggerPort>,
-        Arc::new(JsonFileStateRepo::new(harness.manager.config().state_file()))
-            as Arc<dyn StateRepo>,
+        Arc::new(JsonFileStateRepo::new(
+            harness.manager.config().state_file(),
+        )) as Arc<dyn StateRepo>,
         false,
     );
     let error = match loaded {

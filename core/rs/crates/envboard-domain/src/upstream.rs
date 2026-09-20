@@ -88,9 +88,7 @@ impl UpstreamProxy {
             if !UPSTREAM_KNOWN_FIELDS.contains(&key.as_str()) {
                 return Err(Error::invalid_config(
                     format!("{UPSTREAM_PATH}.{key}"),
-                    format!(
-                        "unknown field {key:?}: the model has only {UPSTREAM_KNOWN_FIELDS:?}"
-                    ),
+                    format!("unknown field {key:?}: the model has only {UPSTREAM_KNOWN_FIELDS:?}"),
                 ));
             }
         }
@@ -111,9 +109,9 @@ impl UpstreamProxy {
         })?;
 
         let port_field = format!("{UPSTREAM_PATH}.port");
-        let raw_port = object.get("port").ok_or_else(|| {
-            Error::invalid_config(&port_field, "port is required".to_string())
-        })?;
+        let raw_port = object
+            .get("port")
+            .ok_or_else(|| Error::invalid_config(&port_field, "port is required".to_string()))?;
         let number = raw_port.as_u64().ok_or_else(|| {
             Error::invalid_config(
                 &port_field,
@@ -260,10 +258,9 @@ mod tests {
             assert!(json.get(key).is_some(), "{key} must always be present");
         }
         // 凭据是唯一的明文落点；无凭据时是 null
-        let bare = UpstreamProxy::from_json(
-            &json!({"name": "direct", "host": "10.0.0.9", "port": 8080}),
-        )
-        .unwrap();
+        let bare =
+            UpstreamProxy::from_json(&json!({"name": "direct", "host": "10.0.0.9", "port": 8080}))
+                .unwrap();
         assert!(!bare.has_auth());
         assert_eq!(bare.to_json()["user"], serde_json::json!(null));
     }

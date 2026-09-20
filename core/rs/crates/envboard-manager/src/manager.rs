@@ -547,9 +547,12 @@ impl Manager {
             Some(existing) => *existing = json.clone(),
             None => state.proxies.push(json.clone()),
         }
-        state
-            .proxies
-            .sort_by_key(|raw| raw.get("name").and_then(Value::as_str).unwrap_or("").to_string());
+        state.proxies.sort_by_key(|raw| {
+            raw.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        });
         self.repo.save(&state)?;
         let affected = self.environments_bound_upstream_locked(&state, &name);
         drop(state);
@@ -589,9 +592,9 @@ impl Manager {
         if state.proxy_entry(name).is_none() {
             return Err(self.proxy_not_found(name));
         }
-        state.proxies.retain(|raw| {
-            raw.get("name").and_then(Value::as_str) != Some(name)
-        });
+        state
+            .proxies
+            .retain(|raw| raw.get("name").and_then(Value::as_str) != Some(name));
         self.repo.save(&state)?;
         drop(state);
         self.logger
