@@ -719,3 +719,35 @@ async fn plain_http_forwards_as_absolute_uri_through_the_chained_proxy() {
     engine.stop();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[tokio::test]
+async fn plain_http_through_authed_chained_proxy_carries_the_credentials() {
+    let origin = spawn_echo(false).await;
+    let chained = spawn_chained_proxy(ChainedBehavior::RequireAuth(
+        "alice".to_string(),
+        "s3cret".to_string(),
+    ))
+    .await;
+    let dir = temp("chained-plain-auth");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let cfg = chained_config(proxy, chained, true);
+    let engine = start_engine(cfg, ca.clone()).await;
+
+    // 明文 absolute-URI 转发与 CONNECT 是同一条链路的两半：凭据只注入
+    // CONNECT 那一半的话，二级代理的 407 会原样穿给客户端（实测即此）。
+    let (status, body, _) = absolute_get(
+        proxy,
+        &format!("http://svc.test:{origin}/x"),
+        &format!("svc.test:{origin}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "authed chained plain http must be served, not 407: {body}"
+    );
+    assert!(body.contains("path=/x"), "{body}");
+    engine.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}

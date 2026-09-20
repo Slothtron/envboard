@@ -2103,6 +2103,19 @@ fn the_workbench_behaves_on_a_real_host() {
 ",
     );
     seed_env(chained_web, "relay", "relay");
+    // relay 要求 Basic 鉴权（停机可改，先于 start）：这样 16c 验的不只是
+    // absolute-URI 链路本身，还有出向凭据注入 —— 凭据只在 CONNECT 半边
+    // 注入过，明文转发会吃二级代理 407（线上 yunshu-beta 即此病）。
+    let cred = api(
+        chained_web,
+        "PATCH",
+        "/api/environments/relay",
+        None,
+        true,
+        None,
+        Some(r#"{"proxy_user":"alice","proxy_password":"s3cret"}"#),
+    );
+    assert_eq!(cred.status, 200, "relay 凭据配置失败：{}", cred.body);
     let started_chain = api(
         chained_web,
         "POST",
@@ -2190,7 +2203,7 @@ fn the_workbench_behaves_on_a_real_host() {
     )
     .body;
     checks.record(
-        "16c 运行中热绑定上游代理：下一请求经二级代理（absolute-URI）命中改写目标",
+        "16c 运行中热绑定上游代理：下一请求经二级代理（absolute-URI）携带账本凭据命中改写目标",
         hot && through == "chained-upstream",
         format!(
             "bind_status={} health={} body={through:?}",

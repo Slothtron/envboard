@@ -214,7 +214,9 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
     的终址（规则改写过 `resolved_addr` 就连改写后的地址；含义是改写出的地址必须经
     该代理可达）。
   - 明文 http：请求行改写为 **absolute-URI** 直接发往代理（标准 HTTP 代理语义），
-    `Host` 头透传不改写。
+    `Host` 头透传不改写；有凭据时转发请求头同样携带 `Proxy-Authorization: Basic`
+    —— CONNECT 与 absolute-URI 是同一条链路的两半，凭据两半都要带，客户端自己的
+    `proxy-authorization` 不透传（鉴权头只归属相邻跳）。
   - 超时：TCP 连代理与 CONNECT 往返共用上游连接超时（10s）；内层 TLS 用上游握手
     超时（10s）。
 - **引用完整性**：删除被引用的代理 → `conflict` 并点名全部引用环境；绑定不存在的

@@ -35,6 +35,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **明确不做**：SOCKS5、`https://` 代理（与代理本身的 TLS）、PAC / 透明代理、
   按域名分流、代理链。
 
+### Fixed（明文 http 经带鉴权二级代理不吃 407）
+
+- 二级代理的出向 Basic 凭据此前只在 CONNECT（TLS 目标）那半注入：明文 http 走
+  absolute-URI 转发时凭据缺失，要求认证的上游代理对每个明文请求回 407 且被逐跳头
+  过滤掉 `Proxy-Authenticate`，客户端只见一个没有挑战头的 407（实测
+  yunshu-beta → 127.0.0.1:11088 即此病；https 不受影响，故 live 用例漏网）。
+  现在转发请求头同样携带 `Proxy-Authorization: Basic`，与 CONNECT 两半对齐；
+  客户端自己的 `proxy-authorization` 维持不透传。契约 `spec/capabilities.md`
+  「建连语义」明文条款同步钉死；data_plane 新增带认证明文链路用例（负向验证：
+  撤修复即红），live 16c 的二级代理改为要求鉴权、真正覆盖出向凭据。
+
 ### Added（UI 设计规范契约化：入库契约 + policy 门禁）
 
 - **新契约 `spec/ui.md`**：把工作台三资产（index.html / app.css / app.js）的
