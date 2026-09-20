@@ -687,13 +687,33 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         Ok(upstream) => upstream,
     };
     // 经二级代理的明文 http：请求行用 absolute-URI（标准 HTTP 代理语义），
-    // Host 头原样透传；CONNECT 隧道内保持 origin-form 不变。
+    // Host 头原样透传；CONNECT 隧道内保持 origin-form 不变。代理的 Basic
+    // 凭据只随转发请求头注入（CONNECT 路径那半由 connect_via_chained_proxy
+    // 负责）；客户端自己的 proxy-authorization 已被转发过滤丢弃，不会混淆。
     let upstream_path = if target.chained_proxy.is_some() && !origin.with_tls {
         format!("http://{authority}{path}")
     } else {
         path.clone()
     };
-    match exchange(io, upstream, &head, &method, &upstream_path, &request_body).await {
+    let chained_auth = if !origin.with_tls {
+        target
+            .chained_proxy
+            .as_ref()
+            .and_then(|proxy| proxy.auth.as_ref())
+    } else {
+        None
+    };
+    match exchange(
+        io,
+        upstream,
+        &head,
+        &method,
+        &upstream_path,
+        &request_body,
+        chained_auth,
+    )
+    .await
+    {
         Err(fault) => {
             return fail(
                 cfg,
@@ -1044,6 +1064,7 @@ enum Exchange {
 }
 
 /// 一问一答的转发内核（外层 serve_request 负责门禁与终局记录）。
+/// `chained_auth`：明文 http 经带鉴权的二级代理时注入的出向凭据。
 async fn exchange<W: AsyncRead + AsyncWrite + Unpin>(
     io: &mut BufReader<W>,
     mut upstream: Upstream,
@@ -1051,9 +1072,19 @@ async fn exchange<W: AsyncRead + AsyncWrite + Unpin>(
     method: &str,
     path: &str,
     request_body: &[u8],
+    chained_auth: Option<&ProxyAuth>,
 ) -> Result<Exchange, String> {
     let first = format!("{method} {path} HTTP/1.1");
     let mut headers = http::forward_request_headers(head);
+    if let Some(auth) = chained_auth {
+        headers.push((
+            "proxy-authorization".to_string(),
+            format!(
+                "Basic {}",
+                auth::basic_credentials(&auth.user, &auth.password)
+            ),
+        ));
+    }
     if !head.is_upgrade_request() {
         headers.push(("connection".to_string(), "close".to_string()));
     }
