@@ -4,6 +4,21 @@ All notable changes to `slothtron-envboard` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added（UI 设计规范契约化：入库契约 + policy 门禁）
+
+- **新契约 `core/spec/ui.md`**：把工作台三资产（index.html / app.css / app.js）的
+  UI 纪律固化为入库契约，分机检档（UI-1…UI-8，违反即 `ci/verify.sh` 红）与评审档
+  （等宽字体 / 异常三通道 / 语义色专用 / 破坏性操作模态二次确认 / `--muted-2`
+  表面限制 / WCAG AA 底线等门禁不可达项）。令牌值唯一权威仍是 app.css 第 ① 区。
+- **新 policy 门禁 `envboard-policy-tests/tests/ui_style.rs`**：机检色值出没域
+  （只许在 `:root` / `[data-theme]` 令牌区）、字号 / 圆角 / 阴影 / 间距的令牌化
+  （间距例外登记 1px / 2px 发丝档）、纯黑禁令、令牌存在性、禁原生弹窗与内联
+  script / 内联事件属性，以及契约锚点 `UI-n` 与门禁规则的双向对账（缺锚点或
+  多规则号都判红，契约与门禁必须同提交同步）。三个资产现状已全量合规，门禁
+  零豁免上线；README「运维」节与契约互指。
+
 ## [0.2.0] - 2026-09-17
 
 ### Fixed + Changed（第三轮走查后：配置页签回显、动作行收敛、设置页结构件补齐 + 按设计规范全量 UI 走查）

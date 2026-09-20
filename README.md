@@ -319,7 +319,8 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
   别人的进程时，对应环境以 `port_conflict` 如实呈现。
 
 工作台界面的视觉令牌、CSP 约束与交互纪律以
-`core/rs/crates/envboard-web/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）。
+`core/rs/crates/envboard-web/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）；
+改 UI 前先读 `core/spec/ui.md`（机检条目 UI-1…UI-8 由 policy 门禁执行，违反即 `verify` 红）。
 
 ## 健康与错误码
 
