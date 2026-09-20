@@ -24,4 +24,6 @@ mod store;
 pub use control::{ControlEvent, KNOWN_CONTROL_KINDS};
 pub use data::{DataEvent, KNOWN_DATA_KINDS};
 pub use envelope::Envelope;
-pub use store::{FORMAT_VERSION, ParseError, ParsedEvent, append_line, header_line, parse_log};
+pub use store::{
+    FORMAT_VERSION, ParseError, ParsedEvent, append_line, header_line, parse_log, parse_window,
+};

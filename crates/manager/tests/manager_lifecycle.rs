@@ -1143,3 +1143,68 @@ async fn starting_an_instance_writes_the_run_marker_line() {
         "{after}"
     );
 }
+
+// --------------------------------------------------------------------------- //
+// capture 热应用 与 轨迹窗口读（回归：调试页恒空的两个根因）
+// --------------------------------------------------------------------------- //
+
+/// `capture` 是热字段（`spec/capabilities.md`「热/停机字段」），调试页的
+/// 「开启 / 切换」驱动的就是它。曾经它不在热更触发集合里：update 只落盘，
+/// 引擎手里的快照永远 capture=false，抓包计数恒 0，而页面忠实地把 0 渲染
+/// 出来 —— 坏的是数据源，不是渲染。
+#[tokio::test]
+async fn toggling_capture_on_a_running_environment_hot_applies() {
+    let harness = Harness::new();
+    create_beta(&harness);
+    harness.manager.start("beta").await.unwrap();
+    assert_eq!(harness.engine().capture_state("beta"), Some((false, 0)));
+
+    harness
+        .manager
+        .update("beta", &serde_json::json!({"capture": true}))
+        .unwrap();
+    assert_eq!(
+        harness.engine().capture_state("beta"),
+        Some((true, 1)),
+        "capture 变更必须触发一次同步热应用"
+    );
+
+    // 关掉同样是热的：开关不清记录，但引擎必须收到新快照。
+    harness
+        .manager
+        .update("beta", &serde_json::json!({"capture": false}))
+        .unwrap();
+    assert_eq!(harness.engine().capture_state("beta"), Some((false, 2)));
+}
+
+/// 轨迹文件是窗口化日志：无头行、`seq` 每个实例会话从 1 重启。账本读者
+/// （`parse_log`）对它整份拒绝 —— GET trajectory 恒 BadHeader、SSE 流在第一次
+/// 增量处死掉（SeqGap）。窗口读者必须照常读出。
+#[tokio::test]
+async fn trajectory_window_read_survives_seq_restart_and_mid_file_cursor() {
+    let harness = Harness::new();
+    create_beta(&harness);
+    let path = harness
+        .manager
+        .config()
+        .trajectory_file("beta")
+        .expect("测试里日志目录默认开启");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let line = |seq: u64, request_id: u64| {
+        format!(
+            r#"{{"seq":{seq},"time":{seq},"type":"request/start","data":{{"request_id":{request_id},"method":"GET","authority":"svc.a:80","path":"/","sni":null,"insecure":false}}}}"#
+        )
+    };
+    let first = line(1, 1);
+    let second = line(2, 2);
+    let third = line(1, 3); // 实例重启后 seq 从头续写同一文件
+    std::fs::write(&path, format!("{first}\n{second}\n{third}\n")).unwrap();
+
+    let events = harness.manager.trajectory("beta", 100).unwrap();
+    assert_eq!(events.len(), 3, "跨会话拼接必须整窗可读");
+
+    // 从文件中段增量读（SSE 游标是字节偏移）：切片首个 seq 不是 1，窗口照样可读。
+    let offset = first.len() as u64 + 1;
+    let (_, slice) = harness.manager.trajectory_since("beta", offset).unwrap();
+    assert_eq!(slice.len(), 2, "字节偏移起点的增量窗口");
+}

@@ -1,12 +1,14 @@
-//! JSONL 存取：首行 `{"version":1}`，随后每行一个信封。
+//! JSONL 存取，两档契约（见 spec/events.md「存储格式（两档）」）：
 //!
-//! 读侧契约（fail-closed）：
-//!
-//! * 首行不是合法 header 或版本高于本实现 → 整份拒绝；
-//! * 未知事件类型：未标 `ignorable: true` → 整份拒绝；标了 → 跳过该行；
-//! * `seq` 不连续 → 拒绝（丢失的事件必须可见，不能当没发生）；
-//! * 最后一行不是合法 JSON（进程崩溃撕裂的残片）→ 容忍丢弃；
-//!   中间的坏行 → 拒绝。
+//! * [`parse_log`] —— 控制面账本：首行 `{"version":1}`，随后每行一个信封，
+//!   seq 连续。读侧契约（fail-closed）：
+//!   - 首行不是合法 header 或版本高于本实现 → 整份拒绝；
+//!   - 未知事件类型：未标 `ignorable: true` → 整份拒绝；标了 → 跳过该行；
+//!   - `seq` 不连续 → 拒绝（丢失的事件必须可见）；
+//!   - 最后一行不是合法 JSON（进程崩溃撕裂的残片）→ 容忍丢弃；
+//!     中间的坏行 → 拒绝。
+//! * [`parse_window`] —— 数据面轨迹窗口：无头、seq 按实例会话重启、
+//!   撕裂行逐行跳过；未知类型仍 fail-closed。
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -136,6 +138,59 @@ pub fn parse_log<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>,
             envelope,
             line: line_no,
         });
+    }
+    Ok(events)
+}
+
+/// 解析数据面轨迹的**窗口**（契约见 spec/events.md「数据面是窗口化日志」）。
+///
+/// 与 [`parse_log`]（控制面账本：首行版本、seq 连续、坏行整份拒绝）不同，
+/// 轨迹文件从写下第一行起就是：无头行、**seq 每个实例会话从 1 重启**、多会话
+/// 首尾相接、SSE 游标是字节偏移。账本式读者对这样的文件**必然**整份拒绝
+/// （缺头 → BadHeader；增量切片 → SeqGap；重启拼接 → SeqGap）—— 这不是
+/// 文件的损坏，是两种日志的契约本就不同。窗口解析的规则：
+///
+/// * 首行若是 `{"version":N}` 头 → 跳过（容忍未来写方补头）；
+/// * 非法 JSON 行 → 跳过（撕裂残片不该让整份轨迹不可读；数据面的丢失由
+///   有界总线的 `trajectory_drops` 计数负责可见）；
+/// * 未知类型：未标 `ignorable` → **拒绝**（schema 漂移必须响亮，与账本同）；
+///   标了 → 跳过；
+/// * `seq` 不校验 —— 它是会话内的展示字段，连续性由字节偏移承担。
+pub fn parse_window<T: DeserializeOwned>(text: &str) -> Result<Vec<ParsedEvent<T>>, ParseError> {
+    let mut events = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line_no = index + 1;
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        if line_no == 1 && value.get("version").is_some() && value.get("seq").is_none() {
+            continue;
+        }
+        let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let ignorable = value
+            .get("ignorable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let known = known_kind::<T>(kind);
+        if !known && !ignorable {
+            return Err(ParseError::UnknownType {
+                line: line_no,
+                kind: kind.to_string(),
+            });
+        }
+        if !known {
+            continue;
+        }
+        // 已知类型但字段对不上（旧读者遇到新载荷）：跳过这一行，窗口继续可读。
+        if let Ok(envelope) = serde_json::from_value::<Envelope<T>>(value) {
+            events.push(ParsedEvent {
+                envelope,
+                line: line_no,
+            });
+        }
     }
     Ok(events)
 }
@@ -292,5 +347,48 @@ mod tests {
         .unwrap();
         let events = parse_log::<DataEvent>(&buffer).unwrap();
         assert_eq!(events[0].envelope.event.kind(), "request/start");
+    }
+
+    // ---- 窗口解析（数据面轨迹的真实形状） ---- //
+
+    fn data_start_line(seq: u64, request_id: u64) -> String {
+        format!(
+            r#"{{"seq":{seq},"time":{seq},"type":"request/start","data":{{"request_id":{request_id},"method":"GET","authority":"svc.a:80","path":"/","sni":null,"insecure":false}}}}"#
+        )
+    }
+
+    #[test]
+    fn window_accepts_headerless_seq_restart_and_torn_lines() {
+        // 无头行 + 撕裂残片 + 第二个实例会话 seq 从 1 重启 —— 三者都是轨迹文件的
+        // 常态（写方从不写头；seq 按会话编号）。账本读者对这份文件整份拒绝，
+        // 窗口读者必须照常读出。
+        let text = format!(
+            "{}\n{}\nnot-json\n{}\n",
+            data_start_line(1, 1),
+            data_start_line(2, 2),
+            data_start_line(1, 3),
+        );
+        let events = parse_window::<DataEvent>(&text).unwrap();
+        assert_eq!(events.len(), 3, "撕裂行跳过，seq 不校验");
+        assert_eq!(events[2].envelope.seq, 1, "会话重启的 seq 原样保留");
+    }
+
+    #[test]
+    fn window_skips_a_leading_version_header_if_present() {
+        // 容忍未来写方补头：头行不是事件，也不算坏行。
+        let text = format!("{}\n{}\n", header_line(), data_start_line(1, 1));
+        let events = parse_window::<DataEvent>(&text).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn window_still_rejects_unknown_types_but_skips_ignorable() {
+        let text = r#"{"seq":1,"time":1,"type":"brand/new","data":{}}"#;
+        assert!(matches!(
+            parse_window::<DataEvent>(text),
+            Err(ParseError::UnknownType { .. })
+        ));
+        let text = r#"{"seq":1,"time":1,"ignorable":true,"type":"brand/new","data":{}}"#;
+        assert!(parse_window::<DataEvent>(text).unwrap().is_empty());
     }
 }

@@ -260,17 +260,16 @@ impl Manager {
         if text.is_empty() {
             return Ok((new_offset, Vec::new()));
         }
-        let events = envboard_events::parse_log::<envboard_events::DataEvent>(&format!(
-            "{}\n{}",
-            envboard_events::header_line(),
-            text
-        ))
-        .map_err(|error| {
-            Error::new(
-                ErrorCode::InternalError,
-                format!("trajectory log is unreadable: {error}"),
-            )
-        })?;
+        // 轨迹是窗口化日志（无头、seq 每实例会话重启）：账本式 parse_log 对中段
+        // 切片必报 SeqGap，合成头也救不了 —— 用窗口解析。
+        let events = envboard_events::parse_window::<envboard_events::DataEvent>(&text).map_err(
+            |error| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("trajectory log is unreadable: {error}"),
+                )
+            },
+        )?;
         let values = events
             .into_iter()
             .map(|entry| serde_json::to_value(&entry.envelope).unwrap_or(Value::Null))
@@ -298,13 +297,16 @@ impl Manager {
             Ok(text) => text,
             Err(_) => return Ok(Vec::new()), // 文件不存在 = 还没有轨迹
         };
-        let events =
-            envboard_events::parse_log::<envboard_events::DataEvent>(&text).map_err(|error| {
+        // 窗口解析（同上）：read_tail 的起点大概率在一行中间，撕裂首行被逐行跳过，
+        // 而不是像账本读者那样整份拒绝。
+        let events = envboard_events::parse_window::<envboard_events::DataEvent>(&text).map_err(
+            |error| {
                 Error::new(
                     ErrorCode::InternalError,
                     format!("trajectory log is unreadable: {error}"),
                 )
-            })?;
+            },
+        )?;
         let selected: Vec<Value> = events
             .into_iter()
             .map(|entry| serde_json::to_value(&entry.envelope).unwrap_or(Value::Null))
@@ -793,7 +795,11 @@ impl Manager {
         let insecure_changed = merged.insecure_hosts() != environment.insecure_hosts();
         let credentials_changed = merged.proxy_user() != environment.proxy_user()
             || merged.proxy_password() != environment.proxy_password();
-        let hot_changed = binding_changed || insecure_changed;
+        // capture 也是热字段：调试页「开启 / 切换」驱动的就是它。曾经它不在触发集合里，
+        // 开关只落盘不热应用 —— 引擎手里的快照永远 capture=false，抓包计数恒 0，
+        // 而页面忠实地把 0 渲染出来（坏的是数据源，不是渲染）。
+        let capture_changed = merged.capture() != environment.capture();
+        let hot_changed = binding_changed || insecure_changed || capture_changed;
         if (identity_changed || credentials_changed) && self.is_live(name) {
             return Err(Error::new(
                 ErrorCode::Conflict,
@@ -861,6 +867,9 @@ impl Manager {
         }
         if credentials_changed {
             changed.push("proxy_user/proxy_password");
+        }
+        if capture_changed {
+            changed.push("capture");
         }
         if merged.description() != environment.description() {
             changed.push("description");

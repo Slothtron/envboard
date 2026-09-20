@@ -6,6 +6,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.0] - 2026-09-18
 
+### Fixed（调试页恒空的两个根因：capture 不热应用 + 轨迹窗口被账本读者整份拒绝）
+
+- **`capture` 真正热应用**：`capture` 是契约声明的热字段（调试页「开启 / 切换」
+  驱动的就是它），但更新路径的热更触发集合漏了它 —— 开关只落盘，引擎手里的
+  快照永远 `capture=false`，抓包计数恒 0，页面忠实地渲染这个 0。现在
+  `capture` 变更与 `insecure_hosts` 同路：一次同步热应用，并计入审计事件的
+  变更字段清单。
+- **轨迹按窗口契约读**：轨迹文件从写下第一行起就是无头行、`seq` 每个实例会话
+  从 1 重启的**窗口化日志**，而两个读者按控制面账本契约（`parse_log`：要求
+  版本头 + seq 连续）读它 —— `GET .../trajectory` 恒 `BadHeader`，SSE 基线被
+  吞错置空、流在第一次增量处死掉（`SeqGap`）。新增 `parse_window`（无头、
+  seq 不校验、撕裂行逐行跳过、未知类型仍 fail-closed），两个读者改用它；
+  两档契约成文于 `spec/events.md`「存储格式（两档）」。
+
 ### Changed（v4：独立工具形态 + DSH 式事件轨迹）
 
 - **移除插件抽象**：`Plugin` trait、能力注册表（`CAPABILITIES`）、装配期拓扑

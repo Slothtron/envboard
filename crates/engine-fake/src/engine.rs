@@ -22,6 +22,11 @@ struct FakeInstance {
     report: EngineReport,
     /// 持有监听即占住端口（与真引擎"绑定即真相"同构）；绑定失败后为 None。
     _listener: Option<TcpListener>,
+    /// 观测面：最近一次 start/apply 的 spec 携带的 capture 值与 apply 次数。
+    /// capture 不进 config_hash（运行期旋钮），热应用是否发生只能从规格本身断言
+    /// —— 曾经 update(capture) 根本不触发 apply，管理器一切"看起来成功"。
+    last_capture: bool,
+    apply_count: u64,
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +50,13 @@ impl FakeEngine {
             log_drops: 0,
             trajectory_drops: 0,
         }
+    }
+
+    /// 观测：某环境当前生效 spec 的 capture 与累计成功 apply 次数。
+    /// 环境未启动 → None。
+    pub fn capture_state(&self, env: &str) -> Option<(bool, u64)> {
+        let guard = self.entries.lock().unwrap();
+        guard.get(env).map(|i| (i.last_capture, i.apply_count))
     }
 
     /// 故障注入：把某环境的报告改写成任意状态（live 故障路径的替身旋钮）。
@@ -150,6 +162,8 @@ impl ProxyEngine for FakeEngine {
             FakeInstance {
                 report,
                 _listener: listener,
+                last_capture: spec.capture,
+                apply_count: 0,
             },
         );
         Ok(EngineHandle {
@@ -175,6 +189,8 @@ impl ProxyEngine for FakeEngine {
         let hash = sha256::hex(spec.hashable_json().as_bytes());
         instance.report.config_hash = hash.clone();
         instance.report.epoch += 1;
+        instance.last_capture = spec.capture;
+        instance.apply_count += 1;
         Ok(hash)
     }
 
