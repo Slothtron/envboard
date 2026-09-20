@@ -12,9 +12,9 @@
 
 | code | HTTP | 可重试 | 含义 | 触发场景（示例） |
 |---|---|---|---|---|
-| `invalid_config` | 400 | ✗ | 配置非法，**编译即失败**（v3：含热更被拒 —— 旧快照继续服务并留标记） | 环境名不合规；`listen.port` 为 0 或越界；`listen.host` 不是 IP 字面量；`rules` 名含 `/` 或 `..`；未知字段（含 v1 遗留的 `dns_servers` / `hosts` / `color` / `domain_suffix`）；`proxy_user`/`proxy_password` 不成对；插件链装配校验失败（未注册 id / 缺依赖 / 依赖环）；`max_buffered_body` 为 0 |
-| `not_found` | 404 | ✗ | 目标不存在 | `GET /api/environments/nope`；引用了不存在的规则名 |
-| `conflict` | 409 | ✗ | 状态冲突 | 环境重名；删除被环境绑定的规则文件；改名撞已有环境 |
+| `invalid_config` | 400 | ✗ | 配置非法，**编译即失败**（v3：含热更被拒 —— 旧快照继续服务并留标记） | 环境名不合规；`listen.port` 为 0 或越界；`listen.host` 不是 IP 字面量；`rules` 名含 `/` 或 `..`；未知字段（含 v1 遗留的 `dns_servers` / `hosts` / `color` / `domain_suffix`）；`proxy_user`/`proxy_password` 不成对；环境 `upstream` 名不合规或引用了账本里不存在的代理；代理实体字段非法（名字白名单 / host / 端口 / 凭据不成对）；插件链装配校验失败（未注册 id / 缺依赖 / 依赖环）；`max_buffered_body` 为 0 |
+| `not_found` | 404 | ✗ | 目标不存在 | `GET /api/environments/nope`；引用了不存在的规则名；`GET/DELETE /api/proxies/不存在` |
+| `conflict` | 409 | ✗ | 状态冲突 | 环境重名；删除被环境绑定的规则文件；删除被环境引用的上游代理（错误点名全部引用方）；改名撞已有环境 |
 | `port_conflict` | 409 | △ | 端口被别的程序占用 | **已持久化**的端口在新环境里被占：**禁止静默重分配**，环境标记为 `port_conflict`，由工作台提示"释放该端口或点『重新分配端口』"；重分配是**显式动作**，并提示同步更新客户端配置 |
 | `port_range_exhausted` | 409 | ✓ | 端口区间内没有可用端口 | 连续 N 次（默认 32）候选都不可用 → 响亮失败，错误信息给出区间、尝试次数，并提示可用 `--port` 显式指定 |
 | `store_failure` | 500 | ✓ | 状态文件读写失败 | 权限不足、JSON 损坏、磁盘满 |

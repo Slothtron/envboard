@@ -1843,6 +1843,188 @@ fn the_workbench_behaves_on_a_real_host() {
     tls_upstream.kill().expect("kill the self-signed upstream");
     let _ = tls_upstream.wait();
 
+    // ---- 16 上游代理（chained proxy）：REST 面 + 明文经二级代理 + 引用完整性 ----
+    // 二级代理就用 envboard 自己：第二个工作台实例（独立 state dir）+ 一个覆盖
+    // relay.test 的环境。alpha 绑定它为上游后，明文请求应按 absolute-URI 转发、
+    // 由二级代理按自己的规则改写到 chained-upstream —— 一石二鸟：既验出向链路，
+    // 又复用了"envboard 本身就是标准 HTTP 代理"这一事实，不需要宿主上另有代理。
+    // 组 9 的注入重启可能给 alpha 换过端口（端口被探针占用 → 自动重试一次）：
+    // 这里**重新取**视图端口，别信组 8 捕获的旧值（实测就栽在这）。
+    let alpha_view16 = json(&api(
+        web_port,
+        "GET",
+        "/api/environments/alpha",
+        None,
+        true,
+        None,
+        None,
+    ));
+    let alpha_proxy = alpha_view16["listen"]["port"].as_u64().unwrap_or(0) as u16;
+    let chained_web = free_port();
+    let chained_upstream = start_upstream("chained-upstream");
+    let state_chain = work.join("state-chain");
+    std::fs::create_dir_all(&state_chain).expect("chained state dir");
+    let mut chained = Workbench {
+        child: spawn_workbench(
+            &state_chain,
+            &[
+                "--log-dir",
+                logs.to_str().unwrap(),
+                "--listen",
+                &format!("127.0.0.1:{chained_web}"),
+            ],
+        ),
+    };
+    assert!(
+        wait_port(chained_web, Duration::from_secs(30)),
+        "二级代理工作台没起来（端口 {chained_web}）"
+    );
+    seed_rule(
+        chained_web,
+        "relay",
+        "127.0.0.1 relay.test
+",
+    );
+    seed_env(chained_web, "relay", "relay");
+    let started_chain = api(
+        chained_web,
+        "POST",
+        "/api/environments/relay/start",
+        None,
+        true,
+        None,
+        None,
+    );
+    assert_eq!(
+        started_chain.status, 200,
+        "relay 环境启动失败：{}",
+        started_chain.body
+    );
+    let relay_view = json(&api(
+        chained_web,
+        "GET",
+        "/api/environments/relay",
+        None,
+        true,
+        None,
+        None,
+    ));
+    let chained_proxy_port = relay_view["listen"]["port"].as_u64().unwrap_or(0) as u16;
+
+    // 16a 账本面：创建 201、形状正确、凭据只写不读（响应体不得出现凭据值）。
+    let created = api(
+        web_port,
+        "POST",
+        "/api/proxies",
+        None,
+        true,
+        None,
+        Some(
+            &serde_json::json!({
+                "name": "chain", "host": "127.0.0.1", "port": chained_proxy_port,
+                "user": "alice", "password": "s3cret"
+            })
+            .to_string(),
+        ),
+    );
+    let created_body = json(&created);
+    checks.record(
+        "16a 代理账本：创建 201、形状正确、凭据永不回显",
+        created.status == 201
+            && created_body["name"] == "chain"
+            && created_body["port"] == chained_proxy_port
+            && created_body["has_auth"] == true
+            && !created.body.contains("s3cret")
+            && !created.body.contains("alice"),
+        format!("status={} body={}", created.status, created.body),
+    );
+
+    // 16b 绑定不存在的名字：invalid_config 且字段路径点名 environment.upstream。
+    let bad_bind = api(
+        web_port,
+        "PATCH",
+        "/api/environments/alpha",
+        None,
+        true,
+        None,
+        Some(r#"{"upstream":"ghost"}"#),
+    );
+    checks.record(
+        "16b 绑定不存在的上游代理：invalid_config 且字段路径点名",
+        bad_bind.status == 400 && json(&bad_bind)["error"]["field"] == "environment.upstream",
+        format!("status={} body={}", bad_bind.status, bad_bind.body),
+    );
+
+    // 16c alpha 在跑时热绑定 → 下一个明文请求经二级代理命中其改写目标。
+    let bind = api(
+        web_port,
+        "PATCH",
+        "/api/environments/alpha",
+        None,
+        true,
+        None,
+        Some(r#"{"upstream":"chain"}"#),
+    );
+    let hot = bind.status == 200 && json(&bind)["health"] == "running";
+    let through = proxy_get(
+        alpha_proxy,
+        &format!("http://relay.test:{chained_upstream}/"),
+        None,
+    )
+    .body;
+    checks.record(
+        "16c 运行中热绑定上游代理：下一请求经二级代理（absolute-URI）命中改写目标",
+        hot && through == "chained-upstream",
+        format!(
+            "bind_status={} health={} body={through:?}",
+            bind.status,
+            json(&bind)["health"]
+        ),
+    );
+
+    // 16d 引用完整性：删除被引用代理 409 点名；解绑热生效回直连后可删。
+    let blocked = api(
+        web_port,
+        "DELETE",
+        "/api/proxies/chain",
+        None,
+        true,
+        None,
+        None,
+    );
+    let blocked_ok = blocked.status == 409 && blocked.body.contains("alpha");
+    api(
+        web_port,
+        "PATCH",
+        "/api/environments/alpha",
+        None,
+        true,
+        None,
+        Some(r#"{"upstream":null}"#),
+    );
+    let direct_again = proxy_get(alpha_proxy, &alpha_url, None).body;
+    let removed = api(
+        web_port,
+        "DELETE",
+        "/api/proxies/chain",
+        None,
+        true,
+        None,
+        None,
+    );
+    checks.record(
+        "16d 引用完整性：删除被拒点名引用方；解绑后恢复直连并可删",
+        blocked_ok && direct_again == "alpha-upstream" && removed.status == 200,
+        format!(
+            "blocked={} body={} direct={direct_again:?} removed={}",
+            blocked.status, blocked.body, removed.status
+        ),
+    );
+
+    chained.kill();
+    let _ = chained.child.wait();
+    let _ = std::fs::remove_dir_all(&state_chain);
+
     workbench.kill();
     let _ = std::fs::remove_dir_all(&work);
 

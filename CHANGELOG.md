@@ -4,6 +4,37 @@ All notable changes to `slothtron-envboard` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added（上游代理 / 二级代理：一等实体 + 按环境热绑定）
+
+- **代理账本**：`state.json` 增 `proxies[]`（`name/host/port/user/password`），manager 为
+  唯一真相。凭据与环境 `proxy_user`/`proxy_password` 同规（同生共死、不含 `:`/空白、
+  ≤64/≤128 字符），明文只落 0600 状态文件，API / 视图 / 日志**永不回显**，只暴露
+  `has_auth` 布尔；同名保存即整体替换并热应用引用环境。
+- **环境第 8 字段 `upstream`**：按名引用代理账本（`null` = 直连），与 `rules` 绑定同构、
+  **热字段**（运行中 PATCH 即生效，上游连接每请求新建无残留）；绑定不存在的名字
+  `invalid_config`，删除被引用的代理 `conflict` 并点名全部引用方，状态文件手改出的
+  悬空引用加载即拒启 —— 三条同证「禁止静默降级」。
+- **引擎链式建连**：兑现 `ConnectTarget.chained_proxy` 扩展位（基础层从配置播种、
+  插件链保留修订权；`ProxySpec` 增出向 Basic 鉴权位）。TLS 目标：TCP 连代理 →
+  `CONNECT`（带 `Proxy-Authorization`）→ 非 2xx 返 502 带代理状态码 → 隧道内按既有
+  `TlsPolicy` 做 rustls 握手（**内层 TLS 与直连一致，`insecure_hosts` 语义不变**；
+  CONNECT 目标 = 规则改写后的终址）。明文 http 经代理按 absolute-URI 转发（Host 头
+  透传）。`config_hash` 覆盖代理 host/port/user 与密码摘要。`auth.rs` 补
+  `base64_encode`（RFC 4648 向量互验），不引新依赖。
+- **API 面**：`GET/POST /api/proxies`、`GET/DELETE /api/proxies/:name`（清单带
+  `references[]` 供删除确认）。
+- **工作台第五视图「上游代理」**：代理清单（地址 / 鉴权位 / 引用环境）+ 保存表单 +
+  破坏性确认删除；环境配置表单与创建弹窗增「上游代理」下拉（热字段不进停机锁）；
+  概览增「上游代理」行（直连显式写出）。
+- **契约同步**：环境模型 7→8 字段（capabilities.md「上游代理（chained proxy）」新节 +
+  热/停机矩阵补行）；errors.md 补 invalid_config / conflict 触发场景；契约 fixture
+  66 → 79（新增 `proxy.validate` 能力与环境/合并 upstream 用例）；README 能力表、
+  PATCH 示例、热矩阵与 HTTP 端点表同步。
+- **明确不做**：SOCKS5、`https://` 代理（与代理本身的 TLS）、PAC / 透明代理、
+  按域名分流、代理链。
+
 ## [0.2.0] - 2026-09-17
 
 ### Fixed + Changed（第三轮走查后：配置页签回显、动作行收敛、设置页结构件补齐 + 按设计规范全量 UI 走查）
