@@ -471,25 +471,41 @@
           <span class="badge settings-chip">抓包会话是易失的：切换环境/停止/重启即丢弃，导出才是持久化</span>
         </div>
         <div class="form-body">
-          <div class="log-filters" role="group" aria-label="调试会话">
-            <select id="debug-env" class="mono" aria-label="调试目标环境"></select>
+          <div class="debug-toolbar" role="group" aria-label="调试会话">
+            <select id="debug-env" aria-label="调试目标环境"></select>
             <div class="log-actions">
-              <button type="button" class="btn sm" id="debug-start">开启 / 切换</button>
-              <button type="button" class="btn sm" id="debug-stop">停止并清空</button>
-              <button type="button" class="btn sm" id="debug-clear">清空本会话</button>
-              <button type="button" class="btn sm" id="debug-export">导出 HAR</button>
+              <button type="button" class="btn sm primary" id="debug-start">
+                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-play"></use></svg><span>开启 / 切换</span>
+              </button>
+              <button type="button" class="btn sm" id="debug-clear">
+                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-eraser"></use></svg><span>清空本会话</span>
+              </button>
+              <button type="button" class="btn sm danger" id="debug-stop">
+                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-stop"></use></svg><span>停止并清空</span>
+              </button>
+              <button type="button" class="btn sm" id="debug-export">
+                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"></use></svg><span>导出 HAR</span>
+              </button>
             </div>
           </div>
-          <span class="log-count mono" id="debug-count">—</span>
+          <div class="debug-session">
+            <span class="badge stopped" id="debug-state"><span class="dot"></span><span>无会话</span></span>
+            <span class="log-count mono" id="debug-count"></span>
+          </div>
           <div class="log-view mono" id="debug-records" role="log" aria-live="off" tabindex="0"></div>
 
-          <div class="form-head"><span class="form-title">导入会话（HAR）</span></div>
-          <div class="log-filters" role="group" aria-label="导入会话">
-            <input type="file" id="har-file" accept=".har,application/json" aria-label="选择 HAR 文件">
-            <span class="log-count mono" id="har-count">—</span>
+          <div class="form-head">
+            <span class="form-title">导入会话（HAR）</span>
+            <span class="log-count mono" id="har-count"></span>
           </div>
-          <div class="log-view mono" id="har-list" role="list" tabindex="0"></div>
-          <div class="log-view mono" id="har-records" role="log" tabindex="0" hidden></div>
+          <div class="log-filters" role="group" aria-label="导入会话">
+            <button type="button" class="btn sm" id="har-import">
+              <svg class="ic ic-sm" aria-hidden="true"><use href="#i-plus"></use></svg><span>导入 HAR 文件</span>
+            </button>
+            <!-- 原生文件控件不属于令牌体系：藏起来，入口由上面的样式化按钮承担。 -->
+            <input type="file" id="har-file" accept=".har,application/json" class="is-hidden" tabindex="-1" aria-label="选择 HAR 文件">
+          </div>
+          <div class="har-list" id="har-list" role="list"></div>
         </div>
       </div>
     </section>

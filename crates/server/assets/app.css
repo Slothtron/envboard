@@ -867,7 +867,9 @@ body {
   white-space: pre-wrap;
   word-break: break-all;
 }
-.traj-row:hover { background: var(--surface-2, rgba(0, 0, 0, 0.03)); }
+/* --panel-hover 而不是自造令牌：曾经写成 var(--surface-2, rgba(0,0,0,.03))，
+   令牌不存在、纯黑 fallback 悄悄生效 —— 违反规范「禁纯黑」「组件层只走令牌」。 */
+.traj-row:hover { background: var(--panel-hover); }
 
 .log-view {
   height: 380px; min-height: 0;
@@ -878,6 +880,49 @@ body {
   color: var(--text-2);
 }
 .log-view:focus { outline: none; }
+
+/* ---- 调试页（抓包会话双轨） ---- */
+/* 视图主体容器：活动/调试视图一直在裸用这个类却从未定义过，子元素间距全靠各自 margin。
+   调试页的纵向排版依赖它，补上（4px 基数，规范 4.1 节）。 */
+.form-body { display: flex; flex-direction: column; gap: var(--space-3); }
+/* 工具条档控件（规范 7.3 节裁决：工具条 32 / 表单 36）。调试目标下拉框不在 .form 里，
+   拿不到表单样式，浏览器默认外观直接裸奔 —— 这里按规范 6.3 给工具条档形态。 */
+.debug-toolbar { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.debug-toolbar .log-actions { margin-left: auto; }
+.debug-toolbar select {
+  height: var(--input-h);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+}
+.debug-toolbar select:focus {
+  outline: none;
+  background: var(--panel);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+/* 会话状态行：徽章（规范 6.2 节：圆点 + 文本，running 带脉冲）+ 等宽技术值 */
+.debug-session { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+/* 导入会话列表：行内展开条目，删除按钮靠右 */
+.har-list { display: flex; flex-direction: column; gap: var(--space-1); }
+.har-row { display: flex; align-items: center; gap: var(--space-2); cursor: pointer; }
+.har-row .btn.icon-btn { margin-left: auto; flex: none; }
+.har-entries { display: flex; flex-direction: column; gap: var(--space-1); padding-left: var(--space-4); }
+/* 行内展开的记录详情：--bg-3 内嵌底（规范 2.1 节代码块用途） */
+.traj-detail {
+  margin: var(--space-1) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 .log-line {
   display: flex; align-items: baseline; gap: var(--space-2);

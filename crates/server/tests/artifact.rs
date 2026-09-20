@@ -189,6 +189,41 @@ fn the_release_artifact_contains_only_expected_files() {
         );
     }
 
+    // 规范 7.2.6：明亮主题禁纯黑。真实教训是 .traj-row:hover 引用了不存在的
+    // --surface-2，纯黑 rgba(0, 0, 0, …) fallback 悄悄生效 —— 令牌永远不在场，
+    // fallback 永远在生效，肉眼与运行时都不报错。
+    let app_css = std::fs::read_to_string(root.join("crates/server/assets/app.css"))
+        .expect("内嵌的 app.css 必须存在");
+    if app_css.contains("rgba(0, 0, 0") {
+        problems.push(
+            "app.css 出现纯黑 rgba(0, 0, 0, …) —— 规范禁纯黑，hover/浮起一律走 --panel-hover 等令牌"
+                .to_string(),
+        );
+    }
+    // 原生 file 控件不属于令牌体系（浏览器默认外观）：必须隐藏，入口由样式化按钮代理。
+    if let Some(pos) = index_html.find("type=\"file\"") {
+        let tag = &index_html[pos..(pos + 240).min(index_html.len())];
+        if !tag.contains("is-hidden") {
+            problems.push(
+                "input[type=file] 裸奔在页面上 —— 必须带 is-hidden，由「导入 HAR 文件」按钮代理"
+                    .to_string(),
+            );
+        }
+    }
+    // 规范 7.2.3：破坏性操作必须经确认模态。调试页的停止/清空与 HAR 删除各有 actionKey，
+    // 少了就是回到「点击即丢数据」。
+    for key in [
+        "actionKey: \"debug/stop\"",
+        "actionKey: \"debug/clear\"",
+        "actionKey: `har/delete:",
+    ] {
+        if !app_js.contains(key) {
+            problems.push(format!(
+                "app.js 缺 {key} —— 破坏性操作必须由 openConfirm 包住再执行"
+            ));
+        }
+    }
+
     if !problems.is_empty() {
         println!("artifact FAILED ({} problem(s)):", problems.len());
         for problem in &problems {

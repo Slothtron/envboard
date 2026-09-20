@@ -1828,6 +1828,7 @@ function rowFromEnvelope(envelope) {
 
 function renderDebugView() {
   const select = document.getElementById("debug-env");
+  const previous = select.value;
   const candidates = state.environments.filter((env) => env.health === "running");
   select.replaceChildren(
     ...candidates.map((env) => {
@@ -1837,28 +1838,65 @@ function renderDebugView() {
       return option;
     }),
   );
+  // 快照刷新重建 option 不该把用户选到一半的目标重置回第一项。
+  if (previous && candidates.some((env) => env.name === previous)) select.value = previous;
+}
+
+function setDebugBadge(running) {
+  const badge = document.getElementById("debug-state");
+  badge.classList.toggle("running", running);
+  badge.classList.toggle("stopped", !running);
+  badge.lastElementChild.textContent = running ? "调试中" : "无会话";
+}
+
+/// 空态组件（规范 6.8 节）：40px 半透明图标 + 13px 标题 + 12px 次级指引，居中。
+function emptyState(host, iconName, title, hint) {
+  const box = el("div", "empty-state");
+  const iconHost = el("span", "empty-icon");
+  iconHost.appendChild(icon(iconName, ""));
+  box.appendChild(iconHost);
+  box.appendChild(el("p", "empty-title", title));
+  box.appendChild(el("p", "empty-hint", hint));
+  host.replaceChildren(box);
 }
 
 async function refreshDebug() {
   if (state.view !== "debug") return;
   renderDebugView();
+  const records = document.getElementById("debug-records");
+  const count = document.getElementById("debug-count");
   try {
     const view = await get("/api/debug?limit=500");
-    const bar = document.getElementById("debug-count");
     if (!view.env) {
-      bar.textContent = "当前没有调试会话 —— 选一个运行中的环境开启。";
-      document.getElementById("debug-records").replaceChildren();
+      setDebugBadge(false);
+      count.textContent = "";
+      emptyState(
+        records,
+        "play",
+        "还没有调试会话",
+        "在上方选一个运行中的环境，点「开启 / 切换」。该环境的流量会被捕获进这个会话。",
+      );
       return;
     }
-    const dropped = view.capture.dropped
-      ? `，已淘汰 ${view.capture.dropped} 条（更早记录已被挤出）`
-      : "";
-    bar.textContent =
-      `抓包会话 #${view.capture.session.id} · ${view.env} · gen ${view.capture.session.generation} · ` +
-      `已捕获 ${view.capture.captured} 条${dropped}`;
-    if (view.capture.session) selectDebugTarget(view.env);
-    renderDebugRecords(view.capture.records || []);
-  } catch { /* 无会话 */ }
+    setDebugBadge(true);
+    const dropped = view.capture.dropped ? ` · 已淘汰 ${view.capture.dropped}` : "";
+    count.textContent =
+      `会话 #${view.capture.session.id} · gen ${view.capture.session.generation} · ` +
+      `已捕获 ${view.capture.captured}${dropped} · 目标 ${view.env}`;
+    selectDebugTarget(view.env);
+    if (!view.capture.records?.length) {
+      emptyState(
+        records,
+        "search",
+        "还没有抓包记录",
+        "经过目标环境的请求会实时出现在这里。点击一行展开请求 / 响应详情。",
+      );
+    } else {
+      records.replaceChildren(...view.capture.records.map(recordRow));
+    }
+  } catch {
+    setDebugBadge(false);
+  }
 }
 
 function selectDebugTarget(env) {
@@ -1866,40 +1904,27 @@ function selectDebugTarget(env) {
   for (const option of select.options) option.selected = option.value === env;
 }
 
-async function renderDebugRecordDetail(requestId) {
-  const view = await get("/api/debug?limit=500");
-  const record = (view.capture?.records || []).find((r) => r.request_id === requestId);
-  const panel = document.getElementById("debug-records");
-  if (record) {
-    panel.replaceChildren(el("pre", "traj-row mono", JSON.stringify(record, null, 2)));
-  } else {
-    panel.replaceChildren(el("div", "empty-inline", `#${requestId} 的记录已被淘汰。`));
-  }
-}
-
-function renderDebugRecords(records) {
-  const view = document.getElementById("debug-records");
-  if (!records.length) {
-    view.replaceChildren(el("div", "empty-inline", "还没有抓包记录。请求经过目标环境后这里会出现。"));
-    return;
-  }
-  const fragment = document.createDocumentFragment();
-  for (const record of records) {
-    const request = record.request || {};
-    const response = record.response || {};
-    const node = el("div", "traj-row");
-    node.style.borderLeftColor = groupColor(record.request_id ?? 0);
-    node.style.cursor = "pointer";
-    node.title = "点击查看请求/响应详情";
-    node.textContent =
-      `${request.method} ${request.authority}${request.path} → ${response.status}` +
-      ` (#${record.request_id}${response.body?.omitted ? "，正文超限未记" : ""})`;
-    node.addEventListener("click", () => {
-      renderDebugRecordDetail(record.request_id).catch(reportError);
-    });
-    fragment.appendChild(node);
-  }
-  view.replaceChildren(fragment);
+/// 一行抓包记录：方法 目标 路径 → 状态码；点击就地展开/收起完整 JSON。
+/// 调试会话与导入会话共用 —— HAR 导入只是同一形状记录的另一来源。
+function recordRow(record) {
+  const request = record.request || {};
+  const response = record.response || {};
+  const node = el("div", "traj-row");
+  node.style.borderLeftColor = groupColor(record.request_id ?? 0);
+  node.style.cursor = "pointer";
+  node.title = "点击展开 / 收起请求响应详情";
+  node.textContent =
+    `${request.method} ${request.authority}${request.path} → ${response.status}` +
+    ` (#${record.request_id}${response.body?.omitted ? "，正文超限未记" : ""})`;
+  node.addEventListener("click", () => {
+    const detail = node.nextElementSibling;
+    if (detail?.classList.contains("traj-detail")) {
+      detail.remove();
+      return;
+    }
+    node.after(el("pre", "traj-detail mono", JSON.stringify(record, null, 2)));
+  });
+  return node;
 }
 
 // ---- 导入会话（HAR） ---- //
@@ -1907,35 +1932,65 @@ function renderDebugRecords(records) {
 async function refreshHarList() {
   const data = await get("/api/har");
   const list = document.getElementById("har-list");
-  const count = document.getElementById("har-count");
   const sessions = data.sessions || [];
-  count.textContent = `${sessions.length} 个导入会话`;
+  document.getElementById("har-count").textContent = `${sessions.length} 个导入会话`;
   if (!sessions.length) {
-    list.replaceChildren(el("div", "empty-inline", "还没有导入会话。选择一个 HAR 文件导入（可同时打开多个，只读）。"));
+    emptyState(
+      list,
+      "rules",
+      "还没有导入会话",
+      "点「导入 HAR 文件」导入一份 HAR 1.2 导出；可同时打开多个会话，只读查看。",
+    );
     return;
   }
   const fragment = document.createDocumentFragment();
   for (const session of sessions) {
-    const node = el("div", "traj-row");
+    const node = el("div", "traj-row har-row");
     node.style.borderLeftColor = groupColor(session.id);
-    node.style.cursor = "pointer";
-    node.title = "点击查看条目";
-    node.textContent = `#${session.id} ${session.name} · ${session.entries} 条`;
-    const del = el("button", "btn icon-btn sm", "×");
+    node.title = "点击展开 / 收起条目";
+    node.appendChild(el("span", null, `#${session.id} ${session.name}`));
+    node.appendChild(el("span", "log-count mono", `${session.entries} 条`));
+    const del = el("button", "btn icon-btn sm danger");
+    del.type = "button";
+    del.appendChild(icon("trash", "ic-sm"));
     del.setAttribute("aria-label", `删除会话 ${session.name}`);
+    del.title = `删除导入会话 ${session.name}`;
     del.addEventListener("click", (event) => {
       event.stopPropagation();
-      mutate(`/api/har/${session.id}`, "DELETE")
-        .then(() => refreshHarList())
-        .catch(reportError);
+      openConfirm({
+        title: `删除导入会话 ${session.name}？`,
+        text:
+          "删除的是 envboard 内存中的副本，磁盘上的原始 HAR 文件不受影响。" +
+          "会话删除后不可恢复，需要重新导入才能再次查看。",
+        actionLabel: "确认删除",
+        actionKey: `har/delete:${session.id}`,
+        run: () => mutate(`/api/har/${session.id}`, "DELETE").then(refreshHarList),
+      });
     });
-    node.appendChild(del);
     node.addEventListener("click", () => {
-      get(`/api/har/${session.id}?limit=500`).then((view) => {
-        const panel = document.getElementById("har-records");
-        panel.hidden = false;
-        panel.textContent = JSON.stringify(view.records || [], null, 2);
-      }).catch(reportError);
+      const open = node.nextElementSibling;
+      if (open?.classList.contains("har-entries")) {
+        open.remove();
+        return;
+      }
+      if (node.dataset.loading === "1") return;
+      node.dataset.loading = "1";
+      get(`/api/har/${session.id}?limit=500`)
+        .then((view) => {
+          node.dataset.loading = "0";
+          const entries = view.records || [];
+          const box = el("div", "har-entries");
+          if (!entries.length) {
+            box.appendChild(el("div", "empty-inline", "这个会话没有条目。"));
+          } else {
+            box.replaceChildren(...entries.map(recordRow));
+          }
+          node.after(box);
+        })
+        .catch((error) => {
+          node.dataset.loading = "0";
+          reportError(error);
+        });
     });
     fragment.appendChild(node);
   }
@@ -2443,19 +2498,42 @@ function wire() {
     if (!env) { toast("没有运行中的环境可调试。", "info"); return; }
     mutate("/api/debug", "POST", { env }).then(refreshDebug).catch(reportError);
   });
+  // 停止与清空都会不可逆地丢掉抓包记录 —— 规范 7.2 节：破坏性操作必须走确认模态，
+  // 写明后果与建议动作（先导出），不允许点击即执行。
   document.getElementById("debug-stop").addEventListener("click", () => {
-    mutate("/api/debug/stop", "POST").then(refreshDebug).catch(reportError);
+    openConfirm({
+      title: "停止调试并清空？",
+      text:
+        "目标环境的抓包会停止，当前会话的全部记录随即清空。清空后记录不可恢复；" +
+        "想保留就先点「导出 HAR」。",
+      actionLabel: "确认停止",
+      actionKey: "debug/stop",
+      run: () => mutate("/api/debug/stop", "POST").then(refreshDebug),
+    });
   });
   document.getElementById("debug-clear").addEventListener("click", () => {
     const env = document.getElementById("debug-env").value;
     if (!env) return;
-    mutate(`/api/environments/${encodeURIComponent(env)}/capture/clear`, "POST")
-      .then(refreshDebug).catch(reportError);
+    openConfirm({
+      title: "清空本会话？",
+      text:
+        "当前会话的全部抓包记录会被删除，抓包本身继续运行。清空后记录不可恢复；" +
+        "想保留就先点「导出 HAR」。",
+      actionLabel: "确认清空",
+      actionKey: "debug/clear",
+      run: () =>
+        mutate(`/api/environments/${encodeURIComponent(env)}/capture/clear`, "POST")
+          .then(refreshDebug),
+    });
   });
   document.getElementById("debug-export").addEventListener("click", () => {
     const env = document.getElementById("debug-env").value;
     if (!env) return;
     window.open(`/api/environments/${encodeURIComponent(env)}/captures/export?format=har`, "_blank");
+  });
+  // 原生 file 控件被藏起（不属于令牌体系），入口由样式化按钮代理。
+  document.getElementById("har-import").addEventListener("click", () => {
+    document.getElementById("har-file").click();
   });
   document.getElementById("har-file").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
