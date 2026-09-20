@@ -89,6 +89,9 @@
       <button type="button" class="nav-btn" data-view="rules" aria-pressed="false">
         <svg class="ic" aria-hidden="true"><use href="#i-rules"></use></svg><span>规则库</span>
       </button>
+      <button type="button" class="nav-btn" data-view="proxies" aria-pressed="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-server"></use></svg><span>上游代理</span>
+      </button>
       <button type="button" class="nav-btn" data-view="compare" aria-pressed="false">
         <svg class="ic" aria-hidden="true"><use href="#i-compare"></use></svg><span>跨环境对比</span>
       </button>
@@ -233,6 +236,7 @@
               <div class="info-cell"><span class="info-label">访问鉴权</span><span class="info-value mono" id="ov-auth">—</span></div>
               <div class="info-cell"><span class="info-label">期望状态</span><span class="info-value mono" id="ov-desired">—</span></div>
               <div class="info-cell"><span class="info-label">规则绑定</span><span class="info-value mono" id="ov-rules">—</span></div>
+              <div class="info-cell"><span class="info-label">上游代理</span><span class="info-value mono" id="ov-upstream">—</span></div>
               <div class="info-cell"><span class="info-label">规则条数</span><span class="info-value mono" id="ov-rules-count">—</span></div>
               <div class="info-cell"><span class="info-label">放宽校验域名</span><span class="info-value mono" id="ov-insecure-hosts">—</span></div>
               <div class="info-cell"><span class="info-label">描述</span><span class="info-value" id="ov-desc">—</span></div>
@@ -273,6 +277,13 @@
                 <span class="field-label">规则</span>
                 <select name="rules" id="rules-select"><option value="">（不覆盖）</option></select>
                 <span class="field-hint">热生效：换绑定后运行中的实例<b>立即</b>按新规则改写（同步装配，无轮询），不必重启；规则内容同名导入覆盖同样即时生效</span>
+              </label>
+              <!-- 上游代理（二级代理）：环境出方向的链路开关。与规则绑定同构的
+                   按名引用；热字段，运行中可改（不进停机字段锁）。 -->
+              <label class="field">
+                <span class="field-label">上游代理</span>
+                <select name="upstream" id="upstream-select"><option value="">（直连）</option></select>
+                <span class="field-hint">热生效：运行中改绑定即时生效，不必重启。绑定后该环境出方向先经所选代理再到目标（TLS 目标走 CONNECT 隧道），在「上游代理」视图创建代理。</span>
               </label>
               <!-- 按域名放宽上游证书校验：全局放宽开关已随契约一并删除，这里是唯一的
                    放宽入口，所以必须写清"逐条点名、精确匹配、运行中热生效"。 -->
@@ -394,6 +405,54 @@
         </form>
         <p class="hint" id="rules-hint">导入规则（整份覆盖同名文件）—— 改之前先点列表里的「载入」，
           免得盲覆盖。同名导入覆盖后，绑定它的实例按 mtime 热重载，不必重启。</p>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：上游代理（二级代理） ---------- -->
+    <section class="view is-hidden" id="view-proxies" aria-label="上游代理视图">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-server"></use></svg><span>上游代理</span>
+          </h2>
+          <span class="count mono" id="proxies-count">0</span>
+        </div>
+        <ul class="rule-list" id="proxies-list"></ul>
+        <form id="proxies-form" class="form">
+          <label class="field" data-field="name">
+            <span class="field-label">名字</span>
+            <input name="name" placeholder="corp" required autocomplete="off">
+            <span class="field-hint">小写字母开头，限 a-z 0-9 _ -；同名保存 = 整体替换</span>
+          </label>
+          <div class="field-pair">
+            <label class="field" data-field="host">
+              <span class="field-label">地址</span>
+              <input name="host" placeholder="proxy.example.com 或 10.0.0.9" required autocomplete="off">
+            </label>
+            <label class="field" data-field="port">
+              <span class="field-label">端口</span>
+              <input name="port" placeholder="3128" inputmode="numeric" required autocomplete="off">
+            </label>
+          </div>
+          <div class="field">
+            <span class="field-label">代理鉴权（用户名 / 密码，可选）</span>
+            <div class="field-pair">
+              <label class="field" data-field="user">
+                <input name="user" placeholder="user" autocomplete="off" aria-label="上游代理用户名">
+              </label>
+              <label class="field" data-field="password">
+                <input type="password" name="password" placeholder="password" autocomplete="new-password" aria-label="上游代理密码">
+              </label>
+            </div>
+            <span class="field-hint">两栏必须<b>同时</b>填写，都不能含「<code class="mono">:</code>」或空白字符。凭据只进不出 —— 服务端<b>永不回显</b>，保存后两栏即清空。</span>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">
+              <svg class="ic ic-sm" aria-hidden="true"><use href="#i-check"></use></svg><span>保存</span>
+            </button>
+          </div>
+        </form>
+        <p class="hint" id="proxies-hint">上游代理是「二级代理」：绑定它的环境出方向先经它再到目标（TLS 目标走 CONNECT 隧道，明文 http 按 absolute-URI 转发）。修改代理实体对引用它的运行中环境<b>热生效</b>；被环境引用的代理删除会被拒绝，先解绑再删。</p>
       </div>
     </section>
 
@@ -547,6 +606,10 @@
         <label class="field" data-field="rules">
           <span class="field-label">绑定规则集</span>
           <select name="rules" id="env-create-rules"><option value="">未选择（可稍后绑定）</option></select>
+        </label>
+        <label class="field" data-field="upstream">
+          <span class="field-label">上游代理</span>
+          <select name="upstream" id="env-create-upstream"><option value="">未选择（直连，可稍后绑定）</option></select>
         </label>
       </form>
       <div class="modal-foot">

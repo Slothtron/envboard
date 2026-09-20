@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn encode_round_trips_with_the_decoder_and_matches_rfc4648() {
-        // RFC 4648 §10 的测试向量
+        // RFC 4648 第 10 节的官方向量
         for (raw, encoded) in [
             ("", ""),
             ("f", "Zg=="),
