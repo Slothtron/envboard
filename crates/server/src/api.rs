@@ -696,15 +696,19 @@ async fn api_debug_stream(
         let mut cursor = 0u64;
         let mut session_key: Option<(u64, u64)> = None;
         let mut last_counts: Option<(u64, u64)> = None;
+        // 契约「连接即发 snapshot」：首帧无条件发出（无目标时 env:null），
+        // 之后 idle→idle 不重发、会话出现/换代才再发 snapshot。
+        let mut announced = false;
         let mut ticker = tokio::time::interval(Duration::from_millis(500));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             let Some((env, delta)) = manager.debug_delta(cursor, 500) else {
-                if session_key.is_some() {
+                if !announced || session_key.is_some() {
                     session_key = None;
                     cursor = 0;
                     last_counts = None;
+                    announced = true;
                     if tx
                         .send(encode("snapshot", &json!({ "env": Value::Null })))
                         .await
@@ -715,6 +719,7 @@ async fn api_debug_stream(
                 }
                 continue;
             };
+            announced = true;
             let key = (delta.session.id, delta.session.generation);
             if session_key != Some(key) {
                 // 新会话/换代：snapshot 用尾部窗口（与拉取端点同形），

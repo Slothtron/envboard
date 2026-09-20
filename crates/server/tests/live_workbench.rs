@@ -1943,6 +1943,11 @@ fn the_workbench_behaves_on_a_real_host() {
     ));
     assert_eq!(beta_view["health"], "running", "beta 没回到 running");
     let beta_proxy = beta_view["listen"]["port"].as_u64().unwrap_or(0) as u16;
+    let mut sse = SseReader::open(web_port, "/api/debug/stream");
+    // ① 契约「连接即发 snapshot」：无目标时首帧就是 snapshot 且 env:null
+    //    （曾经的实现只在会话存在时才发首帧 —— 无会话的页面永远等不到第一帧）。
+    let got_idle = sse.wait_until(Duration::from_secs(3), |frames| !frames.is_empty());
+    let idle_first = got_idle && sse.frames[0].0 == "snapshot" && sse.frames[0].1["env"].is_null();
     let debug_on = api(
         web_port,
         "POST",
@@ -1952,14 +1957,13 @@ fn the_workbench_behaves_on_a_real_host() {
         None,
         Some(r#"{"env":"beta"}"#),
     );
-    let mut sse = SseReader::open(web_port, "/api/debug/stream");
-    // ① 连接第一帧必须是 snapshot（整幅会话视图）。
-    let got_snapshot = sse.wait_until(Duration::from_secs(3), |frames| !frames.is_empty());
-    let snapshot_ok = got_snapshot
-        && sse.frames[0].0 == "snapshot"
-        && sse.frames[0].1["env"] == "beta"
-        && sse.frames[0].1["capture"]["session"]["id"].is_number();
-    // ② 过代理发两个请求 → events 帧自动带出记录（500ms 轮询，页面不刷新也该看到）。
+    // ② 会话建立 → 流补发 snapshot（env=beta，整幅会话视图）。
+    let got_snapshot = sse.wait_until(Duration::from_secs(3), |frames| {
+        frames
+            .iter()
+            .any(|(event, value)| event == "snapshot" && value["env"] == "beta")
+    });
+    // ③ 过代理发两个请求 → events 帧自动带出记录（500ms 轮询，页面不刷新也该看到）。
     let beta_url = format!("http://beta.test:{beta_upstream}/");
     proxy_get(beta_proxy, &beta_url, None);
     proxy_get(beta_proxy, &beta_url, None);
@@ -1985,7 +1989,7 @@ fn the_workbench_behaves_on_a_real_host() {
         && pushed
             .windows(2)
             .all(|pair| pair[0]["request_id"].as_u64() <= pair[1]["request_id"].as_u64());
-    // ③ 单条详情走全缓冲查找：第一条已不是最新，也必须查得到（曾经 tail(1) 必 404）。
+    // ④ 单条详情走全缓冲查找：第一条已不是最新，也必须查得到（曾经 tail(1) 必 404）。
     let first_id = pushed
         .first()
         .and_then(|record| record["request_id"].as_u64())
@@ -2000,7 +2004,7 @@ fn the_workbench_behaves_on_a_real_host() {
         None,
     );
     let detail_ok = detail.status == 200 && json(&detail)["request_id"].as_u64() == Some(first_id);
-    // ④ 换代（clear → generation+1）→ 流重发 snapshot 整幅重置。
+    // ⑤ 换代（clear → generation+1）→ 流重发 snapshot 整幅重置。
     api(
         web_port,
         "POST",
@@ -2022,7 +2026,7 @@ fn the_workbench_behaves_on_a_real_host() {
                         .is_some_and(|records| records.is_empty())
             })
     });
-    // ⑤ 停止调试 → snapshot {env:null}，页面回到无会话。
+    // ⑥ 停止调试 → snapshot {env:null}，页面回到无会话。
     api(web_port, "POST", "/api/debug/stop", None, true, None, None);
     let idle = sse.wait_until(Duration::from_secs(3), |frames| {
         frames.iter().rev().any(|(event, value)| {
@@ -2030,10 +2034,16 @@ fn the_workbench_behaves_on_a_real_host() {
         })
     });
     checks.record(
-        "16 调试实时流：snapshot 首帧 / 抓包 events 自动推送 / 单条全缓冲查找 / clear 换代重置 / 停止回无会话",
-        debug_on.status == 200 && snapshot_ok && events_ok && detail_ok && reset && idle,
+        "16 调试实时流：无会话首帧 env:null / 开会话 snapshot / events 自动推送 / 全缓冲查找 / clear 换代重置 / 停止回无会话",
+        debug_on.status == 200
+            && idle_first
+            && got_snapshot
+            && events_ok
+            && detail_ok
+            && reset
+            && idle,
         format!(
-            "snapshot={snapshot_ok} events={events_ok}(pushed={}) detail={detail_ok}(#{first_id}) reset={reset} idle={idle}",
+            "idle_first={idle_first} snapshot={got_snapshot} events={events_ok}(pushed={}) detail={detail_ok}(#{first_id}) reset={reset} idle={idle}",
             pushed.len()
         ),
     );
