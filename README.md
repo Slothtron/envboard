@@ -19,6 +19,7 @@
 | **热应用同步生效**：PATCH 返回后的第一个请求就是新配置（无轮询、无收敛窗） | ✅ |
 | 按域名放宽上游证书校验（`insecure_hosts`：精确匹配，运行中改立即生效） | ✅ |
 | 端口自动分配（区间内随机试绑，新建冲突自动重试一次） | ✅ |
+| **上游代理（二级代理）**：按名管理的代理账本 + 环境按名绑定（热字段）；TLS 目标走 CONNECT 隧道（内层 TLS 与 `insecure_hosts` 语义不变），明文 http 按 absolute-URI 转发；删除被引用的代理拒绝并点名 | ✅ |
 | 按 host 改写上连目标（内置插件 `hosts-rules`，只改 `ConnectTarget.resolved_addr`） | ✅ |
 | CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；absolute-URI 正向代理；101 透传 | ✅ |
 | 代理访问鉴权（`proxy_user` / `proxy_password` → 407 门；**凭据只在内存**，不进 argv / 视图 / SSE） | ✅ |
@@ -147,6 +148,8 @@ curl -s -X PATCH localhost:8900/api/environments/beta \
 #     {"port":16302}    换端口      —— 需先停止（POST .../stop）
 #     {"name":"gamma"}  改名        —— 期望状态、端口归属一起搬过去；需先停止
 #     {"rules":null}    解绑        —— 回到「不覆盖」
+#     {"upstream":"corp"}   绑上游代理  —— 热的（先在 /api/proxies 建好 corp）
+#     {"upstream":null}     改回直连    —— 热的
 #     {"description":"灰度"}        —— 只改描述（热的）
 curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，免得盲覆盖
 ```
@@ -159,6 +162,7 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 | `insecure_hosts` | ✅ | 一次同步 apply，返回后第一个请求就是新配置 |
 | `rules` **绑定** | ✅ | 账本 rendered 重编译进快照，不重启实例 |
 | 规则文件的**内容** | ✅ | import 同名覆盖即对绑定且在跑的环境逐个热应用 |
+| `upstream` **绑定** | ✅ | 代理账本定义重编译进快照；改代理实体（host/port/凭据）对引用环境同样热应用 |
 | `name` / `listen` | ❌ `conflict` | 它们是环境的对外身份 |
 | `proxy_user` / `proxy_password` | ❌ `conflict` | 鉴权门在实例启动时装配 |
 
@@ -232,6 +236,8 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 | GET | `/api/environments/:name/logs?lines=N` | 实例日志尾部 |
 | GET/POST | `/api/rules` | 规则账本列表（名字 + 条数） / 导入（覆盖同名 = 对绑定环境热应用） |
 | GET/DELETE | `/api/rules/:name` | 规则原文 / 删除（仍被绑定时 `conflict`） |
+| GET/POST | `/api/proxies` | 上游代理账本清单（含 `references[]`） / 保存（同名整体替换，凭据只写不读） |
+| GET/DELETE | `/api/proxies/:name` | 上游代理详情（凭据永不回显，只有 `has_auth`） / 删除（被环境引用时 `conflict` 并点名） |
 | GET | `/api/compare?host=<域名>` | 跨环境静态对比：该域名在各环境被覆盖成什么（不发请求） |
 | GET | `/api/events` | SSE 快照（每秒一次全量环境视图） |
 | GET | `/api/ca` | 共享 CA 证书只读摘要（版本 / 序列号 / 有效期 / 指纹 / 颁发者 / SAN） |
@@ -360,8 +366,9 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
   413/502 而不是静默流式。大文件穿透不是当前形态。
 - **客户端要改代理配置**（换端口即换环境）。工作台给出的那行 `export https_proxy=…`
   就是为此。
-- **PAC / 透明代理 / SOCKS 未做**。`ConnectTarget.chained_proxy` 是留好的扩展位
-  （当前恒 None）。
+- **PAC / 透明代理 / SOCKS 未做**。上游代理只做 HTTP 形态（CONNECT 隧道 +
+  absolute-URI + Basic 鉴权）：`https://` 代理（与代理本身的 TLS）、按域名分流、
+  代理链都是写明的非目标，语义见 core/spec/capabilities.md 的「上游代理」。
 
 ## 版本与发布
 

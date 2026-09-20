@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use envboard_core_api::proxy::Listen;
 use envboard_core_api::sha256;
-use envboard_core_api::{Error, ErrorCode};
+use envboard_core_api::{Error, ErrorCode, UpstreamSpec};
 use envboard_rules::parse_hosts_text;
 
 use crate::builtin::{HostsRules, RequestLog};
@@ -32,6 +32,8 @@ pub struct EngineConfig {
     pub insecure_hosts: Vec<String>,
     pub proxy_user: Option<String>,
     pub proxy_password: Option<String>,
+    /// 上游二级代理绑定（None = 直连）。凭据成对由这里再校验一道。
+    pub upstream: Option<UpstreamSpec>,
     /// hosts 风格规则文本（core/spec/rules.md 的 BNF）；None = 不带规则。
     pub rules_text: Option<String>,
     /// 缓冲体上限的显式值（None = 引擎默认 MAX_BODY_BYTES）。
@@ -51,6 +53,7 @@ impl Default for EngineConfig {
             insecure_hosts: Vec::new(),
             proxy_user: None,
             proxy_password: None,
+            upstream: None,
             rules_text: None,
             max_buffered_body: None,
             log_writer: None,
@@ -63,6 +66,8 @@ impl Default for EngineConfig {
 pub struct CompiledConfig {
     pub listen: Listen,
     pub insecure_hosts: Vec<String>,
+    /// 上游二级代理（None = 直连）；每请求播种进 ConnectTarget。
+    pub upstream: Option<UpstreamSpec>,
     pub plugins: Arc<PluginSet>,
     pub max_buffered_body: usize,
     pub log_writer: Arc<dyn LogWriter>,
@@ -146,6 +151,17 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
             "max_buffered_body must be positive; drop-to-zero buffering is not a mode".to_string(),
         ));
     }
+    // 上游代理凭据成对（管理面已校验，这里防御第二道）。
+    if let Some(upstream) = &config.upstream
+        && upstream.user.is_some() != upstream.password.is_some()
+    {
+        return Err(Error::new(
+            ErrorCode::InvalidConfig,
+            "upstream proxy credentials come in pairs: user and password must be \
+             set or absent together"
+                .to_string(),
+        ));
+    }
     let log_writer = config
         .log_writer
         .clone()
@@ -168,6 +184,13 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
     let plugins = Arc::new(assemble(plan)?);
 
     #[derive(Serialize)]
+    struct HashUpstream<'a> {
+        host: &'a str,
+        port: u16,
+        user: Option<&'a str>,
+        secret_digest: Option<String>,
+    }
+    #[derive(Serialize)]
     struct HashShape<'a> {
         listen: &'a Listen,
         insecure_hosts: &'a [String],
@@ -175,6 +198,7 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
         max_buffered_body: usize,
         chain: Vec<(&'a str, String, &'a str)>,
         auth: Option<(&'a str, String)>,
+        upstream: Option<HashUpstream<'a>>,
     }
     let chain: Vec<(&str, String, &str)> = plugins
         .entries
@@ -196,6 +220,15 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
         auth: auth
             .as_ref()
             .map(|(user, secret)| (user.as_str(), sha256::hex(secret))),
+        upstream: config.upstream.as_ref().map(|upstream| HashUpstream {
+            host: &upstream.host,
+            port: upstream.port,
+            user: upstream.user.as_deref(),
+            secret_digest: upstream
+                .password
+                .as_deref()
+                .map(|password| sha256::hex(password.as_bytes())),
+        }),
     };
     let canonical = serde_json::to_vec(&shape).map_err(|e| {
         Error::new(
@@ -208,6 +241,7 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
     Ok(CompiledConfig {
         listen: config.listen,
         insecure_hosts: config.insecure_hosts.clone(),
+        upstream: config.upstream.clone(),
         plugins,
         max_buffered_body,
         log_writer,

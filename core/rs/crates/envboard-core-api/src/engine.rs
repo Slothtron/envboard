@@ -24,6 +24,8 @@ pub struct EngineSpec {
     pub insecure_hosts: Vec<String>,
     pub proxy_user: Option<String>,
     pub proxy_password: Option<String>,
+    /// 上游二级代理绑定（None = 直连）。凭据由管理面校验后下发。
+    pub upstream: Option<UpstreamSpec>,
     /// hosts 风格规则文本；None = 不带规则。
     pub rules_text: Option<String>,
     /// 规则文本的来源文件名（仅展示：日志与状态视图里说明规则绑到哪份账本）。
@@ -32,16 +34,40 @@ pub struct EngineSpec {
     pub log: Option<Arc<dyn LineWriter>>,
 }
 
+/// 上游二级代理的出向定义：先连它（CONNECT / absolute-URI），再由它转达目标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamSpec {
+    pub host: String,
+    pub port: u16,
+    /// both-or-neither 由管理面校验；引擎只按"都有才算有"处理。
+    pub user: Option<String>,
+    pub password: Option<String>,
+}
+
+impl UpstreamSpec {
+    pub fn has_auth(&self) -> bool {
+        self.user.is_some() && self.password.is_some()
+    }
+}
+
 impl EngineSpec {
     /// 稳定序列化形状（config_hash 的输入；log 与 rules_source 不参与 ——
     /// 前者不是配置，后者只是展示）。
     pub fn hashable_json(&self) -> String {
+        #[derive(Serialize)]
+        struct UpstreamShape<'a> {
+            host: &'a str,
+            port: u16,
+            user: Option<&'a str>,
+            secret_digest: Option<String>,
+        }
         #[derive(Serialize)]
         struct Shape<'a> {
             listen: &'a Listen,
             insecure_hosts: &'a [String],
             user: Option<&'a str>,
             secret_digest: Option<String>,
+            upstream: Option<UpstreamShape<'a>>,
             rules: Option<&'a str>,
         }
         let shape = Shape {
@@ -52,6 +78,15 @@ impl EngineSpec {
                 .proxy_password
                 .as_deref()
                 .map(|p| sha256::hex(p.as_bytes())),
+            upstream: self.upstream.as_ref().map(|upstream| UpstreamShape {
+                host: &upstream.host,
+                port: upstream.port,
+                user: upstream.user.as_deref(),
+                secret_digest: upstream
+                    .password
+                    .as_deref()
+                    .map(|p| sha256::hex(p.as_bytes())),
+            }),
             rules: self.rules_text.as_deref(),
         };
         serde_json::to_string(&shape).unwrap_or_default()

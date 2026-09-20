@@ -41,6 +41,8 @@ const state = {
   status: null,
   environments: [],
   rules: [],
+  /// 上游代理账本（二级代理）：按名引用，凭据永不回显（只有 has_auth 布尔）。
+  proxies: [],
   token: "",
   /// 当前选中的环境：详情区与日志栏都跟着它走。
   selected: null,
@@ -293,6 +295,7 @@ function renderStats() {
   setText(document.getElementById("env-count"), String(visibleEnvironments().length));
   setText(document.getElementById("rules-count"), String(state.rules.length));
   setText(document.getElementById("rule-side-count"), String(visibleRuleSets().length));
+  setText(document.getElementById("proxies-count"), String(state.proxies.length));
 }
 
 // --------------------------------------------------------------------------- //
@@ -321,6 +324,7 @@ function matchesSearch(env) {
     env.name,
     String(env.listen.port),
     env.rules || "",
+    env.upstream || "",
     env.description || "",
     insecureHosts(env).join(" "),
   ].some((value) => value.toLowerCase().includes(needle));
@@ -609,6 +613,9 @@ function renderOverview(env) {
     ? `${env.rules} · 规则缺失（已忽略）`
     : env.rules || "（不覆盖）";
   rulesCell.classList.toggle("is-inert", rulesMissing);
+  // 上游代理绑定：直连也要显式写出来（与「实际状态 / 期望状态」同风格），
+  // 因为"流量现在经不经二级代理"是排障时最先要确认的事实之一。
+  document.getElementById("ov-upstream").textContent = env.upstream || "直连";
   document.getElementById("ov-rules-count").textContent = env.rules ? String(env.rules_count) : "—";
   // 放宽校验域名：整份清单直接列出来（通常只有几条）。非空 = 有域名被放宽，标成 warn 色
   // —— 它是安全姿态的放宽，不是错误，但必须与规则/描述这类普通单元格区分开。
@@ -972,6 +979,123 @@ function clearRuleCaches() {
 }
 
 // --------------------------------------------------------------------------- //
+// 渲染：上游代理（二级代理）
+// --------------------------------------------------------------------------- //
+
+let proxiesKey = "";
+
+function renderProxies(force) {
+  const proxies = state.proxies;
+  const key = JSON.stringify([proxies, [...pending]]);
+  if (!force && key === proxiesKey) return;
+  proxiesKey = key;
+
+  const host = document.getElementById("proxies-list");
+  host.replaceChildren();
+
+  if (!proxies.length) {
+    host.appendChild(
+      el("li", "empty-inline", "还没有上游代理。下面创建一条：环境在「配置」里绑定它之后，出方向才经二级代理。"),
+    );
+  }
+
+  for (const proxy of proxies) {
+    const users = state.environments.filter((env) => env.upstream === proxy.name).map((env) => env.name);
+    const item = el("li", "rule-item");
+    item.dataset.proxy = proxy.name;
+    item.appendChild(el("span", "rule-name mono", proxy.name));
+    // 地址与鉴权位：凭据永不回显，has_auth 是唯一可见事实。
+    item.appendChild(el("span", "rule-size mono", `${proxy.host}:${proxy.port}`));
+    item.appendChild(
+      el(
+        "span",
+        "rule-meta",
+        users.length ? `被 ${users.join(" / ")} 绑定` : "未被绑定",
+      ),
+    );
+    const authBadge = el("span", `badge ${proxy.has_auth ? "ok" : ""}`.trim());
+    authBadge.appendChild(el("span", null, proxy.has_auth ? "带鉴权" : "无鉴权"));
+    item.appendChild(authBadge);
+
+    const actions = el("div", "rule-actions");
+    actions.appendChild(
+      button({ label: "载入", className: "btn sm", onClick: () => loadProxy(proxy) }),
+    );
+    // 删除走破坏性确认模态（规范 7.2.3 节）：引用环境写进后果文本；
+    // 服务端 DELETE 仍会拒绝 —— 前端提示与服务端裁决双保险。
+    actions.appendChild(
+      button({
+        label: "删除",
+        icon: "trash",
+        className: "btn sm danger",
+        onClick: () =>
+          openConfirm({
+            title: `删除上游代理 ${proxy.name}？`,
+            text: users.length
+              ? "它仍被 " + users.join(" / ") + " 绑定：服务端会拒绝删除，请先把这些环境的上游代理改回（直连）。"
+              : "它当前没有被任何环境引用，账本条目会删掉。",
+            actionLabel: "确认删除",
+            actionKey: `proxydelete:${proxy.name}`,
+            run: () => mutate(`/api/proxies/${encodeURIComponent(proxy.name)}`, "DELETE"),
+          }),
+      }),
+    );
+    item.appendChild(actions);
+    host.appendChild(item);
+  }
+
+  renderUpstreamOptions();
+}
+
+/// 「载入」：把账本里的代理取回表单改完再保存（同名覆盖）。
+/// 凭据不回显 —— 两栏清空，填了才覆盖，不填 = 保持原样。
+async function loadProxy(proxy) {
+  try {
+    const entry = await get(`/api/proxies/${encodeURIComponent(proxy.name)}`);
+    const form = document.getElementById("proxies-form");
+    field(form, "name").value = entry.name;
+    field(form, "host").value = entry.host;
+    field(form, "port").value = String(entry.port);
+    field(form, "user").value = "";
+    field(form, "password").value = "";
+    field(form, "user").placeholder = entry.has_auth ? "已保存（留空保持不变）" : "user";
+    field(form, "password").placeholder = entry.has_auth ? "已保存（留空保持不变）" : "password";
+    document.getElementById("proxies-hint").textContent =
+      `已载入 ${entry.name}：改完点「保存」覆盖同名条目（凭据留空 = 保持原样）。`;
+    setView("proxies");
+    field(form, "host").focus();
+  } catch (error) {
+    reportError(error);
+  }
+}
+
+/// 两个上游代理下拉吃同一份选项：编辑表单（首项 = 直连）与创建弹窗
+/// （未选择 = 直连，可稍后绑定）。引用已删除的代理在服务端不可能成立
+/// （删除被拒），所以这里不做「缺失名」兜底选项。
+function renderUpstreamOptions() {
+  const names = state.proxies.map((proxy) => proxy.name);
+  const specs = [
+    { id: "upstream-select", emptyLabel: "（直连）" },
+    { id: "env-create-upstream", emptyLabel: "未选择（直连，可稍后绑定）" },
+  ];
+  for (const { id, emptyLabel } of specs) {
+    const select = document.getElementById(id);
+    if (!select) continue;
+    const previous = select.value;
+    select.replaceChildren();
+    const empty = el("option", null, emptyLabel);
+    empty.value = "";
+    select.appendChild(empty);
+    for (const name of names) {
+      const option = el("option", null, name);
+      option.value = name;
+      select.appendChild(option);
+    }
+    select.value = previous;
+  }
+}
+
+// --------------------------------------------------------------------------- //
 // 动作
 // --------------------------------------------------------------------------- //
 
@@ -1021,6 +1145,7 @@ function editBaseline(env) {
     name: env.name,
     port: String(env.listen.port),
     rules: env.rules || "",
+    upstream: env.upstream || "",
     insecure_hosts: insecureHosts(env).join("\n"),
     public: !isLoopbackHost(env.listen.host),
     description: env.description || "",
@@ -1035,6 +1160,7 @@ function editEchoKey(env) {
     env.listen.host,
     env.listen.port,
     env.rules || "",
+    env.upstream || "",
     env.rules_count || 0,
     insecureHosts(env).join(","),
     env.description || "",
@@ -1069,6 +1195,9 @@ function fillEditForm(env) {
   field(form, "description").value = env.description || "";
   ensureRuleOption(env.rules);
   field(form, "rules").value = env.rules || "";
+  // 上游代理绑定与规则绑定同构地回显（它不是凭据，可以回显）。
+  ensureUpstreamOption(env.upstream);
+  field(form, "upstream").value = env.upstream || "";
   // 放宽清单可以回显（它不是凭据），一行一个域名，与文本框的输入形态一致。
   field(form, "insecure_hosts").value = insecureHosts(env).join("\n");
   // 对外服务 = listen.host 是否非回环。凭据本身**永不回显** —— 服务端只回
@@ -1099,6 +1228,7 @@ function formIsDirty() {
     field(form, "name").value.trim() !== baseline.name ||
     field(form, "port").value.trim() !== baseline.port ||
     field(form, "rules").value !== baseline.rules ||
+    field(form, "upstream").value !== baseline.upstream ||
     parseInsecureHosts(field(form, "insecure_hosts").value).join("\n") !==
       baseline.insecure_hosts ||
     field(form, "public").checked !== baseline.public ||
@@ -1141,9 +1271,9 @@ function syncEditLock(env) {
     document.getElementById("env-form-mode-text").textContent = "运行中";
   }
   document.getElementById("env-form-hint").textContent = locked
-    ? `编辑 ${env.name}：实例在运行。描述 / 规则绑定 / 放宽校验域名可以热改（保存后几秒内生效）；` +
+    ? `编辑 ${env.name}：实例在运行。描述 / 规则绑定 / 上游代理绑定 / 放宽校验域名可以热改（保存后几秒内生效）；` +
       `名字 / 监听地址 / 代理鉴权是停机字段，要先停止。`
-    : `编辑 ${env.name}：改完点「保存」。规则绑定、放宽校验域名与描述热生效；名字 / 监听地址 / 代理鉴权停机生效。`;
+    : `编辑 ${env.name}：改完点「保存」。规则绑定、上游代理绑定、放宽校验域名与描述热生效；名字 / 监听地址 / 代理鉴权停机生效。`;
 }
 
 function ensureRuleOption(name) {
@@ -1151,6 +1281,17 @@ function ensureRuleOption(name) {
   const select = document.getElementById("rules-select");
   if ([...select.options].some((option) => option.value === name)) return;
   const option = el("option", null, `${name}（文件不存在）`);
+  option.value = name;
+  select.appendChild(option);
+}
+
+/// 上游代理下拉的兜底选项：引用了账本里暂不可见的名字时不悄悄改直连
+/// （与 ensureRuleOption 同款理由——保存不该有静默副作用）。
+function ensureUpstreamOption(name) {
+  if (!name) return;
+  const select = document.getElementById("upstream-select");
+  if ([...select.options].some((option) => option.value === name)) return;
+  const option = el("option", null, `${name}（账本中暂不可见）`);
   option.value = name;
   select.appendChild(option);
 }
@@ -1330,6 +1471,8 @@ async function submitCreate(form) {
     if (port) payload.listen = { host: "127.0.0.1", port: Number(port) };
     const rules = field(form, "rules").value;
     if (rules) payload.rules = rules;
+    const upstream = field(form, "upstream").value;
+    if (upstream) payload.upstream = upstream;
     const created = await mutate("/api/environments", "POST", payload);
     closeModal("modal-create", { force: true });
     state.selected = created && created.name ? created.name : state.selected;
@@ -1389,6 +1532,8 @@ function formPayload(form, env) {
     // 整体替换：总是显式给数组，空数组 = 全部恢复严格校验（与 rules / 凭据同款）。
     insecure_hosts: parseInsecureHosts(field(form, "insecure_hosts").value),
     rules: rules || null,
+    // 上游代理绑定是热字段且按名整体替换：空选 = 显式 null = 改直连。
+    upstream: field(form, "upstream").value || null,
   };
   if (clearCredentials) {
     payload.proxy_user = null;
@@ -1784,6 +1929,7 @@ function setView(view) {
   }
   document.getElementById("view-environments").classList.toggle("is-hidden", view !== "environments");
   document.getElementById("view-rules").classList.toggle("is-hidden", view !== "rules");
+  document.getElementById("view-proxies").classList.toggle("is-hidden", view !== "proxies");
   document.getElementById("view-compare").classList.toggle("is-hidden", view !== "compare");
   document.getElementById("view-settings").classList.toggle("is-hidden", view !== "settings");
   // 侧栏列表区：环境视图给环境列表，规则库视图给规则集列表（设计稿第 4 页），
@@ -1820,15 +1966,17 @@ async function refreshAll({ force = false, spinner = false } = {}) {
   // 显式刷新 = 用户要的是"现在的事实"，规则原文缓存跟着失效（热重载改的就是它）。
   if (force) clearRuleCaches();
   try {
-    const [status, environments, rules, ca] = await Promise.all([
+    const [status, environments, rules, proxies, ca] = await Promise.all([
       get("/api/status"),
       get("/api/environments"),
       get("/api/rules"),
+      get("/api/proxies"),
       get("/api/ca").catch(() => null),
     ]);
     state.status = status;
     state.environments = environments;
     state.rules = rules.rules;
+    state.proxies = Array.isArray(proxies) ? proxies : [];
     state.ca = ca;
     state.streamOk = true;
     stampOk();
@@ -1837,6 +1985,7 @@ async function refreshAll({ force = false, spinner = false } = {}) {
     renderSidebar(force);
     renderDetail(force);
     renderRules(force);
+    renderProxies(force);
     renderCa();
     renderGeneral();
     renderAbout();
@@ -1857,6 +2006,7 @@ async function applySnapshot(environments) {
   renderSidebar(false);
   renderDetail(false);
   renderRules(false);
+  renderProxies(false);
   await loadLogs(false);
 }
 
@@ -2048,6 +2198,45 @@ function wire() {
       await refreshAll({ force: true });
     } catch (error) {
       reportError(error);
+    } finally {
+      pending.delete(key);
+      submit.classList.remove("is-busy");
+      submit.disabled = false;
+    }
+  });
+
+  // ---- 上游代理（二级代理）：创建/覆盖保存 ----
+  document.getElementById("proxies-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const name = field(form, "name").value.trim();
+    const key = `proxysave:${name}`;
+    if (pending.has(key)) return;
+    const submit = form.querySelector("button[type=submit]");
+    pending.add(key);
+    submit.classList.add("is-busy");
+    submit.disabled = true;
+    clearInvalid(form);
+    try {
+      const payload = {
+        name,
+        host: field(form, "host").value.trim(),
+        port: Number(field(form, "port").value.trim()),
+      };
+      // 凭据只发真的填了的键：都不填 = 保持原样（同名覆盖时凭据不被清掉）；
+      // 只填一边照样发出去，让服务端按「同生共死」报缺失的那一边。
+      const user = field(form, "user").value;
+      const password = field(form, "password").value;
+      if (user) payload.user = user;
+      if (password) payload.password = password;
+      const saved = await mutate("/api/proxies", "POST", payload);
+      document.getElementById("proxies-hint").textContent =
+        `已保存 ${saved.name} → ${saved.host}:${saved.port}（${saved.has_auth ? "带鉴权" : "无鉴权"}）；` +
+        `引用它的环境已热应用，绑定入口在「配置」页签的「上游代理」下拉。`;
+      await refreshAll({ force: true });
+    } catch (error) {
+      if (error.field) markInvalid(form, error.field, error.message);
+      if (!error.handled) reportError(error);
     } finally {
       pending.delete(key);
       submit.classList.remove("is-busy");

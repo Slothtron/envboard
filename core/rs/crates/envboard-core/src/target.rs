@@ -12,8 +12,8 @@
 //! * tls_policy：Verify（默认）或 Insecure —— Insecure 只能由 insecure_hosts
 //!   的精确命中产生（判定复用 envboard-rules::insecure::matches），
 //!   没有任何"全局关校验"的表达路径。
-//! * chained_proxy：上游二级代理位。本版本恒 None，形状先行（后续由扩展
-//!   插件填充），避免到时改接口惊动全部实现。
+//! * chained_proxy：上游二级代理。基础层由配置播种（环境 `upstream` 绑定），
+//!   插件链保留修订权；引擎按到达态执行 —— 经代理 CONNECT / absolute-URI 建连。
 
 use std::net::SocketAddr;
 
@@ -26,10 +26,19 @@ pub enum TlsPolicy {
     Insecure,
 }
 
+/// 二级代理的出向 Basic 鉴权（发往代理的 `Proxy-Authorization`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyAuth {
+    pub user: String,
+    pub password: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxySpec {
     pub host: String,
     pub port: u16,
+    /// None = 不带鉴权头（both-or-neither 由管理面与编译期双重校验）。
+    pub auth: Option<ProxyAuth>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,8 +85,8 @@ impl ConnectTarget {
     }
 }
 
-// SNI 改写（Mirror 的 SNI/Host/证书 CN 三策略）与二级代理填充是后续插件的
-// 扩展位；本版本的种子与判定语义已把接口钉死，扩展只加不改。
+// SNI 改写（Mirror 的 SNI/Host/证书 CN 三策略）是后续插件的扩展位；二级代理
+// 已由基础层播种、插件链保留修订权。种子与判定语义已把接口钉死，扩展只加不改。
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,14 @@
+{
+  "capability": "proxy.validate",
+  "description": "名字白名单：大写、分隔符、路径形态一律拒绝（与环境/规则名同形）",
+  "input": {
+    "name": "Corp/..",
+    "host": "proxy.example.com",
+    "port": 3128
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "proxy.name"
+  }
+}

@@ -1,8 +1,9 @@
 //! 环境（`Environment`）领域模型 —— 纯逻辑，不碰 fs / 网络 / 宿主。
 //!
-//! 契约见 `core/spec/capabilities.md`（§领域不变量）。当前模型是 **7 个字段**：
-//! `name` / `listen` / `rules` / `insecure_hosts` / `description` /
-//! `proxy_user` / `proxy_password`。
+//! 契约见 `core/spec/capabilities.md`（§领域不变量）。当前模型是 **8 个字段**：
+//! `name` / `listen` / `rules` / `upstream` / `insecure_hosts` / `description` /
+//! `proxy_user` / `proxy_password`。`upstream` 按名引用上游代理账本
+//! （`crate::upstream`），`null` = 直连 —— 与 `rules` 的按名绑定完全对称。
 //!
 //! 两条形状变更都**只做一次**（迁移 shim，读到旧形状就转换，写出永不含旧字段）：
 //!
@@ -24,6 +25,7 @@ pub const KNOWN_FIELDS: &[&str] = &[
     "name",
     "listen",
     "rules",
+    "upstream",
     "insecure_hosts",
     "description",
     "proxy_user",
@@ -51,13 +53,14 @@ pub const PROXY_USER_MAX_LEN: usize = 64;
 /// `proxy_password` 长度上限（字符数）。
 pub const PROXY_PASSWORD_MAX_LEN: usize = 128;
 
-/// 一个环境 = 一个监听端口 + 一份可选的规则绑定 + 一份按域名放宽上游校验的清单
-/// + 可选的代理访问鉴权。
+/// 一个环境 = 一个监听端口 + 一份可选的规则绑定 + 一个可选的上游代理绑定
+/// + 一份按域名放宽上游校验的清单 + 可选的代理访问鉴权。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
     name: String,
     listen: Listen,
     rules: Option<String>,
+    upstream: Option<String>,
     insecure_hosts: Vec<String>,
     description: String,
     proxy_user: Option<String>,
@@ -76,11 +79,18 @@ impl Environment {
             name: name.into(),
             listen,
             rules,
+            upstream: None,
             insecure_hosts,
             description: description.into(),
             proxy_user: None,
             proxy_password: None,
         }
+    }
+
+    /// 设置上游代理绑定（按名引用账本；`None` = 直连）。
+    pub fn with_upstream(mut self, upstream: Option<String>) -> Self {
+        self.upstream = upstream;
+        self
     }
 
     /// 设置代理访问鉴权。**要么都给、要么都不给**（[`Environment::from_json`] 会重新校验）。
@@ -100,6 +110,11 @@ impl Environment {
 
     pub fn rules(&self) -> Option<&str> {
         self.rules.as_deref()
+    }
+
+    /// 上游代理绑定（按名引用账本；`None` = 直连）。
+    pub fn upstream(&self) -> Option<&str> {
+        self.upstream.as_deref()
     }
 
     /// 按域名放宽上游证书校验的完整域名清单（**已归一化 + 去重 + 排序**）。
@@ -126,7 +141,7 @@ impl Environment {
 
     /// 归一化后的完整记录 —— 可直接持久化，也是契约 fixture 比对的形状。
     ///
-    /// **七个键永远都在**（空值是 `[]` / `null`）：归一化输出确定，diff 才稳定。
+    /// **八个键永远都在**（空值是 `[]` / `null`）：归一化输出确定，diff 才稳定。
     /// 凭据是明文落在这里的，所以状态文件必须 0600（由持久化层保证）。
     pub fn to_json(&self) -> Value {
         let mut listen = Map::new();
@@ -139,6 +154,13 @@ impl Environment {
         out.insert(
             "rules".into(),
             match &self.rules {
+                Some(name) => Value::String(name.clone()),
+                None => Value::Null,
+            },
+        );
+        out.insert(
+            "upstream".into(),
+            match &self.upstream {
                 Some(name) => Value::String(name.clone()),
                 None => Value::Null,
             },
@@ -189,6 +211,7 @@ impl Environment {
 
         let (host, port) = parse_listen(object.get("listen"))?;
         let rules = normalize_rules(object.get("rules"))?;
+        let upstream = normalize_upstream(object.get("upstream"))?;
         let insecure_hosts = parse_insecure_hosts(object.get("insecure_hosts"))?;
         let description = parse_description(object.get("description"))?;
         let (proxy_user, proxy_password) = parse_credentials(object)?;
@@ -197,6 +220,7 @@ impl Environment {
             name,
             listen: Listen::new(host, port),
             rules,
+            upstream,
             insecure_hosts,
             description,
             proxy_user,
@@ -304,7 +328,37 @@ pub fn normalize_rules(value: Option<&Value>) -> Result<Option<String>, Error> {
 
 /// 规则名白名单（与 `NAME_RE` 同形）。
 pub fn validate_rules_name(name: &str) -> Result<(), Error> {
-    let field = format!("{PATH}.rules");
+    validate_whitelist_name(name, format!("{PATH}.rules"), "rules name")
+}
+
+/// 上游代理名归一化 + 校验：`null`/缺省 = 直连；否则必须是白名单名字。
+///
+/// 与 [`normalize_rules`] 同构 —— 调用方给的是**名字**，不是路径；分隔符与
+/// `..` 在这里就被挡掉，管理器拼不出逃逸路径。引用是否真的存在（账本里有没有
+/// 这个名字）是管理面的职责：domain 层不知道账本。
+pub fn normalize_upstream(value: Option<&Value>) -> Result<Option<String>, Error> {
+    let field = format!("{PATH}.upstream");
+    let Some(value) = value else { return Ok(None) };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value.as_str().ok_or_else(|| {
+        Error::invalid_config(
+            &field,
+            format!("upstream must be a string or null, got {value}"),
+        )
+    })?;
+    let name = raw.trim().to_lowercase();
+    validate_upstream_name(&name)?;
+    Ok(Some(name))
+}
+
+/// 上游代理名白名单（与 `NAME_RE` 同形）。
+pub fn validate_upstream_name(name: &str) -> Result<(), Error> {
+    validate_whitelist_name(name, format!("{PATH}.upstream"), "upstream name")
+}
+
+fn validate_whitelist_name(name: &str, field: String, label: &str) -> Result<(), Error> {
     let mut chars = name.chars();
     let ok_first = matches!(chars.next(), Some(first) if first.is_ascii_lowercase());
     let ok_rest = chars
@@ -314,7 +368,7 @@ pub fn validate_rules_name(name: &str) -> Result<(), Error> {
         return Err(Error::invalid_config(
             field,
             format!(
-                "invalid rules name {name:?}: must match ^[a-z][a-z0-9_-]{{0,31}}$ \
+                "invalid {label} {name:?}: must match ^[a-z][a-z0-9_-]{{0,31}}$ \
                  (a name, not a path — no separators, no '..')"
             ),
         ));
@@ -656,6 +710,41 @@ mod tests {
             normalize_rules(Some(&json!("  BLUE "))).unwrap().as_deref(),
             Some("blue")
         );
+        assert_eq!(
+            normalize_upstream(Some(&json!("  CORP ")))
+                .unwrap()
+                .as_deref(),
+            Some("corp")
+        );
+        // null / 缺省 = 直连
+        assert_eq!(normalize_upstream(None).unwrap(), None);
+        assert_eq!(normalize_upstream(Some(&json!(null))).unwrap(), None);
+        // 形状错误与名字白名单都响亮失败
+        let error = normalize_upstream(Some(&json!(42))).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.upstream"));
+        let error = normalize_upstream(Some(&json!("Corp/.."))).unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("environment.upstream"));
+    }
+
+    #[test]
+    fn upstream_binding_round_trips_and_clears_like_rules() {
+        let base = Environment::from_json(&json!({
+            "name": "gray",
+            "listen": {"port": 16600},
+            "upstream": "corp"
+        }))
+        .unwrap();
+        assert_eq!(base.upstream(), Some("corp"));
+        assert_eq!(base.to_json()["upstream"], json!("corp"));
+        // 八个键永远都在：缺省环境也带 "upstream": null
+        let bare =
+            Environment::from_json(&json!({"name": "gray", "listen": {"port": 16600}})).unwrap();
+        assert_eq!(bare.to_json()["upstream"], json!(null));
+        // 显式 null = 改直连；未提及 = 保持
+        let cleared = base.merged(&json!({"upstream": null})).unwrap();
+        assert_eq!(cleared.upstream(), None);
+        let kept = base.merged(&json!({"description": "x"})).unwrap();
+        assert_eq!(kept.upstream(), Some("corp"));
     }
 
     #[test]

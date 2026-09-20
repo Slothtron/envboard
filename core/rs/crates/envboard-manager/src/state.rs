@@ -75,6 +75,12 @@ pub struct PersistedState {
     /// （否则管理器起不来），随后由物化目录**回填**（见 `Manager::reconcile_rules`）。
     #[serde(default)]
     pub rules: Vec<StoredRules>,
+    /// 上游代理账本（环境 `upstream` 字段按名引用这里的条目）。
+    ///
+    /// `#[serde(default)]` 是有意的：升级前写的状态文件没有这一段，加载时必须成立。
+    /// 条目形状 = `UpstreamProxy::to_json` 的结果，加载时由管理器重新校验。
+    #[serde(default)]
+    pub proxies: Vec<serde_json::Value>,
     #[serde(default)]
     pub desired: BTreeMap<String, Desired>,
     /// 端口是否由管理器**自动分配**。
@@ -95,6 +101,7 @@ impl Default for PersistedState {
             version: STATE_VERSION,
             environments: Vec::new(),
             rules: Vec::new(),
+            proxies: Vec::new(),
             desired: BTreeMap::new(),
             auto_port: BTreeMap::new(),
             marks: BTreeMap::new(),
@@ -116,6 +123,13 @@ impl PersistedState {
     /// 账本里找一条规则。
     pub fn rules_entry(&self, name: &str) -> Option<&StoredRules> {
         self.rules.iter().find(|entry| entry.name == name)
+    }
+
+    /// 账本里找一条上游代理。
+    pub fn proxy_entry(&self, name: &str) -> Option<&serde_json::Value> {
+        self.proxies
+            .iter()
+            .find(|proxy| proxy.get("name").and_then(|name| name.as_str()) == Some(name))
     }
 }
 

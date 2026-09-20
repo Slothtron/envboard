@@ -1,0 +1,14 @@
+{
+  "capability": "proxy.validate",
+  "description": "端口 0 不是自动分配：上游代理必须监听真实端口",
+  "input": {
+    "name": "corp",
+    "host": "proxy.example.com",
+    "port": 0
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "proxy.port"
+  }
+}

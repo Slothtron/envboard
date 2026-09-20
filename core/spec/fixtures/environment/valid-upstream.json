@@ -1,0 +1,17 @@
+{
+  "capability": "environment.validate",
+  "description": "环境绑定上游代理：按名引用账本，null = 直连（与 rules 绑定同构）",
+  "input": {
+    "name": "beta",
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "upstream": "  CORP "
+  },
+  "expect": {
+    "ok": true,
+    "name": "beta",
+    "listen": { "host": "127.0.0.1", "port": 16301 },
+    "rules": null,
+    "upstream": "corp",
+    "description": ""
+  }
+}

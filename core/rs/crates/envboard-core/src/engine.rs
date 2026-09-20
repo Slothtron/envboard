@@ -36,7 +36,7 @@ use crate::ca::SharedCa;
 use crate::config::{self, CompiledConfig, EngineConfig};
 use crate::http::{self, HttpError, Message};
 use crate::plugin::{self, Flow, LogRecord, RequestView};
-use crate::target::{ConnectTarget, TlsPolicy};
+use crate::target::{ConnectTarget, ProxyAuth, ProxySpec, TlsPolicy};
 use crate::tls;
 
 /// 读一个头（含保活等待）的上限：空闲连接被超时切断，不占 fd。
@@ -560,8 +560,18 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         .header("connection")
         .is_some_and(|value| value.to_ascii_lowercase().contains("close"));
 
-    // 内核播种 → 插件 connect 修订 → 内核按最终地址做 insecure 判定。
+    // 内核播种 → 基础层填二级代理 → 插件 connect 链修订 → 内核按最终地址做
+    // insecure 判定。代理绑定是配置驱动的（环境 `upstream` 字段）；插件链保留
+    // 修订权 —— 接缝只有这一个，改写顺序即优先级。
     let mut target = ConnectTarget::seed(&origin.host, origin.port);
+    target.chained_proxy = cfg.upstream.as_ref().map(|upstream| ProxySpec {
+        host: upstream.host.clone(),
+        port: upstream.port,
+        auth: upstream.has_auth().then(|| ProxyAuth {
+            user: upstream.user.clone().unwrap_or_default(),
+            password: upstream.password.clone().unwrap_or_default(),
+        }),
+    });
     let seed_addr = target.resolved_addr;
     if let Err(fault) = plugin::run_connect(&cfg.plugins, &cfg.log_writer, &mut target).await {
         return fail(
@@ -677,7 +687,14 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
             }
             Ok(upstream) => upstream,
         };
-        match exchange(io, upstream, &head, &method, &path, &request_body).await {
+        // 经二级代理的明文 http：请求行用 absolute-URI（标准 HTTP 代理语义），
+        // Host 头原样透传；CONNECT 隧道内保持 origin-form 不变。
+        let upstream_path = if target.chained_proxy.is_some() && !origin.with_tls {
+            format!("http://{authority}{path}")
+        } else {
+            path.clone()
+        };
+        match exchange(io, upstream, &head, &method, &upstream_path, &request_body).await {
             Err(fault) => {
                 return fail(
                     cfg, io, started_ms, clock, &method, &authority, &path, &target, seed_addr,
@@ -870,22 +887,28 @@ fn unix_ms() -> u64 {
 ///
 /// with_tls 由流量形态决定：CONNECT 隧道内必然 TLS；absolute-URI 是 http
 /// scheme 的明文代理语义。校验档位始终由 target.tls_policy 决定。
+/// 配置了二级代理（chained_proxy）时：先 TCP 连代理；TLS 目标在其上发
+/// `CONNECT <authority>` 建隧道（内层 TLS 与直连逐字节一致，insecure_hosts
+/// 语义不变）；明文 http 直接把这条代理连接交给 exchange（absolute-URI）。
 async fn connect_upstream(
     shared: &Shared,
     target: &ConnectTarget,
     with_tls: bool,
 ) -> Result<Upstream, String> {
-    let tcp = match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, async {
-        match target.resolved_addr {
-            Some(addr) => TcpStream::connect(addr).await,
-            None => TcpStream::connect((target.host.as_str(), target.port)).await,
-        }
-    })
-    .await
-    {
-        Err(_) => return Err(format!("upstream connect timed out: {}", target.authority)),
-        Ok(Ok(tcp)) => tcp,
-        Ok(Err(error)) => return Err(format!("upstream connect failed: {error}")),
+    let tcp = match &target.chained_proxy {
+        Some(proxy) => connect_via_chained_proxy(proxy, target, with_tls).await?,
+        None => match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, async {
+            match target.resolved_addr {
+                Some(addr) => TcpStream::connect(addr).await,
+                None => TcpStream::connect((target.host.as_str(), target.port)).await,
+            }
+        })
+        .await
+        {
+            Err(_) => return Err(format!("upstream connect timed out: {}", target.authority)),
+            Ok(Ok(tcp)) => tcp,
+            Ok(Err(error)) => return Err(format!("upstream connect failed: {error}")),
+        },
     };
     if !with_tls {
         return Ok(Upstream::Plain(tcp));
@@ -922,6 +945,69 @@ async fn connect_upstream(
             Err(message)
         }
     }
+}
+
+/// 经二级代理建连：TCP 连代理 →（TLS 目标）CONNECT 隧道。隧道内的字节流返回
+/// 给调用方做内层 rustls 握手；明文 http 直接返回这条代理连接。
+/// TCP 连接与 CONNECT 往返共用 [`UPSTREAM_CONNECT_TIMEOUT`] 一个预算。
+async fn connect_via_chained_proxy(
+    proxy: &ProxySpec,
+    target: &ConnectTarget,
+    with_tls: bool,
+) -> Result<TcpStream, String> {
+    let described = format!("upstream proxy {}:{}", proxy.host, proxy.port);
+    let mut tcp = match tokio::time::timeout(
+        UPSTREAM_CONNECT_TIMEOUT,
+        TcpStream::connect((proxy.host.as_str(), proxy.port)),
+    )
+    .await
+    {
+        Err(_) => return Err(format!("{described} connect timed out")),
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(error)) => return Err(format!("{described} connect failed: {error}")),
+    };
+    if !with_tls {
+        return Ok(tcp);
+    }
+
+    // CONNECT 目标 = 插件链修订后的终址：规则改写过 resolved_addr 就连改写后的
+    // 地址（含义：改写出的内网地址必须经该代理可达，否则是配置错误）。
+    let connect_authority = match target.resolved_addr {
+        Some(addr) => addr.to_string(),
+        None => format!("{}:{}", target.host, target.port),
+    };
+    let mut request =
+        format!("CONNECT {connect_authority} HTTP/1.1\r\nHost: {connect_authority}\r\n");
+    if let Some(auth) = &proxy.auth {
+        request.push_str(&format!(
+            "Proxy-Authorization: Basic {}\r\n",
+            auth::basic_credentials(&auth.user, &auth.password)
+        ));
+    }
+    request.push_str("\r\n");
+    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, tcp.write_all(request.as_bytes())).await {
+        Err(_) => return Err(format!("{described} CONNECT write timed out")),
+        Ok(Err(error)) => return Err(format!("{described} CONNECT write failed: {error}")),
+        Ok(Ok(())) => {}
+    }
+    let mut reader = BufReader::new(tcp);
+    let response =
+        match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, http::read_head(&mut reader)).await {
+            // 三层 Result：外层超时 → read_head 的 io 错误 → None（连接关闭）。
+            Err(_) => return Err(format!("{described} CONNECT response timed out")),
+            Ok(Err(error)) => {
+                return Err(format!("{described} CONNECT response: {}", error.reason()));
+            }
+            Ok(Ok(None)) => return Err(format!("{described} closed without a CONNECT response")),
+            Ok(Ok(Some(response))) => response,
+        };
+    let status = response.status().unwrap_or(0);
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "{described} refused CONNECT with {status}; check its credentials or allow-list"
+        ));
+    }
+    Ok(reader.into_inner())
 }
 
 fn server_name_for(

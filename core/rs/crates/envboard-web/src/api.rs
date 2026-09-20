@@ -131,6 +131,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/environments/:name/reallocate", post(api_reallocate))
         .route("/api/environments/:name/logs", get(api_logs))
         .route("/api/rules", get(api_rules_list).post(api_rules_import))
+        .route("/api/proxies", get(api_proxy_list).post(api_proxy_put))
+        .route(
+            "/api/proxies/:name",
+            get(api_proxy_get).delete(api_proxy_delete),
+        )
         // 故障注入旋钮（live 断言组 9 的面）：核心不支持注入时如实 400。
         .route("/api/_fault", post(api_fault))
         .route(
@@ -576,6 +581,37 @@ async fn api_rules_read(State(state): State<AppState>, Path(name): Path<String>)
 
 async fn api_rules_delete(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     match state.manager.rules_delete(&name) {
+        Ok(()) => Json(json!({"removed": name})).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_proxy_list(State(state): State<AppState>) -> Response {
+    match state.manager.proxy_list() {
+        Ok(views) => Json(Value::Array(
+            views.iter().map(|view| view.to_json()).collect(),
+        ))
+        .into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_proxy_put(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    match state.manager.proxy_put(&body) {
+        Ok(view) => (StatusCode::CREATED, Json(view.to_json())).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_proxy_get(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.proxy_get(&name) {
+        Ok(view) => Json(view.to_json()).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+async fn api_proxy_delete(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    match state.manager.proxy_delete(&name) {
         Ok(()) => Json(json!({"removed": name})).into_response(),
         Err(error) => error_response(error),
     }

@@ -43,14 +43,16 @@ environment.validate  ←  environment.merge
 
 ### 环境（`Environment`）
 
-v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**当前模型是 7 个字段**：
-任意的 `options` 透传**已删除**、`proxy_auth` **已拆成两个字段**、新增 `insecure_hosts`。
+v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**当前模型是 8 个字段**：
+任意的 `options` 透传**已删除**、`proxy_auth` **已拆成两个字段**、新增 `insecure_hosts`
+与 `upstream`（按名引用上游代理账本，见本文件「上游代理（chained proxy）」）。
 
 | 字段 | JSON 形状 | 约束 | 生效 |
 |---|---|---|---|
 | `name` | `string` | 见下（唯一标识，也是持久化主键） | 停机 |
 | `listen` | `{host, port}` | `host` 是 IP 字面量（默认 `127.0.0.1`，可为 `0.0.0.0` 对外服务）；`port` 见下 | 停机 |
 | `rules` | `string \| null` | 规则名（**不是路径**，见本文件「规则库账本与固定名软链」） | **热**（换软链） |
+| `upstream` | `string \| null` | 上游代理名（引用代理账本；`null` = 直连）；名字白名单与 `rules` 同形 | **热** |
 | `insecure_hosts` | `string[]` | 完整域名（也接受 IP 字面量）；拒绝 `*` / `?`；≤200 条；归一化 + 去重 + 排序；默认 `[]` | **热** |
 | `description` | `string` | 可空；最长 200 字符 | 热 |
 | `proxy_user` | `string \| null` | 与 `proxy_password` **同生共死**；非空时不含 `:`、空白或控制字符；≤64 字符 | 停机 |
@@ -74,6 +76,10 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
    - **安全理由**：规则名白名单是路径穿越的唯一防线。适配器/管理器**必须**用
      "白名单名字 + 固定后缀 + 固定父目录"拼路径（`<rules_dir>/<name>.rules`），
      **禁止**接受调用方给出的路径片段、`..`、绝对路径或带分隔符的名字。
+4b. **`upstream`**：`null` = 直连；非空时是**上游代理名**（同样匹配
+   `^[a-z][a-z0-9_-]{0,31}$`，`field = environment.upstream`），且必须在代理账本里
+   存在 —— 绑定不存在的名字是 `invalid_config`（静默直连会让用户以为流量走了代理）。
+   引用是否存在的裁决在管理面（domain 层不知道账本）。
 5. **`description`**：可空字符串；`trim` 后按字符计最长 200，超长失败
    `field = environment.description`。
 6. **`insecure_hosts`**：按域名放宽上游证书校验的完整域名清单，语义见本文件
@@ -136,6 +142,8 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 | `insecure_hosts` | ✅ 允许（热） | 注入器轮询 `config.json`，一变就整份重读（见下节） |
 | `rules` **绑定** | ✅ 允许（热） | 绑定由**固定名软链**承载：管理器原子换链 + 重写 `config.json`，注入器下一次轮询跟上；实例不必重启 |
 | 规则文件的**内容** | ✅ 允许（热） | 注入器按目标文件的 `(mtime, size)` 重读；绑定没变也不必重启 |
+| `upstream` **绑定** | ✅ 允许（热） | 上游连接每请求新建，绑定经同步 apply 换快照，下一请求即生效（v3：无注入器，装配即生效） |
+| 代理实体的 **host / port / 凭据** | ✅ 允许（热） | manager 重编译全部引用环境的 spec 并逐个同步 `apply` |
 | `name` / `listen` | ❌ 拒绝（`conflict`） | 它们是环境的身份：客户端代理配置、状态文件、进程记录会同时失效 |
 | `proxy_user` / `proxy_password` | ❌ 拒绝（`conflict`） | 实例在启动时经 `--set proxyauth=…` 拿到凭据，运行中换不上 |
 
@@ -185,6 +193,40 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
   随 `options` 一起删除）。
 - 判定失败时**倾向严格**：注入器构造 context 出错只记一条 warn，不设置 `ssl_conn`，
   于是 core 走它自己的严格路径 —— 宁可连不上，也不能在出错时把校验静默关掉。
+
+## 上游代理（chained proxy）
+
+**问题**：envboard 跑在只能经统一出口代理上网的网段里，环境的直连上游会失败。
+解法是「二级代理」：环境出方向先到一个 HTTP 代理，再由它转达目标。它是一等实体：
+
+- **代理账本**（`state.json` 的 `proxies[]`）：`{ name, host, port, user, password }`。
+  `name` 白名单与环境/规则名同形；`host` 必须是域名或 IP 字面量（归一化小写、去尾点）；
+  `port` 为 `1..=65535`；`user` / `password` **同生共死**（与环境的 `proxy_user` /
+  `proxy_password` 同规，≤64 / ≤128 字符）。未知字段响亮失败
+  （`field = proxy.<key>`）。凭据明文只落 0600 状态文件，API / 视图 / 日志**永不回显**，
+  只暴露 `has_auth` 布尔。
+- **环境绑定**：环境第 8 字段 `upstream` 按名引用（`null` = 直连）；**热字段**。
+- **建连语义**（引擎 `ConnectTarget.chained_proxy`，基础层从配置播种、插件链保留修订权）：
+  - TLS 目标：TCP 连代理 → `CONNECT <authority> HTTP/1.1`（有凭据时带
+    `Proxy-Authorization: Basic`）→ 代理应答非 2xx → **502**，错误消息带代理状态码
+    与可行动建议；2xx 后在隧道内按既有 `TlsPolicy` 做 rustls 握手 —— **内层 TLS 与
+    直连逐字节一致，`insecure_hosts` 语义不变**。CONNECT 的目标地址 = 插件链修订后
+    的终址（规则改写过 `resolved_addr` 就连改写后的地址；含义是改写出的地址必须经
+    该代理可达）。
+  - 明文 http：请求行改写为 **absolute-URI** 直接发往代理（标准 HTTP 代理语义），
+    `Host` 头透传不改写。
+  - 超时：TCP 连代理与 CONNECT 往返共用上游连接超时（10s）；内层 TLS 用上游握手
+    超时（10s）。
+- **引用完整性**：删除被引用的代理 → `conflict` 并点名全部引用环境；绑定不存在的
+  名字 → `invalid_config`；状态文件手改出的悬空引用**加载即拒启** —— 三条同证
+  「禁止静默降级」。
+- **热矩阵**：环境改 `upstream` 绑定、改代理实体的 host/port/凭据，对运行中环境都是
+  热的（重编译 spec → 同步 `apply`）；`config_hash` 覆盖代理的 host/port/user 与
+  密码摘要。
+- **API 面**：`GET /api/proxies`（清单 + `references[]`）、`POST /api/proxies`
+  （创建/同名整体替换）、`GET/DELETE /api/proxies/:name`。
+- **明确不做**：SOCKS5；与代理本身的 TLS（`https://` 代理形态）；PAC / 透明代理；
+  按域名分流到不同代理；代理链（代理的代理）。
 
 ## 配置下发与热应用（内存装配，v3）
 
