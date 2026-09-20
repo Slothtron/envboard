@@ -27,11 +27,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envboard_core_api::{
     ClockPort, CoreCapabilities, EngineHandle, EngineSpec, Error, ErrorCode, InstanceState,
-    LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine,
+    LineWriter, Listen, LogLevel, LoggerPort, ProxyEngine, UpstreamSpec,
 };
 use envboard_domain::{
-    Action, Desired, Environment, InstanceRecord, PortRequest, ReconcilePlan, candidate_ports,
-    plan_reconcile, seed_from, select_port,
+    Action, Desired, Environment, InstanceRecord, PortRequest, ReconcilePlan, UpstreamProxy,
+    candidate_ports, plan_reconcile, seed_from, select_port, validate_upstream_name,
 };
 use serde_json::{Map, Value, json};
 
@@ -48,6 +48,8 @@ pub struct EnvView {
     pub name: String,
     pub listen: Listen,
     pub rules: Option<String>,
+    /// 上游代理绑定（按名引用账本；None = 直连）。
+    pub upstream: Option<String>,
     /// 按域名放宽上游校验的完整域名清单（不是凭据，可以回显）。
     pub insecure_hosts: Vec<String>,
     pub description: String,
@@ -68,6 +70,7 @@ impl EnvView {
             "name": self.name,
             "listen": {"host": self.listen.host.to_string(), "port": self.listen.port},
             "rules": self.rules,
+            "upstream": self.upstream,
             "insecure_hosts": self.insecure_hosts,
             "description": self.description,
             "desired": match self.desired { Desired::Running => "running", Desired::Stopped => "stopped" },
@@ -77,6 +80,29 @@ impl EnvView {
             "rules_missing": self.rules_missing,
             "proxy_command": self.proxy_command,
             "proxy_auth_enabled": self.proxy_auth_enabled,
+        })
+    }
+}
+
+/// 一条上游代理对外的视图。凭据**永不回显**，只有 `has_auth` 布尔。
+#[derive(Debug, Clone)]
+pub struct ProxyView {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub has_auth: bool,
+    /// 引用这条代理的环境名（删除确认的前置信息；删除仍由服务端裁决）。
+    pub references: Vec<String>,
+}
+
+impl ProxyView {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "host": self.host,
+            "port": self.port,
+            "has_auth": self.has_auth,
+            "references": self.references,
         })
     }
 }
@@ -165,6 +191,26 @@ impl Manager {
         // 载入即重新校验：状态文件是外部输入，坏掉要响亮失败。
         for raw in &state.environments {
             Environment::from_json(raw)?;
+        }
+        for raw in &state.proxies {
+            UpstreamProxy::from_json(raw)?;
+        }
+        // 悬空引用加载即拒（ADR-6）：删除被引用代理已被挡住、绑定已被校验，
+        // 稳态下不该出现；出现只能来自手改状态文件 —— 静默降级会谎报链路。
+        for raw in &state.environments {
+            let environment = Environment::from_json(raw)?;
+            if let Some(name) = environment.upstream()
+                && state.proxy_entry(name).is_none()
+            {
+                return Err(Error::invalid_config(
+                    "environment.upstream",
+                    format!(
+                        "environment {:?} references upstream proxy {name:?}, which is not in \
+                         the proxy ledger (a dangling reference would silently connect direct)",
+                        environment.name()
+                    ),
+                ));
+            }
         }
         let manager = Self {
             config,
@@ -272,6 +318,7 @@ impl Manager {
         let environment = Environment::from_json(&candidate)?;
         let mut state = self.state.lock().unwrap();
         self.require_known_rules(&state, &environment)?;
+        self.require_known_upstream(&state, &environment)?;
         state.environments.push(environment.to_json());
         state.desired.insert(name.clone(), Desired::Stopped);
         state.auto_port.insert(name.clone(), !explicit_port);
@@ -460,6 +507,154 @@ impl Manager {
         Ok(state.rules.iter().map(|entry| entry.name.clone()).collect())
     }
 
+    // ------------------------------------------------------------- 上游代理
+
+    /// 上游代理清单（按名字序，与账本存储顺序一致）。
+    pub fn proxy_list(&self) -> Result<Vec<ProxyView>, Error> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .proxies
+            .iter()
+            .filter_map(|raw| self.proxy_view_of(&state, raw).ok())
+            .collect())
+    }
+
+    pub fn proxy_get(&self, name: &str) -> Result<ProxyView, Error> {
+        validate_upstream_name(name).map_err(|error| retitle_field(error, "proxy.name"))?;
+        let state = self.state.lock().unwrap();
+        let raw = state
+            .proxy_entry(name)
+            .cloned()
+            .ok_or_else(|| self.proxy_not_found(name))?;
+        self.proxy_view_of(&state, &raw)
+    }
+
+    /// 保存（创建/整体替换）一条上游代理：校验 → 账本 → 持久化 → 热应用引用环境。
+    ///
+    /// 账本是唯一真相；同名即覆盖（与规则导入同构）。引用它的运行中环境当场
+    /// 换快照 —— 上游连接每请求新建，改 host/port/凭据下一请求即生效。
+    pub fn proxy_put(&self, body: &Value) -> Result<ProxyView, Error> {
+        let proxy = UpstreamProxy::from_json(body)?;
+        let json = proxy.to_json();
+        let name = proxy.name().to_string();
+
+        let mut state = self.state.lock().unwrap();
+        match state
+            .proxies
+            .iter_mut()
+            .find(|raw| raw.get("name").and_then(Value::as_str) == Some(&name))
+        {
+            Some(existing) => *existing = json.clone(),
+            None => state.proxies.push(json.clone()),
+        }
+        state
+            .proxies
+            .sort_by_key(|raw| raw.get("name").and_then(Value::as_str).unwrap_or("").to_string());
+        self.repo.save(&state)?;
+        let affected = self.environments_bound_upstream_locked(&state, &name);
+        drop(state);
+
+        self.logger.log(
+            LogLevel::Info,
+            &format!(
+                "saved upstream proxy {name} → {}:{} (auth: {}); {} referencing environment(s) \
+                 hot-applied",
+                proxy.host(),
+                proxy.port(),
+                if proxy.has_auth() { "yes" } else { "no" },
+                affected.len(),
+            ),
+        );
+        for env in affected {
+            self.hot_update_engine(&env);
+        }
+        self.proxy_get(&name)
+    }
+
+    /// 删除上游代理。被任何环境引用时拒绝并**点名全部引用方**（ADR-6）：
+    /// 静默降级成直连会让用户以为流量还在走代理。
+    pub fn proxy_delete(&self, name: &str) -> Result<(), Error> {
+        validate_upstream_name(name).map_err(|error| retitle_field(error, "proxy.name"))?;
+        let mut state = self.state.lock().unwrap();
+        let referencing = self.environments_bound_upstream_locked(&state, name);
+        if !referencing.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                format!(
+                    "upstream proxy {name:?} is referenced by environment(s) {referencing:?}; \
+                     unbind them first (a dangling reference would silently connect direct)"
+                ),
+            ));
+        }
+        if state.proxy_entry(name).is_none() {
+            return Err(self.proxy_not_found(name));
+        }
+        state.proxies.retain(|raw| {
+            raw.get("name").and_then(Value::as_str) != Some(name)
+        });
+        self.repo.save(&state)?;
+        drop(state);
+        self.logger
+            .log(LogLevel::Info, &format!("deleted upstream proxy {name}"));
+        Ok(())
+    }
+
+    fn proxy_view_of(&self, state: &PersistedState, raw: &Value) -> Result<ProxyView, Error> {
+        let proxy = UpstreamProxy::from_json(raw)?;
+        Ok(ProxyView {
+            name: proxy.name().to_string(),
+            host: proxy.host().to_string(),
+            port: proxy.port(),
+            has_auth: proxy.has_auth(),
+            references: self.environments_bound_upstream_locked(state, proxy.name()),
+        })
+    }
+
+    fn proxy_not_found(&self, name: &str) -> Error {
+        Error::at(
+            ErrorCode::NotFound,
+            "proxy",
+            format!("upstream proxy {name:?} does not exist"),
+        )
+    }
+
+    /// 环境绑定的上游代理名必须在账本里（与 require_known_rules 同构）：
+    /// 不放行"绑一个还不存在的名字"，否则那是静默直连。
+    fn require_known_upstream(
+        &self,
+        state: &PersistedState,
+        environment: &Environment,
+    ) -> Result<(), Error> {
+        let Some(name) = environment.upstream() else {
+            return Ok(());
+        };
+        if state.proxy_entry(name).is_some() {
+            return Ok(());
+        }
+        Err(Error::invalid_config(
+            "environment.upstream",
+            format!(
+                "upstream proxy {name:?} is not in the proxy ledger; create it first \
+                 (a binding to a missing proxy would silently connect direct)"
+            ),
+        ))
+    }
+
+    /// 引用某条上游代理的全部环境名（热应用的影响面）。
+    fn environments_bound_upstream_locked(
+        &self,
+        state: &PersistedState,
+        name: &str,
+    ) -> Vec<String> {
+        state
+            .environments
+            .iter()
+            .filter_map(|raw| Environment::from_json(raw).ok())
+            .filter(|environment| environment.upstream() == Some(name))
+            .map(|environment| environment.name().to_string())
+            .collect()
+    }
+
     /// 读规则正文：账本里的 rendered 就是权威文本，所以物化文件被删也读得到。
     pub fn rules_read(&self, name: &str) -> Result<String, Error> {
         envboard_domain::validate_rules_name(name)?;
@@ -612,8 +807,8 @@ impl Manager {
 impl Manager {
     /// 热/停机矩阵（契约的一部分）：
     ///
-    /// * 热：description、insecure_hosts、rules 绑定、规则内容 —— 全部经同步
-    ///   apply 装配即生效；
+    /// * 热：description、insecure_hosts、rules 绑定、规则内容、upstream 绑定 ——
+    ///   全部经同步 apply 装配即生效（上游连接每请求新建，换绑定没有残留）；
     /// * 停机：name、listen、proxy_user、proxy_password —— 划分与 v2 一致：
     ///   换端口/换身份要动监听与客户端配置，换凭据是安全语义的变更，都该是
     ///   一次显式的停机重启。v3 凭据已不经 argv，但字段划分不因实现方便而漂移。
@@ -625,25 +820,30 @@ impl Manager {
         let identity_changed =
             merged.name() != environment.name() || merged.listen() != environment.listen();
         let binding_changed = merged.rules() != environment.rules();
+        let upstream_changed = merged.upstream() != environment.upstream();
         let insecure_changed = merged.insecure_hosts() != environment.insecure_hosts();
         let credentials_changed = merged.proxy_user() != environment.proxy_user()
             || merged.proxy_password() != environment.proxy_password();
-        let hot_changed = binding_changed || insecure_changed;
+        let hot_changed = binding_changed || upstream_changed || insecure_changed;
         if (identity_changed || credentials_changed) && self.is_live(name) {
             return Err(Error::new(
                 ErrorCode::Conflict,
                 format!(
                     "environment {name:?} is running; stop it before changing its name, listen \
-                     address, proxy_user or proxy_password. Description, insecure_hosts and the \
-                     rules binding are hot and can be changed while running."
+                     address, proxy_user or proxy_password. Description, insecure_hosts, the \
+                     rules binding and the upstream proxy binding are hot and can be changed \
+                     while running."
                 ),
             ));
         }
 
         // 改了端口/绑定/放行清单/鉴权，旧的失败标记就不再成立：留着它，界面会拿
         // 新端口号去报旧冲突 —— 等于在说谎。
-        let mark_is_stale =
-            identity_changed || binding_changed || insecure_changed || credentials_changed;
+        let mark_is_stale = identity_changed
+            || binding_changed
+            || upstream_changed
+            || insecure_changed
+            || credentials_changed;
 
         let mut state = self.state.lock().unwrap();
         if merged.name() != environment.name() && state.find(merged.name()).is_some() {
@@ -653,6 +853,7 @@ impl Manager {
             ));
         }
         self.require_known_rules(&state, &merged)?;
+        self.require_known_upstream(&state, &merged)?;
         replace_environment_by(&mut state, environment.name(), &merged)?;
         if mark_is_stale {
             state.marks.remove(environment.name());
@@ -691,6 +892,9 @@ impl Manager {
         }
         if binding_changed {
             changed.push("rules");
+        }
+        if upstream_changed {
+            changed.push("upstream");
         }
         if insecure_changed {
             changed.push("insecure_hosts");
@@ -850,8 +1054,9 @@ impl Manager {
 }
 
 impl Manager {
-    /// 从账本拼出引擎 spec：规则正文只取账本的 rendered（账本唯一真相；
-    /// 物化文件只是随账本维护的产物，不作为输入面）。
+    /// 从账本拼出引擎 spec：规则正文只取账本的 rendered、上游代理只取账本的
+    /// 定义（账本唯一真相；物化产物不作输入面）。账本条目在载入与保存时都
+    /// 校验过，这里解析失败即内部不变量被破坏 —— panic 而不是静默直连。
     fn engine_spec_locked(&self, state: &PersistedState, environment: &Environment) -> EngineSpec {
         let rules_name = environment.rules();
         let rules_text = rules_name
@@ -863,11 +1068,25 @@ impl Manager {
                     format!("{}\\n", entry.rendered)
                 }
             });
+        let upstream = environment.upstream().map(|name| {
+            let raw = state
+                .proxy_entry(name)
+                .unwrap_or_else(|| panic!("upstream proxy {name:?} vanished from the ledger"));
+            let proxy = UpstreamProxy::from_json(raw)
+                .unwrap_or_else(|error| panic!("ledger entry {name:?} is invalid: {error}"));
+            UpstreamSpec {
+                host: proxy.host().to_string(),
+                port: proxy.port(),
+                user: proxy.user().map(str::to_string),
+                password: proxy.password().map(str::to_string),
+            }
+        });
         EngineSpec {
             listen: environment.listen(),
             insecure_hosts: environment.insecure_hosts().to_vec(),
             proxy_user: environment.proxy_user().map(str::to_string),
             proxy_password: environment.proxy_password().map(str::to_string),
+            upstream,
             rules_text,
             rules_source: rules_name.map(|name| self.config.rules_path(name)),
             log: self.log_writer(environment.name()),
@@ -1199,6 +1418,7 @@ impl Manager {
             name: name.clone(),
             listen,
             rules: environment.rules().map(str::to_string),
+            upstream: environment.upstream().map(str::to_string),
             insecure_hosts: environment.insecure_hosts().to_vec(),
             description: environment.description().to_string(),
             desired: state.desired_of(&name),
@@ -1310,4 +1530,11 @@ fn replace_environment_by(
         ErrorCode::NotFound,
         format!("environment {old_name:?} does not exist"),
     ))
+}
+
+/// domain 层的名字白名单报错带着 `environment.upstream` 字段路径；代理实体的
+/// 校验语义相同，只把路径改到 `proxy.name`。
+fn retitle_field(mut error: Error, field: &str) -> Error {
+    error.field = Some(field.to_string());
+    error
 }

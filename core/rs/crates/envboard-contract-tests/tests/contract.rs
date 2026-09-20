@@ -28,6 +28,7 @@ fn fixtures_root() -> PathBuf {
 const CAPABILITIES: &[(&str, &str)] = &[
     ("environment.validate", "environment"),
     ("environment.merge", "merge"),
+    ("proxy.validate", "proxy"),
     ("rules.parse", "rules"),
     ("insecure.hosts", "insecure"),
     ("port.allocate", "ports"),
@@ -180,6 +181,24 @@ fn environment_merge_matches_the_contract() {
                     case.path.display()
                 );
                 assert_fields(&case, &merged.to_json());
+            }
+            Err(error) => assert_error(&case, error),
+        }
+    }
+}
+
+#[test]
+fn proxy_validate_matches_the_contract() {
+    for case in load_cases("proxy") {
+        match envboard_domain::UpstreamProxy::from_json(&case.input) {
+            Ok(proxy) => {
+                assert_ne!(
+                    case.expect["ok"],
+                    Value::Bool(false),
+                    "{}: expected failure",
+                    case.path.display()
+                );
+                assert_fields(&case, &proxy.to_json());
             }
             Err(error) => assert_error(&case, error),
         }
@@ -385,7 +404,7 @@ fn fixture_directories_match_the_capability_registry() {
         .map(|(_, dir)| load_cases(dir).len())
         .sum();
     assert_eq!(
-        total, 66,
+        total, 79,
         "契约 fixture 总数变了：请同时更新 core/spec/ 与 README 里的数字"
     );
 }

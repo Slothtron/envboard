@@ -27,6 +27,7 @@ fn spec(port: u16, rules: Option<&str>) -> EngineSpec {
         insecure_hosts: Vec::new(),
         proxy_user: None,
         proxy_password: None,
+        upstream: None,
         rules_text: rules.map(str::to_string),
         rules_source: None,
         log: None,

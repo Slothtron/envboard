@@ -10,7 +10,7 @@ pub mod proxy;
 pub mod sha256;
 pub mod text;
 
-pub use engine::{EngineHandle, EngineReport, EngineSpec, InstanceState, ProxyEngine};
+pub use engine::{EngineHandle, EngineReport, EngineSpec, InstanceState, ProxyEngine, UpstreamSpec};
 pub use error::{Error, ErrorCode, Retryability};
 pub use ports::{
     ClockPort, FixedClock, LineWriter, LogLevel, LoggerPort, ManualClock, NullLineWriter,

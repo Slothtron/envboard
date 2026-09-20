@@ -1143,3 +1143,170 @@ async fn starting_an_instance_writes_the_run_marker_line() {
         "{after}"
     );
 }
+
+// --------------------------------------------------------------------------- //
+// 上游代理（chained proxy）
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn proxy_put_creates_replaces_and_never_echoes_credentials() {
+    let harness = Harness::new();
+    let view = harness
+        .manager
+        .proxy_put(&serde_json::json!({
+            "name": "Corp", "host": "proxy.example.com", "port": 3128,
+            "user": "alice", "password": "s3cret"
+        }))
+        .unwrap();
+    assert_eq!(view.name, "corp");
+    assert_eq!(view.host, "proxy.example.com");
+    assert_eq!(view.port, 3128);
+    assert!(view.has_auth);
+    // 视图永不回显凭据
+    let rendered = view.to_json().to_string();
+    assert!(!rendered.contains("s3cret") && !rendered.contains("alice"), "{rendered}");
+
+    // 同名即整体替换（与规则导入同构）
+    let updated = harness
+        .manager
+        .proxy_put(&serde_json::json!({"name": "corp", "host": "10.0.0.9", "port": 8080}))
+        .unwrap();
+    assert_eq!(updated.port, 8080);
+    assert!(!updated.has_auth);
+    assert_eq!(harness.manager.proxy_list().unwrap().len(), 1);
+
+    // 非法输入响亮失败，字段路径指向缺失的那一边
+    let bad = harness
+        .manager
+        .proxy_put(&serde_json::json!({
+            "name": "corp", "host": "10.0.0.9", "port": 8080, "user": "alice"
+        }))
+        .unwrap_err();
+    assert_eq!(bad.code, ErrorCode::InvalidConfig);
+    assert_eq!(bad.field.as_deref(), Some("proxy.password"));
+}
+
+#[test]
+fn environment_cannot_bind_an_unknown_upstream_proxy() {
+    let harness = Harness::new();
+    let error = harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "upstream": "corp"}))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(error.field.as_deref(), Some("environment.upstream"));
+
+    // 建好代理后绑定成功；删除被引用的代理被拒并点名引用方
+    harness
+        .manager
+        .proxy_put(&serde_json::json!({"name": "corp", "host": "10.0.0.9", "port": 8080}))
+        .unwrap();
+    let beta = harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "upstream": "corp"}))
+        .unwrap();
+    assert_eq!(beta.upstream.as_deref(), Some("corp"));
+    let error = harness.manager.proxy_delete("corp").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("beta"), "{error}");
+
+    // 解绑后可删；再绑定不存在的名字照旧响亮失败
+    harness
+        .manager
+        .update("beta", &serde_json::json!({"upstream": null}))
+        .unwrap();
+    harness.manager.proxy_delete("corp").unwrap();
+    let error = harness
+        .manager
+        .update("beta", &serde_json::json!({"upstream": "corp"}))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(error.field.as_deref(), Some("environment.upstream"));
+}
+
+#[test]
+fn proxy_view_lists_references_and_the_ledger_survives_a_restart() {
+    let harness = Harness::new();
+    harness
+        .manager
+        .proxy_put(&serde_json::json!({"name": "corp", "host": "10.0.0.9", "port": 8080}))
+        .unwrap();
+    harness
+        .manager
+        .create(&serde_json::json!({"name": "beta", "upstream": "corp"}))
+        .unwrap();
+    harness
+        .manager
+        .create(&serde_json::json!({"name": "gamma", "upstream": "corp"}))
+        .unwrap();
+    let view = harness.manager.proxy_get("corp").unwrap();
+    assert_eq!(view.references, vec!["beta".to_string(), "gamma".to_string()]);
+
+    // 账本落盘，重启后原样活过来
+    assert_eq!(harness.saved().proxies.len(), 1);
+    let again = harness.standalone();
+    assert_eq!(again.proxy_list().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn binding_the_upstream_is_hot_and_reaches_the_engine_spec() {
+    let harness = Harness::new();
+    harness
+        .manager
+        .proxy_put(&serde_json::json!({
+            "name": "corp", "host": "10.0.0.9", "port": 8080,
+            "user": "alice", "password": "s3cret"
+        }))
+        .unwrap();
+    let _ = harness.manager.create(&serde_json::json!({"name": "beta"})).unwrap();
+    let started = harness.manager.start("beta").await.unwrap();
+    assert_eq!(started.health.as_str(), "running");
+    let hash_before = harness.engine().config_hash_of("beta").unwrap();
+
+    // 运行中改绑定（热字段）：不重启即生效，config_hash 变化被引擎确认
+    let updated = harness
+        .manager
+        .update("beta", &serde_json::json!({"upstream": "corp"}))
+        .unwrap();
+    assert_eq!(updated.health.as_str(), "running");
+    let hash_after = harness.engine().config_hash_of("beta").unwrap();
+    assert_ne!(hash_before, hash_after, "upstream binding must enter the spec hash");
+
+    // 改代理实体本身（host/port/凭据）→ 引用环境再次热应用
+    let hash_proxy_before = harness.engine().config_hash_of("beta").unwrap();
+    harness
+        .manager
+        .proxy_put(&serde_json::json!({"name": "corp", "host": "10.0.0.10", "port": 3128}))
+        .unwrap();
+    let hash_proxy_after = harness.engine().config_hash_of("beta").unwrap();
+    assert_ne!(hash_proxy_before, hash_proxy_after, "editing the proxy entity must hot-apply");
+}
+
+#[test]
+fn a_dangling_upstream_reference_in_the_state_file_refuses_to_load() {
+    let harness = Harness::new();
+    let _ = harness.manager.create(&serde_json::json!({"name": "beta"})).unwrap();
+    // 手工把悬空引用写进状态文件（绕过 create/update 的校验）——账本里没有 ghost
+    prepare_state(&harness, |state| {
+        state.environments[0]["upstream"] = serde_json::json!("ghost");
+    });
+    let engine: Arc<dyn envboard_core_api::ProxyEngine> = Arc::new(FakeEngine::new());
+    // Manager 不是 Debug：先取 Result 再拆错误
+    let loaded = Manager::new(
+        harness.manager.config().clone(),
+        engine,
+        Arc::new(SocketPortProbe),
+        Arc::new(RealFiles),
+        harness.clock.clone() as Arc<dyn envboard_core_api::ClockPort>,
+        harness.logger.clone() as Arc<dyn envboard_core_api::LoggerPort>,
+        Arc::new(JsonFileStateRepo::new(harness.manager.config().state_file()))
+            as Arc<dyn StateRepo>,
+        false,
+    );
+    let error = match loaded {
+        Err(error) => error,
+        Ok(_) => panic!("a dangling upstream reference must refuse to load"),
+    };
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(error.field.as_deref(), Some("environment.upstream"));
+}

@@ -197,6 +197,7 @@ fn spec(port: u16, rules: Option<&str>, insecure: &[&str]) -> EngineSpec {
         insecure_hosts: insecure.iter().map(|host| host.to_string()).collect(),
         proxy_user: None,
         proxy_password: None,
+        upstream: None,
         rules_text: rules.map(str::to_string),
         rules_source: None,
         log: None,

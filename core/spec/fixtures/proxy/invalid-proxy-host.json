@@ -1,0 +1,14 @@
+{
+  "capability": "proxy.validate",
+  "description": "host 必须是合法域名或 IP 字面量；0 与越界端口、非整数端口一律拒绝",
+  "input": {
+    "name": "corp",
+    "host": "../etc/passwd",
+    "port": 3128
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "proxy.host"
+  }
+}

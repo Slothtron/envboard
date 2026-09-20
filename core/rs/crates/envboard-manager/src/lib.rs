@@ -21,7 +21,7 @@ pub mod manager;
 pub mod ports;
 pub mod state;
 
-pub use manager::{EnvView, Manager, ReconcileReport};
+pub use manager::{EnvView, Manager, ProxyView, ReconcileReport};
 pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};
 pub use state::{
     InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION, StoredError,

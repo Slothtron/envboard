@@ -47,6 +47,16 @@ impl FakeEngine {
         }
     }
 
+    /// 测试断言面：某环境最近一次装配的 config_hash（None = 未登记）。
+    /// 上游代理绑定是否到达引擎 spec，靠 hashable_json 的哈希差断言。
+    pub fn config_hash_of(&self, env: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(env)
+            .map(|instance| instance.report.config_hash.clone())
+    }
+
     /// 故障注入：把某环境的报告改写成任意状态（live 故障路径的替身旋钮）。
     pub fn inject_state(&self, env: &str, state: InstanceState) -> bool {
         let mut guard = self.entries.lock().unwrap();
@@ -229,6 +239,7 @@ mod tests {
             insecure_hosts: Vec::new(),
             proxy_user: None,
             proxy_password: None,
+            upstream: None,
             rules_text: None,
             rules_source: None,
             log: None,
