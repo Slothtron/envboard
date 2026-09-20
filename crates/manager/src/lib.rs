@@ -3,6 +3,8 @@
 //! 分层（依赖单向，由 `envboard-policy-tests` 的 `deps` 门禁强制）：
 //!
 //! ```text
+//! envboard-protocol（UI 边界词汇：视图 DTO / 帧形状）
+//!        ↑
 //! envboard-engine（trait / 契约词汇）
 //!        ↑
 //! engine::domain / engine::rules（纯逻辑模块）
@@ -23,7 +25,8 @@ pub mod manager;
 pub mod ports;
 pub mod state;
 
-pub use manager::{EnvView, Manager, ProxyView, ReconcileReport};
+pub use envboard_protocol::{DebugView, Desired, EnvView, ProxyView, ReconcileReport};
+pub use manager::Manager;
 pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};
 pub use state::{
     InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION, StoredError,

@@ -120,9 +120,9 @@ request/end | custom`
   环境字段 `capture` 仍是 per-env 开关（API 用户可用），调试页经 debug 端点驱动它。
 - **调试实时流**（`GET /api/debug/stream`，SSE）：抓包记录自动上屏的推送通道。
   连接即发 `snapshot` 帧（形状 = `GET /api/debug` 的会话视图，整幅替换；无目标时
-  `{env: null}`）；此后每 500ms 轮询内存缓冲，有增量发
-  `events` 帧 `{records, cursor, captured, dropped}`。游标（`request_id`）由流
-  自己维护 —— 淘汰只会移除游标之前的记录，增量无缺口，断线重连只需重收一次
+  `{env: null}`）；此后每 500ms 轮询内存缓冲，有增量发 `events` 帧。
+  帧语法与游标域（本流游标 = `request_id`）见 spec/protocol.md「推送流的帧」；
+  淘汰只会移除游标之前的记录，增量无缺口，断线重连只需重收一次
   `snapshot`。会话换代（实例重启或 clear，即 `session.id`/`generation` 变化）或
   目标消失 → 重发 `snapshot`。轨迹流里的 `capture/saved` 通知保留不变（轨迹只
   回答"发生了什么"），**记录正文只经本流与拉取端点出口**。
@@ -137,6 +137,7 @@ request/end | custom`
   工作台「活动」视图。
 - 数据面：`GET /api/environments/:name/trajectory?limit=N`（拉取式）；
   `GET /api/environments/:name/trajectory/stream`（SSE：连接即发
-  `baseline` 尾部窗口，此后 `events` 增量，断线带 `?cursor=` 续传）；
+  `baseline` 尾部窗口，此后 `events` 增量，断线带 `?cursor=` 续传；
+  帧形状与游标域见 spec/protocol.md「推送流的帧」）；
   工作台环境详情「轨迹」页签。抓包实时推送见「调试实时流」
   （`GET /api/debug/stream`），工作台「调试」视图消费它。

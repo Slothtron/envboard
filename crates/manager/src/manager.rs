@@ -33,9 +33,11 @@ use envboard_engine::domain::{
 use envboard_engine::{
     CaptureDelta as EngineCaptureDelta, CaptureView as EngineCaptureView, ClockPort,
     CoreCapabilities, EngineHandle, EngineSpec, Error, ErrorCode, InstanceState, LineWriter,
-    Listen, LogLevel, LoggerPort, ProxyEngine, UpstreamSpec,
+    LogLevel, LoggerPort, ProxyEngine, UpstreamSpec,
 };
-use serde::Serialize;
+use envboard_protocol::{
+    DebugView, Desired as WireDesired, Endpoint, EnvView, ProxyView, ReconcileReport,
+};
 use serde_json::{Map, Value, json};
 
 use crate::events::ControlEventLog;
@@ -46,88 +48,6 @@ use envboard_events::ControlEvent;
 /// 启动后等待绑定定态的预算（绑定是本地 bind，毫秒级；给足宽容只防极端调度）。
 const SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const SETTLE_POLL: Duration = Duration::from_millis(10);
-
-/// 一个环境对外的视图（工作台与 CLI 都渲染它）。
-#[derive(Debug, Clone)]
-pub struct EnvView {
-    pub name: String,
-    pub listen: Listen,
-    pub rules: Option<String>,
-    /// 上游代理绑定（按名引用账本；None = 直连）。
-    pub upstream: Option<String>,
-    /// 按域名放宽上游校验的完整域名清单（不是凭据，可以回显）。
-    pub insecure_hosts: Vec<String>,
-    pub description: String,
-    pub desired: Desired,
-    pub health: InstanceState,
-    /// 生效后的规则条数（账本解析得出）。
-    pub rules_count: usize,
-    /// 绑定了规则名，但账本里没有 —— 该环境当前**不覆盖任何域名**。
-    pub rules_missing: bool,
-    pub proxy_command: String,
-    /// 代理鉴权是否启用。只给布尔，不回显凭据。
-    pub proxy_auth_enabled: bool,
-    /// 抓包开关（只控记录；清空走显式动作）。
-    pub capture: bool,
-}
-
-impl EnvView {
-    pub fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "listen": {"host": self.listen.host.to_string(), "port": self.listen.port},
-            "rules": self.rules,
-            "upstream": self.upstream,
-            "insecure_hosts": self.insecure_hosts,
-            "description": self.description,
-            "desired": match self.desired { Desired::Running => "running", Desired::Stopped => "stopped" },
-            "health": self.health.as_str(),
-            "health_reason": self.health.reason(),
-            "rules_count": self.rules_count,
-            "rules_missing": self.rules_missing,
-            "proxy_command": self.proxy_command,
-            "proxy_auth_enabled": self.proxy_auth_enabled,
-            "capture": self.capture,
-        })
-    }
-}
-
-/// 一条上游代理对外的视图。凭据**永不回显**，只有 `has_auth` 布尔。
-#[derive(Debug, Clone)]
-pub struct ProxyView {
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub has_auth: bool,
-    /// 引用这条代理的环境名（删除确认的前置信息；删除仍由服务端裁决）。
-    pub references: Vec<String>,
-}
-
-impl ProxyView {
-    pub fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "host": self.host,
-            "port": self.port,
-            "has_auth": self.has_auth,
-            "references": self.references,
-        })
-    }
-}
-
-/// 调试会话视图：目标环境 + 其抓包会话。
-#[derive(Debug, Clone, Serialize)]
-pub struct DebugView {
-    pub env: String,
-    pub capture: EngineCaptureView,
-}
-
-/// reconcile 的执行结果。
-#[derive(Debug, Clone, Default)]
-pub struct ReconcileReport {
-    pub actions: Vec<(String, String)>,
-    pub warnings: Vec<String>,
-}
 
 /// v3 能力表：引擎全部原生能力在线（不再有"某个 core 不支持"的分叉）。
 pub fn capabilities_v3() -> CoreCapabilities {
@@ -335,14 +255,18 @@ impl Manager {
     }
 
     /// 数据面请求轨迹尾部（拉取式只读；实时流走 SSE）。
-    pub fn trajectory(&self, name: &str, limit: usize) -> Result<Vec<Value>, Error> {
+    /// 返回 `(cursor, events)`：cursor 是**读之前的文件字节数**（窗口末端偏移），
+    /// SSE `baseline` 帧与 REST 响应体用它续传 —— 前端把它原样传回 `?cursor=`。
+    pub fn trajectory(&self, name: &str, limit: usize) -> Result<(u64, Vec<Value>), Error> {
         self.require(name)?;
         let Some(path) = self.config.trajectory_file(name) else {
-            return Ok(Vec::new());
+            return Ok((0, Vec::new()));
         };
-        let text = match crate::infra::RealEventStore.read_tail(&path, 1024 * 1024) {
+        let store = crate::infra::RealEventStore;
+        let cursor = store.size(&path).unwrap_or(0);
+        let text = match store.read_tail(&path, 1024 * 1024) {
             Ok(text) => text,
-            Err(_) => return Ok(Vec::new()), // 文件不存在 = 还没有轨迹
+            Err(_) => return Ok((0, Vec::new())), // 文件不存在 = 还没有轨迹
         };
         // 窗口解析（同上）：read_tail 的起点大概率在一行中间，撕裂首行被逐行跳过，
         // 而不是像账本读者那样整份拒绝。
@@ -359,7 +283,7 @@ impl Manager {
             .map(|entry| serde_json::to_value(&entry.envelope).unwrap_or(Value::Null))
             .collect();
         let start = selected.len().saturating_sub(limit);
-        Ok(selected[start..].to_vec())
+        Ok((cursor, selected[start..].to_vec()))
     }
 
     pub fn config(&self) -> &ManagerConfig {
@@ -1763,16 +1687,24 @@ impl Manager {
         // 视图不回显凭据：启用了鉴权的环境，用户复制后自行补上。
         let proxy_command =
             format!("export https_proxy=http://{listen} http_proxy=http://{listen}");
+        let health = self.verdict(&name, &environment, state);
         Ok(EnvView {
             name: name.clone(),
-            listen,
+            listen: Endpoint {
+                host: listen.host.to_string(),
+                port: listen.port,
+            },
             rules: environment.rules().map(str::to_string),
             upstream: environment.upstream().map(str::to_string),
             insecure_hosts: environment.insecure_hosts().to_vec(),
             description: environment.description().to_string(),
             capture: environment.capture(),
-            desired: state.desired_of(&name),
-            health: self.verdict(&name, &environment, state),
+            desired: match state.desired_of(&name) {
+                Desired::Running => WireDesired::Running,
+                Desired::Stopped => WireDesired::Stopped,
+            },
+            health: health.as_str().to_string(),
+            health_reason: health.reason().map(str::to_string),
             rules_count,
             rules_missing,
             proxy_command,

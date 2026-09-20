@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 适用范围 | `crates/server/assets/` 三个资产（index.html / app.css / app.js） |
+| 适用范围 | `crates/web/assets/` 三个资产（index.html / app.css / app.js） |
 | 令牌值唯一权威 | app.css 第 ① 区（`:root` 令牌区；README「运维」节同款声明） |
 | 执行 | policy 门禁 `tests/policy-tests/tests/ui_style.rs`（一门禁一文件，`bash ci/verify.sh` 默认层） |
 | 版本 | v1.0（2026-09-20） |

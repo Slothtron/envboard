@@ -129,7 +129,7 @@ fn the_release_artifact_contains_only_expected_files() {
 
     // 内嵌资产没有编译期检查 —— 最阴险的坏法是"截断"：头部完好、尾部消失，
     // 页面白屏或卡死却处处绿灯。钉住两端：最小规模 + 关键符号在场。
-    let app_js = std::fs::read_to_string(root.join("crates/server/assets/app.js"))
+    let app_js = std::fs::read_to_string(root.join("crates/web/assets/app.js"))
         .expect("内嵌的 app.js 必须存在");
     if app_js.lines().count() < 1_800 {
         problems.push(format!(
@@ -147,7 +147,7 @@ fn the_release_artifact_contains_only_expected_files() {
             problems.push(format!("app.js 缺关键符号 {marker:?} —— 被截断或改写了？"));
         }
     }
-    let index_html = std::fs::read_to_string(root.join("crates/server/assets/index.html"))
+    let index_html = std::fs::read_to_string(root.join("crates/web/assets/index.html"))
         .expect("内嵌的 index.html 必须存在");
     for id in ["env-form", "detail-actions", "panel-config"] {
         if !index_html.contains(id) {
@@ -192,7 +192,7 @@ fn the_release_artifact_contains_only_expected_files() {
     // 规范 7.2.6：明亮主题禁纯黑。真实教训是 .traj-row:hover 引用了不存在的
     // --surface-2，纯黑 rgba(0, 0, 0, …) fallback 悄悄生效 —— 令牌永远不在场，
     // fallback 永远在生效，肉眼与运行时都不报错。
-    let app_css = std::fs::read_to_string(root.join("crates/server/assets/app.css"))
+    let app_css = std::fs::read_to_string(root.join("crates/web/assets/app.css"))
         .expect("内嵌的 app.css 必须存在");
     if app_css.contains("rgba(0, 0, 0") {
         problems.push(
@@ -237,7 +237,7 @@ fn the_release_artifact_contains_only_expected_files() {
         }
     }
     let api_rs =
-        std::fs::read_to_string(root.join("crates/server/src/api.rs")).expect("api.rs 必须存在");
+        std::fs::read_to_string(root.join("crates/web/src/api.rs")).expect("api.rs 必须存在");
     if !api_rs.contains("\"/api/debug/stream\"") {
         problems.push("api.rs 没有 /api/debug/stream 路由 —— 实时流端点退场".to_string());
     }

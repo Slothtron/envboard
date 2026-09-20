@@ -61,6 +61,9 @@ const state = {
   lastOk: null,
   /// SSE 是否还活着 —— 连接徽章与侧栏底部圆点都看它。
   streamOk: false,
+  /// 快照流游标（控制面代次；spec/protocol.md）。健康变化不经过控制面写入，
+  /// 它只是快照版本号，UI 不据此跳过渲染。
+  snapshotGeneration: null,
   // ---- 日志栏 ----
   logsEnv: null,
   trajEnv: null,
@@ -1881,15 +1884,15 @@ async function fetchTrajectoryPage(name) {
   try {
     const data = await get(`${environmentPath(name)}/trajectory?limit=300`);
     state.trajRows = (data.events || []).map(rowFromEnvelope);
-    state.trajCursor = state.trajRows.length
-      ? state.trajRows[state.trajRows.length - 1].seq
-      : 0;
+    // 帧协议统一后 cursor 一律是窗口末端的字节偏移（spec/protocol.md），
+    // 直接作为断线续传的 ?cursor=，不再拿事件 seq 硬凑。
+    state.trajCursor = typeof data.cursor === "number" ? data.cursor : 0;
   } catch (error) {
     reportError(error);
   }
 }
 
-/// SSE：连接即发 baseline（尾部窗口 + cursor），此后 events 增量。
+/// SSE：连接即发 baseline（尾部窗口 + 窗口末端游标），此后 events 增量。
 /// 断线后 EventSource 自动重连；cursor 随 URL 重置，续传交给服务端。
 function startTrajectoryStream(name) {
   if (state.trajEs && state.trajEnv === name) return;
@@ -1912,6 +1915,7 @@ function startTrajectoryStream(name) {
       const payload = JSON.parse(event.data);
       state.trajRows = (payload.events || []).map(rowFromEnvelope);
       state.trajKey = "";
+      if (typeof payload.cursor === "number") state.trajCursor = payload.cursor;
       renderTrajectory(true);
     } catch { /* 畸形帧忽略 */ }
   });
@@ -2064,7 +2068,7 @@ function renderDebugSession(view) {
   records.scrollTop = records.scrollHeight;
 }
 
-// ---- 调试实时流：抓包记录自动上屏（SSE；契约见 spec/events.md「调试实时流」） ---- //
+// ---- 调试实时流：抓包记录自动上屏（SSE；帧契约见 spec/protocol.md「推送流的帧」） ---- //
 
 function startDebugStream() {
   stopDebugStream();
@@ -3007,6 +3011,7 @@ function connectEvents() {
     const payload = JSON.parse(event.data);
     if (!payload.ok) return;
     state.streamOk = true;
+    state.snapshotGeneration = payload.cursor;
     // 日志面板跟着刷新：只在点"日志"时取过一次的话，之后永远停在那一次的快照上
     // （崩溃现场、热重载规则都看不到）。快照本身就是每秒一次，顺势读一次尾部即可。
     applySnapshot(payload.environments).catch(() => {});

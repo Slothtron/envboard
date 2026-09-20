@@ -4,8 +4,8 @@
 //! 没有 CLI 子命令面：一切管理动作走工作台 UI 或本地 HTTP API（端点清单见 README），
 //! 状态只有一个写者 —— 本进程（flock 拿不到就响亮失败，说明已有一个在跑）。
 //!
-//! 鉴权按绑定地址定档：回环默认免鉴权；非回环必须显式 `--token`（见 config.rs 的
-//! 安全模型）。这里只翻译参数，不重新判定任何领域规则。
+//! 鉴权按绑定地址定档：回环默认免鉴权；非回环必须显式 `--token`（安全模型在
+//! `envboard-web` 的 config.rs）。这里只翻译参数，不重新判定任何领域规则。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,7 +17,11 @@ use envboard_engine::{CaOutcome, EngineBackend, SharedCa};
 use envboard_engine::{ClockPort, Error, ErrorCode, LoggerPort, ProxyEngine};
 use envboard_manager::infra::{RealFiles, SocketPortProbe, StderrLogger, SystemClock};
 use envboard_manager::{JsonFileStateRepo, Manager, ManagerConfig, StateRepo};
-use envboard_server::{CaAssets, WebConfig, serve};
+use envboard_web::{CaAssets, WebConfig, serve};
+
+/// 日志体积的照看间隔：全进程**只起一个**照看者（挂在 web 层的 SSE 里就会
+/// 每个客户端各干一遍 —— 这是编排职责，归宿主）。
+const LOG_MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -124,7 +128,26 @@ fn run(cli: Cli) -> Result<(), Error> {
     })?;
 
     let web_config = WebConfig::parse(&cli.listen, cli.token.clone(), &manager.config().state_dir)?;
-    runtime.block_on(serve(Arc::new(manager), web_config, ca_assets))
+    let manager = Arc::new(manager);
+    runtime.block_on(async move {
+        // 编排职责（宿主）：先 reconcile（崩溃自愈），再起 HTTP。
+        let report = manager.reconcile().await?;
+        for (env, action) in &report.actions {
+            println!("reconcile: {action:<14} {env}");
+        }
+        // 每次只是给每个环境做一次 `stat`，只有超上限才真正轮转（copytruncate）。
+        manager.maintain_logs();
+        {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(LOG_MAINTENANCE_INTERVAL).await;
+                    manager.maintain_logs();
+                }
+            });
+        }
+        serve(manager, web_config, ca_assets).await
+    })
 }
 
 /// v3 引擎构造：进程内纯库引擎，共享 CA 在 confdir 就绪（兼容既有 mitmproxy

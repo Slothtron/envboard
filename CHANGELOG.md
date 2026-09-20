@@ -6,6 +6,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed（UI crate 拆分：protocol + web，前后端协议成文）
+
+- **新增 `envboard-protocol`（叶子 crate）**：UI 边界词汇的唯一定义处 —— 视图 DTO
+  （`EnvView` / `ProxyView` / `DebugView` / `ReconcileReport`，自 manager 收拢）与
+  抓包词汇（`CaptureView` / `CaptureDelta` / `SessionInfo`，自 engine 收拢）迁移至此，
+  两侧以原名 re-export 保兼容；新增推送流帧类型（`TrajectoryWindow` /
+  `SnapshotFrame` / `DebugSnapshot` / `DebugEvents` / `ErrorFrame`）与
+  `Cursor`（Byte / Request / Generation）。纯 serde、零传输依赖 —— 未来桌面形态
+  （`envboard-desktop`）与 web 平级共用。
+- **新增 `envboard-web`（web 形态 crate）**：`crates/server` 的资产（index.html /
+  app.css / app.js，git mv 保历史）、axum 路由/handler/安全中间件、`WebConfig` 与
+  CSP、qrcode 端点整体平移；只做传输绑定，整 crate 不认识引擎装配（源文件面门禁
+  随拆分扩展到本 crate）。
+- **`envboard-server` 瘦身为宿主**：只剩 `[[bin]] envboard` 的组合根（引擎装配 /
+  SharedCa / flock）与 serve 编排（reconcile、日志照看循环从 web 层归还宿主）；
+  lib 面随拆分取消。
+- **推送流帧统一**（行为变更，契约见新增的 spec/protocol.md）：三条 SSE 流的每帧
+  都带显式 `cursor`，帧名统一 `snapshot / baseline / events / error`。轨迹流
+  `baseline` 帧补齐游标（= 窗口末端字节偏移），REST `GET …/trajectory` 响应体改
+  为同形 `{cursor, events}`（修复前端此前拿事件 seq 硬凑字节偏移的错位）；快照流
+  帧新增控制面账本代次作 advisory 游标；调试实时流无会话首帧补 `cursor: 0`。
+  前端 baseline 直读游标续传、快照帧记录代次。
+- **门禁**：`policy-tests` 依赖边表登记 protocol / web 并更新 server 边；
+  `ui_style` 门禁资产路径改指 `crates/web/assets/`；artifact 校验同路径。
+
 ### Added（上游代理 / 二级代理：一等实体 + 按环境热绑定）
 
 - **代理账本**：`state.json` 增 `proxies[]`（`name/host/port/user/password`），manager 为

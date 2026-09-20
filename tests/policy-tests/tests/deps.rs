@@ -9,9 +9,10 @@
 //! 5. 注册表与磁盘**一一对应**（未登记即失败、登记了但没了也失败）；
 //! 6. **只有测试目标**的 crate 不得有产物依赖（它们不进产物，也不该拖进产物依赖）；
 //! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）；
-//! 8. **工作台 lib 面不认识引擎**：`envboard-server` 的 lib 侧源码（除 `src/main.rs`
-//!    组合根外）禁止出现引擎 crate 的引用 —— "只认识管理器的公开 API"这条不变量
-//!    依旧成立，裁决在源文件面（manifest 分不出 lib 与 bin）；
+//! 8. **UI 面不认识引擎装配**：`envboard-server` 的源码（除 `src/main.rs`
+//!    组合根外）与 `envboard-web` 的全部源码，禁止出现引擎装配符号 —— "只认识
+//!    管理器的公开 API"这条不变量依旧成立，裁决在源文件面（manifest 分不出
+//!    lib 与 bin）；
 //! 9. **每份 manifest 显式声明 `publish = false`** —— 本仓不发布 crate，发布物是二进制；
 //!    把这件事写成 manifest 事实，才让默认层"不跑 `cargo package --list`"有据可依。
 
@@ -24,20 +25,36 @@ use std::collections::{BTreeSet, HashSet};
 ///
 /// 这张表管的是**会进产物的依赖**（`dependencies` / `build-dependencies`）。
 const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
-    // 引擎库 = 唯一内部根（api 词汇 / rules / domain / 引擎本体全在其中，
+    // UI 边界词汇：纯 serde DTO / 帧形状（叶子；不依赖任何内部 crate）
+    ("envboard-protocol", &[]),
+    // 引擎库（api 词汇 / rules / domain / 引擎本体全在其中，
     // 原先 api-domain-rules-core 的四条内部边变成了 crate 内的模块纪律，
     // 见下面第 2 条的源文件面判据）
-    ("envboard-engine", &["envboard-events"]),
+    ("envboard-engine", &["envboard-events", "envboard-protocol"]),
     // 事件模型：纯数据词汇（serde/serde_json），manager 与 engine 都会用
     ("envboard-events", &[]),
     ("envboard-engine-fake", &["envboard-engine"]),
-    ("envboard-manager", &["envboard-engine", "envboard-events"]),
-    // 工作台 = 唯一宿主入口（lib 的 HTTP 面 + [[bin]] 组合根）。边表里的
-    // envboard-engine 只允许 src/main.rs（装配引擎与共享 CA）使用；lib 侧
-    // **依旧只认识管理器的公开 API**，由下面的源文件面判据钉死。
+    (
+        "envboard-manager",
+        &["envboard-engine", "envboard-events", "envboard-protocol"],
+    ),
+    // web 形态（资产 + HTTP/SSE 绑定）。envboard-engine 只允许错误词汇
+    // （Error/ErrorCode），装配符号由下面的源文件面判据禁绝 —— envboard-web
+    // 没有 main.rs 豁免，整 crate 都不认识引擎装配。
+    (
+        "envboard-web",
+        &[
+            "envboard-engine",
+            "envboard-events",
+            "envboard-manager",
+            "envboard-protocol",
+        ],
+    ),
+    // 宿主 = 唯一入口（[[bin]] 组合根 + serve 编排）。边表里的
+    // envboard-engine 只允许 src/main.rs（装配引擎与共享 CA）使用。
     (
         "envboard-server",
-        &["envboard-engine", "envboard-events", "envboard-manager"],
+        &["envboard-engine", "envboard-manager", "envboard-web"],
     ),
     // 纯测试 crate
     ("envboard-contract-tests", &[]),
@@ -51,7 +68,6 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
 /// 正是"管理器测试不需要装 mitmproxy"要的效果。把这类边单列出来，比把 `core-fake`
 /// 加进上面那张表更清楚：它没有被发布出去。
 const ALLOWED_DEV_INTERNAL: &[(&str, &[&str])] = &[
-    ("envboard-server", &["envboard-engine-fake"]),
     ("envboard-manager", &["envboard-engine-fake"]),
     ("envboard-contract-tests", &["envboard-engine"]),
 ];
@@ -264,19 +280,23 @@ fn the_rust_layering_holds() {
             ));
         }
 
-        // 8. 工作台 lib 面不认识引擎（源文件面判据）。
-        if name == "envboard-server" {
+        // 8. UI 面不认识引擎装配（源文件面判据）：`envboard-server` 除组合根
+        //    main.rs 外、`envboard-web` 全部源码，都禁止出现引擎装配符号 ——
+        //    "只认识管理器的公开 API + 错误词汇"这条不变量随拆分继续成立。
+        if name == "envboard-server" || name == "envboard-web" {
             let web_src = crate_dir.join("src");
-            let main_rs = web_src.join("main.rs");
-            if !main_rs.exists() {
-                problems.push(
-                    "envboard-server/src/main.rs 缺失：二进制 = 工作台启动器，组合根就在这里"
-                        .to_string(),
-                );
+            if name == "envboard-server" {
+                let main_rs = web_src.join("main.rs");
+                if !main_rs.exists() {
+                    problems.push(
+                        "envboard-server/src/main.rs 缺失：二进制 = 工作台启动器，组合根就在这里"
+                            .to_string(),
+                    );
+                }
             }
             for entry in walk_relative(&web_src) {
                 let relative = entry.clone();
-                if relative.ends_with("main.rs") {
+                if name == "envboard-server" && relative.ends_with("main.rs") {
                     continue;
                 }
                 let Some(text) = read_text(&web_src.join(&relative)) else {
@@ -293,7 +313,8 @@ fn the_rust_layering_holds() {
                 .find(|symbol| text.contains(*symbol));
                 if let Some(symbol) = assembly {
                     problems.push(format!(
-                        "envboard-server/src/{relative} 引用了引擎装配符号 {symbol:?}：lib 面只许认识管理器的公开 API（共享错误码等词汇除外），引擎装配只允许出现在 src/main.rs"
+                        "{name}/src/{relative} 引用了引擎装配符号 {symbol:?}：\
+                         UI 面只许认识管理器的公开 API（共享错误码等词汇除外），引擎装配只允许 envboard-server 的 src/main.rs"
                     ));
                 }
             }

@@ -69,28 +69,34 @@ previous snapshot still serving" 呈现。
 落盘是 `<log_dir>/<env>.log`（管理器侧单一写者）、copytruncate 轮转、有界尾读。
 
 ```
-spec/            语言中立契约：能力清单、错误码、规则语法 BNF、66 个 golden fixture
+spec/            语言中立契约：能力清单、错误码、协议（UI 边界词汇与推送流帧）、
+                 规则语法 BNF、66 个 golden fixture
 crates/
+  protocol            UI 边界词汇：视图 DTO、推送流帧形状、游标、错误信封
+                      （纯 serde，零传输依赖；未来桌面形态与 web 共用）         ← 叶子
   engine              ProxyEngine 接缝（EngineSpec / EngineHandle / EngineReport /
-                      InstanceState）、错误码、端口（时钟 / 日志 LineWriter）      ← 根
+                      InstanceState）、错误码、端口（时钟 / 日志 LineWriter）
   │ domain             环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
   │ rules              hosts 解析 + 确定性渲染（全仓唯一一份解析实现）              ← 纯逻辑
   │ 引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
                       hosts 改写、请求终局日志、有界日志总线
   engine-fake         ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
   envboard-manager    环境 CRUD、端口分配、账本持久化、锁、健康判定、reconcile、
-                      规则账本、EngineSpec 编译与热装配接线
-  server              axum API + 内嵌前端（index.html / app.css / app.js）+ envboard
-                      二进制（唯一发布产物；组合根在本 crate 的 src/main.rs）
+                      规则账本、EngineSpec 编译与热装配接线、视图 DTO 构造
+  web                 web 形态：axum API + SSE + 内嵌前端（index.html / app.css /
+                      app.js）；只做传输绑定，不认识引擎装配
+  server              envboard 二进制（唯一发布产物）：组合根在 src/main.rs
+                      （引擎装配 + 管理器 + web 的 serve 编排）
   envboard-contract-tests   消费全部 66 个契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
 scripts/systemd/      部署工件（用户级 unit）
 ```
 
 依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：
-core-api 是根；domain / rules 是纯逻辑（不得依赖 tokio / libc）；工作台 lib 面只认识
-管理器的公开 API、不认识引擎实现（引擎装配只允许出现在 src/main.rs 组合根，源文件面
-判据钉住）—— 换引擎实现不动工作台。
+protocol 是叶子；domain / rules 是纯逻辑（不得依赖 tokio / libc）；UI 面（web 全部源码、
+宿主除 main.rs 外）只认识管理器的公开 API、不认识引擎装配（引擎装配只允许出现在
+src/main.rs 组合根，源文件面判据钉住）—— 换引擎实现不动界面，加界面形态
+（桌面 GUI 等）不动协议。
 
 ```
 <state_dir>/
@@ -330,7 +336,7 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
   别人的进程时，对应环境以 `port_conflict` 如实呈现。
 
 工作台界面的视觉令牌、CSP 约束与交互纪律以
-`crates/server/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）；
+`crates/web/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）；
 改 UI 前先读 `spec/ui.md`（机检条目 UI-1…UI-8 由 policy 门禁执行，违反即 `verify` 红）。
 
 ## 健康与错误码

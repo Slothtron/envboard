@@ -30,9 +30,9 @@ const RULE_IDS: &[&str] = &[
     "UI-1", "UI-2", "UI-3", "UI-4", "UI-5", "UI-6", "UI-7", "UI-8",
 ];
 
-const APP_CSS: &str = "crates/server/assets/app.css";
-const APP_JS: &str = "crates/server/assets/app.js";
-const INDEX_HTML: &str = "crates/server/assets/index.html";
+const APP_CSS: &str = "crates/web/assets/app.css";
+const APP_JS: &str = "crates/web/assets/app.js";
+const INDEX_HTML: &str = "crates/web/assets/index.html";
 const SPEC_MD: &str = "spec/ui.md";
 
 /// UI-7：内联事件属性名单（CSP 严格，事件一律 `addEventListener`）。

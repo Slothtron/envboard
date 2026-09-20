@@ -194,7 +194,7 @@ fn create_allocates_a_free_port_in_range_and_persists_it() {
     let harness = Harness::new();
     let beta = create_beta(&harness);
     assert_in_range(&beta, &harness);
-    assert_eq!(beta.desired, envboard_engine::domain::Desired::Stopped);
+    assert_eq!(beta.desired, envboard_manager::Desired::Stopped);
     assert!(!beta.proxy_command.is_empty(), "工作台要给出可复制的一行");
 
     let prod = harness
@@ -255,20 +255,20 @@ async fn start_and_stop_round_trip_updates_desired_state_and_health() {
     let beta = create_beta(&harness);
 
     let started = harness.manager.start("beta").await.unwrap();
-    assert_eq!(started.desired, envboard_engine::domain::Desired::Running);
+    assert_eq!(started.desired, envboard_manager::Desired::Running);
     assert_eq!(
         harness.manager.health("beta").await.unwrap(),
         InstanceState::Running
     );
 
     // 端口真的在监听（真 socket，不是替身）
-    let addr = std::net::SocketAddr::new(beta.listen.host, beta.listen.port);
+    let addr = std::net::SocketAddr::new(beta.listen.host.parse().unwrap(), beta.listen.port);
     assert!(
         std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_ok()
     );
 
     let stopped = harness.manager.stop("beta").await.unwrap();
-    assert_eq!(stopped.desired, envboard_engine::domain::Desired::Stopped);
+    assert_eq!(stopped.desired, envboard_manager::Desired::Stopped);
     assert_eq!(
         harness.manager.health("beta").await.unwrap(),
         InstanceState::Stopped
@@ -322,7 +322,7 @@ async fn a_failed_engine_is_visible_not_guessed_from_ports() {
     assert_eq!(view.health.as_str(), "failed");
     assert_eq!(
         view.desired,
-        envboard_engine::domain::Desired::Running,
+        envboard_manager::Desired::Running,
         "自己死的实例期望不变：等 reconcile 拉回来"
     );
 }
@@ -349,15 +349,12 @@ async fn apply_rejection_keeps_the_old_snapshot_and_marks_the_environment() {
         )
         .unwrap();
     assert_eq!(updated.insecure_hosts, ["api.example.com"], "账本记录期望");
-    match updated.health {
-        InstanceState::Unhealthy { reason } => {
-            assert!(
-                reason.contains("previous snapshot") && reason.contains("wildcard"),
-                "{reason}"
-            );
-        }
-        other => panic!("expected unhealthy mark, got {other:?}"),
-    }
+    assert_eq!(updated.health, "unhealthy", "expected unhealthy mark");
+    let reason = updated.health_reason.unwrap_or_default();
+    assert!(
+        reason.contains("previous snapshot") && reason.contains("wildcard"),
+        "{reason}"
+    );
     assert!(
         harness
             .log_lines()
@@ -376,7 +373,7 @@ async fn apply_rejection_keeps_the_old_snapshot_and_marks_the_environment() {
             &serde_json::json!({"insecure_hosts": ["fixed.example.com"]}),
         )
         .unwrap();
-    assert_eq!(healed.health, InstanceState::Running);
+    assert_eq!(healed.health, "running");
     assert_eq!(healed.insecure_hosts, ["fixed.example.com"]);
 }
 
@@ -588,7 +585,7 @@ async fn explicit_port_conflict_never_reallocates_silently() {
     let view = harness.manager.get("beta").unwrap();
     assert_eq!(view.listen.port, port, "显式端口绝不静默重分配");
     assert_eq!(view.health.as_str(), "port_conflict");
-    assert_eq!(view.desired, envboard_engine::domain::Desired::Running);
+    assert_eq!(view.desired, envboard_manager::Desired::Running);
     drop(squatter);
 }
 
@@ -707,7 +704,7 @@ async fn insecure_hosts_are_persisted_and_hot_editable() {
     assert_eq!(with_credentials.health.as_str(), "stopped");
     // 视图/SSE 广播绝不能回显凭据。
     assert!(
-        !serde_json::to_string(&with_credentials.to_json())
+        !serde_json::to_string(&with_credentials)
             .unwrap()
             .contains("s3cret")
     );
@@ -1058,7 +1055,7 @@ async fn reconcile_survives_a_held_port_as_conflict_not_reassignment() {
         view.listen.port, beta.listen.port,
         "端口是身份的对外面：不静默换"
     );
-    assert_eq!(view.desired, envboard_engine::domain::Desired::Running);
+    assert_eq!(view.desired, envboard_manager::Desired::Running);
     drop(squatter);
 }
 
@@ -1163,7 +1160,7 @@ fn proxy_put_creates_replaces_and_never_echoes_credentials() {
     assert_eq!(view.port, 3128);
     assert!(view.has_auth);
     // 视图永不回显凭据
-    let rendered = view.to_json().to_string();
+    let rendered = serde_json::to_string(&view).unwrap();
     assert!(
         !rendered.contains("s3cret") && !rendered.contains("alice"),
         "{rendered}"
@@ -1386,8 +1383,9 @@ async fn trajectory_window_read_survives_seq_restart_and_mid_file_cursor() {
     let third = line(1, 3); // 实例重启后 seq 从头续写同一文件
     std::fs::write(&path, format!("{first}\n{second}\n{third}\n")).unwrap();
 
-    let events = harness.manager.trajectory("beta", 100).unwrap();
+    let (cursor, events) = harness.manager.trajectory("beta", 100).unwrap();
     assert_eq!(events.len(), 3, "跨会话拼接必须整窗可读");
+    assert!(cursor > 0, "窗口游标 = 文件末端字节偏移");
 
     // 从文件中段增量读（SSE 游标是字节偏移）：切片首个 seq 不是 1，窗口照样可读。
     let offset = first.len() as u64 + 1;
