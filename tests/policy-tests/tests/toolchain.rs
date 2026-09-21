@@ -1,28 +1,30 @@
-//! 工具链收敛门禁：**仓库里不许有第二种语言工具链的任何痕迹**（v3：纯 Rust）。
+//! 工具链收敛门禁：**除 `frontend/` 边界外，仓库里不许有第二种语言工具链的痕迹**。
 //!
-//! 这条规则的价值在于可机械判定 —— 它必须由门禁自己证明，而不是写在文档里靠人自觉。
-//! 判据分三面：
+//! v4 修订（前端工程化）：Node/TS/Vite/pnpm 从「全仓禁止」改为「边界内允许」——
+//! 第二种工具链被**圈禁**在 `frontend/` 目录里，而不是被引入仓库主干：
 //!
-//! - **文件面** R1/R2：禁出现的清单文件与源码后缀；
-//! - **调用面** R3：可执行面里禁出现的命令形态；
-//! - **白名单反向**：迁移白名单条目失效同样判红（v3 起表为空 = 收敛完成）。
+//! - **文件面** R1：Python 面维持全仓禁止（前端工程不需要 Python）；
+//! - **文件面** R2：Node/TS 面按前缀判定 —— `frontend/` 内允许清单文件、TS 源码、
+//!   打包器配置与 `node_modules`；边界之外任何一处出现即红；
+//! - **调用面** R3：可执行面（ci/ scripts/ .service）仍然只许 cargo ——
+//!   **默认验证路径保持零 npm/pnpm/node**，前端构建是显式的 frontend 层动作；
+//! - **成对判定**：`frontend/src` 与 `frontend/dist` 同存同缺 —— dist 是内嵌进
+//!   二进制的构建产物（提交入库），缺一个就是漂移。
 //!
-//! 关键区分：**禁的是工具链，不是文件类型**。浏览器资产的 `.js` / `.css` / `.html`
-//! 是数据（`include_str!` 内嵌、没有构建步骤），不算工具链、不在禁列；
-//! 而任何 `.py` 都是第二种语言 —— v3 起仓库里没有"宿主适配器"这个角落了。
+//! 关键区分不变：**禁的是工具链越界，不是文件类型**。`crates/web/assets/` 的
+//! 历史三件套已退场；浏览器资产现在是 `frontend/dist` 的构建产物（数据）。
 //!
-//! 迁移期由 [`PENDING`] 承载"待退场"的文件，**双向判定**：白名单条目失效（文件已删
-//! 或已不再违规）同样失败，否则这张表会慢慢变成"什么都放行"的垃圾桶。
+//! 迁移期由 [`PENDING`] 承载"待退场"的文件，**双向判定**：白名单条目失效同样失败。
 
 mod common;
 
 use common::{find_dirs, has_word, read_text, report, walk_relative, workspace_root};
 
-/// 迁移白名单：待退场的旧工具链文件。**已清空 —— 收敛完成**。
-///
-/// 这张表本身留着：将来若又要搬一条旧门禁，它同时是进度表与降级开关
-/// （判断逻辑见 `the_migration_whitelist_has_no_stale_entries`：条目失效同样失败）。
+/// 迁移白名单：待退场的旧工具链文件。**当前为空**。
 const PENDING: &[&str] = &[];
+
+/// 前端边界：第二种工具链唯一合法的容身处。
+const FRONTEND_DIR: &str = "frontend";
 
 /// Python 工具链的清单文件 —— 哪里都不许有。
 const PYTHON_MANIFESTS: &[&str] = &[
@@ -37,21 +39,35 @@ const PYTHON_MANIFESTS: &[&str] = &[
     ".python-version",
 ];
 
-/// Node/TS 工具链的清单与配置 —— 同上。浏览器资产的后缀（`.js`/`.css`/`.html`）
-/// **刻意不在此列**：它们是数据，不是工具链。
+/// Node/TS/pnpm/Vite 工具链的清单与配置 —— 只允许出现在 `frontend/` 下。
 const NODE_MANIFESTS: &[&str] = &[
+    "package.json",
     "package-lock.json",
-    "pnpm-workspace.yaml",
     "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
     "yarn.lock",
     "bun.lockb",
     ".npmrc",
 ];
 
+/// 打包器 / 编译器配置文件名前缀 —— 同上，只许进 `frontend/`。
+const BUILDER_CONFIG_PREFIXES: &[&str] = &[
+    "tsconfig",
+    "vite.config.",
+    "tsdown.config.",
+    "esbuild",
+    "rollup.config.",
+    "webpack.config.",
+];
+
+/// TS 源码后缀 —— 只许出现在 `frontend/` 下（本仓没有别处需要 TS）。
+const TS_SUFFIXES: &[&str] = &[".ts", ".tsx", ".mts", ".cts"];
+
 /// 可执行面里禁止出现的命令（整词匹配）。`cargo` 与宿主二进制不在此列。
+/// 前端构建工具（pnpm/npm/vite/node）全部在内：默认绿路径 cargo-only。
 const FORBIDDEN_COMMANDS: &[&str] = &[
-    "npm", "npx", "pnpm", "yarn", "bun", "node", "deno", "pip", "pip3", "pipx", "poetry", "uvx",
-    "mypy", "pytest", "ruff", "black", "flake8", "isort", "tox",
+    "npm", "npx", "pnpm", "yarn", "bun", "node", "deno", "vite", "pip", "pip3", "pipx", "poetry",
+    "uvx", "mypy", "pytest", "ruff", "black", "flake8", "isort", "tox",
 ];
 
 /// 禁用的短语形态（工具名 + 子命令）。
@@ -68,6 +84,11 @@ struct Scan {
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+/// 路径是否落在前端边界内（`frontend/…`）。
+fn inside_frontend(path: &str) -> bool {
+    path == FRONTEND_DIR || path.starts_with(&format!("{FRONTEND_DIR}/"))
 }
 
 fn scan() -> Scan {
@@ -87,7 +108,7 @@ fn scan() -> Scan {
     }
 }
 
-/// R1：Python 面。
+/// R1：Python 面（全仓禁止，不变）。
 fn python_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -> Vec<String> {
     let mut problems = Vec::new();
     for file in files {
@@ -110,7 +131,6 @@ fn python_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>)
         }
     }
 
-    // `__pycache__` 被 walk 跳过（它的内容不是证据），所以单独判存在性。
     for directory in find_dirs(root, &["__pycache__"]) {
         problems.push(format!(
             "{directory}: 不许有 Python 字节码缓存目录（工具链跑过 Python 的痕迹）"
@@ -119,54 +139,82 @@ fn python_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>)
     problems
 }
 
-/// R2：Node / TS 面。
+/// R2：Node / TS 面 —— 边界判定。
 fn node_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -> Vec<String> {
     let mut problems = Vec::new();
     for file in files {
         let name = basename(file);
+        let in_frontend = inside_frontend(file);
 
         if name == "package.json" {
+            if in_frontend {
+                if PENDING.contains(&file.as_str()) {
+                    used.push(file.clone());
+                }
+                continue;
+            }
             if PENDING.contains(&file.as_str()) {
                 used.push(file.clone());
             } else {
-                problems.push(format!("{file}: 不许有 Node 的清单文件"));
+                problems.push(format!(
+                    "{file}: Node 清单文件只允许出现在 frontend/ 边界内"
+                ));
             }
             continue;
         }
 
-        if NODE_MANIFESTS.contains(&name) {
-            problems.push(format!("{file}: 不许有 Node 工具链的清单 / 锁文件"));
-        }
-
-        if name.ends_with(".ts")
-            || name.ends_with(".tsx")
-            || name.ends_with(".mts")
-            || name.ends_with(".cts")
-        {
-            problems.push(format!(
-                "{file}: 不许有 TypeScript 源码（本仓没有 TS 构建步骤）"
-            ));
-        }
-
-        if name.starts_with("tsconfig")
-            || name.starts_with("vite.config.")
-            || name.starts_with("tsdown.config.")
-            || name.starts_with("esbuild")
-            || name.starts_with("rollup.config.")
-            || name.starts_with("webpack.config.")
-        {
-            problems.push(format!("{file}: 不许有前端 / 打包器配置"));
+        if !in_frontend {
+            if NODE_MANIFESTS.contains(&name) {
+                problems.push(format!(
+                    "{file}: Node 工具链清单只允许出现在 frontend/ 边界内"
+                ));
+            }
+            if BUILDER_CONFIG_PREFIXES.iter().any(|p| name.starts_with(p)) {
+                problems.push(format!(
+                    "{file}: 前端打包器配置只允许出现在 frontend/ 边界内"
+                ));
+            }
+            if TS_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
+                problems.push(format!(
+                    "{file}: TypeScript 源码只允许出现在 frontend/ 边界内"
+                ));
+            }
         }
     }
 
-    for directory in find_dirs(root, &["node_modules"]) {
-        problems.push(format!("{directory}: 不许有 Node 依赖树目录"));
+    // node_modules / pnpm store：只许在 frontend/ 下存在（.gitignore 之外再判一道）。
+    for directory in find_dirs(root, &["node_modules", ".pnpm-store"]) {
+        if !inside_frontend(&directory) {
+            problems.push(format!(
+                "{directory}: 依赖树目录只允许出现在 frontend/ 边界内"
+            ));
+        }
     }
     problems
 }
 
-/// 可执行面：会被 CI 或部署直接执行的文本。文档与注释不在此列 ——
-/// 判据只约束"真的跑得起来的东西"。
+/// 成对判定：frontend/src ↔ frontend/dist（dist 是内嵌源，必须提交）。
+fn frontend_pair_is_consistent() {
+    let root = workspace_root();
+    let src = root.join(FRONTEND_DIR).join("src");
+    let dist = root.join(FRONTEND_DIR).join("dist");
+    let src_exists = src.is_dir();
+    let dist_exists = dist.is_dir();
+    let problems: Vec<String> = if src_exists == dist_exists {
+        Vec::new()
+    } else if src_exists {
+        vec!["frontend/dist: 有源码没有构建产物 —— 内嵌源缺失（pnpm build 后提交）".into()]
+    } else {
+        vec!["frontend/dist: 有构建产物没有源码 —— 产物失去可重建性".into()]
+    };
+    report(
+        "toolchain/frontend-pair",
+        problems,
+        format!("frontend/src 与 frontend/dist 成对（src={src_exists}, dist={dist_exists}）"),
+    );
+}
+
+/// 可执行面：会被 CI 或部署直接执行的文本。文档与注释不在此列。
 fn is_executable_surface(file: &str) -> bool {
     (file.starts_with("ci/") && file.ends_with(".sh"))
         || (file.starts_with("scripts/") && file.ends_with(".sh"))
@@ -178,9 +226,6 @@ fn is_executable_surface(file: &str) -> bool {
 }
 
 /// 从一层 shell 单词里取出"指向本仓脚本"的路径；不是脚本引用就返回 `None`。
-///
-/// 之所以按**路径**而不是按"解释器后面跟什么"来判：解释器常常藏在变量里，
-/// 按被引用的脚本路径判才抓得住真实调用点。
 fn script_reference(token: &str) -> Option<String> {
     let cleaned =
         token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | ';' | '{' | '}'));
@@ -196,7 +241,7 @@ fn script_reference(token: &str) -> Option<String> {
     }
 }
 
-/// R3：调用面。
+/// R3：调用面（可执行面只许 cargo）。
 fn call_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -> Vec<String> {
     let mut problems = Vec::new();
     for file in files.iter().filter(|file| is_executable_surface(file)) {
@@ -210,7 +255,7 @@ fn call_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -
             for command in FORBIDDEN_COMMANDS {
                 if has_word(line, command) {
                     problems.push(format!(
-                        "{file}:{number}: 可执行面里不许调用 `{command}`（第二种语言工具链）"
+                        "{file}:{number}: 可执行面里不许调用 `{command}`（前端构建是显式 frontend 层动作，不进默认路径）"
                     ));
                 }
             }
@@ -219,13 +264,11 @@ fn call_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -
                     problems.push(format!("{file}:{number}: 可执行面里不许出现 `{phrase}`"));
                 }
             }
-            // 解释器调 `-m`：v3 连"跑适配器脚本"这个例外都不存在了。
             for pair in words.windows(2) {
                 if pair[0].contains("python") && pair[1].starts_with("-m") {
                     problems.push(format!("{file}:{number}: 可执行面不许调用 Python 工具"));
                 }
             }
-            // 被引用的本仓脚本：只允许出现在迁移白名单里（表为空 = 一个都不许）。
             for word in &words {
                 let Some(script) = script_reference(word) else {
                     continue;
@@ -254,12 +297,15 @@ fn r1_no_python_toolchain_in_the_tree() {
 }
 
 #[test]
-fn r2_no_node_or_typescript_toolchain_in_the_tree() {
+fn r2_node_toolchain_stays_inside_the_frontend_boundary() {
     let scan = scan();
     report(
         "toolchain/r2-node-face",
         scan.node,
-        format!("{} files scanned, 无 Node/TS 工具链痕迹", scan.files.len()),
+        format!(
+            "{} files scanned, Node/TS 痕迹全部在 frontend/ 边界内",
+            scan.files.len()
+        ),
     );
 }
 
@@ -271,6 +317,11 @@ fn r3_executable_surface_never_calls_a_second_toolchain() {
         scan.call,
         "可执行面只用 cargo".to_string(),
     );
+}
+
+#[test]
+fn frontend_source_and_dist_are_a_pair() {
+    frontend_pair_is_consistent();
 }
 
 #[test]

@@ -2,96 +2,75 @@
 
 | 项 | 值 |
 |---|---|
-| 适用范围 | `crates/web/assets/` 三个资产（index.html / app.css / app.js） |
-| 令牌值唯一权威 | app.css 第 ① 区（`:root` 令牌区；README「运维」节同款声明） |
+| 适用范围 | `frontend/`（Vite 工程：index.html + src/**）与其构建产物 `frontend/dist/` |
+| 设计语言权威 | [design.md](design.md)（布局、分级、反馈契约等设计规则）；本文件只收**机器可判**的纪律 |
+| 令牌权威 | HeroUI v3 语义类 + Tailwind v4（组件库内置）；自定义样式唯一落点 `src/globals.css` |
 | 执行 | policy 门禁 `tests/policy-tests/tests/ui_style.rs`（一门禁一文件，`bash ci/verify.sh` 默认层） |
-| 版本 | v1.0（2026-09-20） |
+| 版本 | v2.0（2026-09-21，前端工程化改版：机检对象从三件套资产改为 frontend 源码） |
 
-本文件回答「改工作台 UI 之前必须知道什么」。分两档：**机检档**（UI-1…UI-8，违反即
-`ci/verify.sh` 红）与**评审档**（门禁不可达，提交前人工对照）。锚点 `UI-n` 是门禁与本
-文件的双向对账依据：本文件缺锚点、或门禁实现了本文件没有的规则号，都判红（见 UI-8）。
+本文件回答「改工作台 UI 之前必须知道什么」。分两档：**机检档**（UI-1…UI-6，
+违反即 `ci/verify.sh` 红）与**评审档**（门禁不可达，提交前人工对照）。锚点 `UI-n`
+是门禁与本文件的双向对账依据：本文件缺锚点、或门禁实现了本文件没有的规则号，
+都判红（见 UI-6）。
 
 ## 机检档
 
 ### UI-1 色值出没域
 
 颜色字面量（hex `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`，`rgb()` / `rgba()` /
-`hsl()` / `hsla()`）只允许出现在 app.css 的**令牌区**（选择器为 `:root` 或
-`[data-theme=…]` 的块）里；index.html 与 app.js 禁止一切颜色字面量。组件层颜色一律
-`var(--token)`。想加颜色：先进令牌区（附对比度实测，见「评审档」），再在组件层引用。
+`hsl()` / `hwb()`）在 `frontend/src/` 的 `.ts` / `.tsx` / `.css` 里**零容忍** ——
+颜色一律走 HeroUI 语义类（`bg-surface` `text-muted` `border-danger/30` …）。
+`frontend/index.html` 同样禁止，仅 data-URI（favicon）豁免。想加颜色：先确认
+HeroUI 语义类覆盖不了，再在评审档里登记理由。
 
-### UI-2 字号档位
+### UI-2 内联样式禁令
 
-令牌区之外，`font-size` 的值只允许 `var(--text-*)`。字号尺度唯一定义处在令牌区
-（11.5 / 12 / 12.5 / 13 / 13.5 / 14 / 15 / 17 / 22px 九档）；加档先改令牌区，再在
-组件层引用。组件层不写裸 px 字号。
+`.tsx` 禁止 `style={{`（含 `style={{` 的任意空白形态）。自定义样式唯一落点是
+`src/globals.css` 的 `@layer components`（BEM 类，见 [design.md](design.md) 第 1 节）；
+Tailwind 工具类写进 `className`。
 
-### UI-3 圆角档位
+### UI-3 深色覆盖禁令
 
-令牌区之外，`border-radius` 的值只允许 `var(--radius-xs | --radius-sm | --radius |
---radius-lg | --radius-pill)` 与 `50%`（状态圆点）。同一层级圆角必须一致，禁止混用。
+`frontend/src/` 禁止 `dark:` 前缀工具类 —— 暗色只靠
+`<html class="dark" data-theme="dark">` 整体切换（`src/theme.ts`），
+组件层不写任何深色分支。
 
-### UI-4 阴影与遮罩
+### UI-4 裸 px 尺寸
 
-- 令牌区之外，`box-shadow` 只允许两种形态：`var(--shadow-sm | --shadow | --shadow-lg)`
-  （浮起层级：hover / 浮层），或焦点环 `0 0 0 3px var(--accent-bg)` /
-  `0 0 0 3px var(--bad-bg)`（表单聚焦 / 错误光环）。
-- app.css 全文件（令牌区含内）禁止纯黑：`#000` / `#000000` / `rgba(0, 0, 0, …)`
-  零命中；模态遮罩只用 `--overlay`（冷灰）。
-- 静态卡片默认无阴影，层级靠 1px `--line` 边框界定；阴影只表达 hover / 浮层，
-  不作装饰。
+`.ts` / `.tsx` 禁止 Tailwind 任意值裸 px（`text-[13px]` `p-[5px]` 一类
+`[…px]` 形态）——尺寸走 Tailwind 刻度（4px 间距体系 / 字号刻度）。
+`src/globals.css` 是自定义样式的登记处，`clamp()` / 动效尺寸允许（它是设计
+语言的实现，不是漂移）。
 
-### UI-5 间距基数
+### UI-5 交互形态
 
-令牌区之外，间距属性（`padding` / `padding-top/right/bottom/left` / `margin` /
-`margin-top/right/bottom/left` / `gap` / `row-gap` / `column-gap`）的值一律走
-`var(--space-*)`（4px 基数）；登记例外只有发丝 / 微调档 **1px 与 2px**（含 `-1px`
-负值，如页签下划线压住容器边框的合成线）。超出例外集的裸 px 判红。
+- `.ts` / `.tsx` 禁止 `window.alert` / `window.confirm` / `window.prompt`。
+  反馈唯一出口是页内 `role="status"` Alert 区（[design.md](design.md) 第 6 节）；确认类交互一律
+  由 AlertDialog 承载。
+- `frontend/index.html` 禁止内联 `<script>`（只允许带 `src=` 的外链脚本）与
+  小写内联事件属性（`onclick=` 等）；JSX 的 `onPress` / `onChange` 组件属性
+  不在此列（CSP 严格，无 `unsafe-inline`）。
 
-### UI-6 令牌存在性
-
-三个资产里引用的全部 `var(--x)` 必须都在令牌区有定义。拼错令牌名、删令牌留死引用，
-都判红。
-
-### UI-7 交互形态
-
-- app.js 禁止调用 `window.alert` / `window.confirm` / `window.prompt`。反馈唯一
-  出口是 toast + 按钮 loading / disabled 态；确认类交互一律由模态窗承载。
-- index.html 禁止内联 `<script>`（只允许带 `src=` 的外链脚本）与内联事件属性
-  （`onclick=` / `onload=` / `onerror=` / `onchange=` / `onsubmit=` / `oninput=` /
-  `onkeydown=` / `onkeyup=` / `onmouseover=`）；事件一律 `addEventListener` 绑定
-  （CSP 严格，无 `unsafe-inline`）。
-
-### UI-8 契约在位
+### UI-6 契约在位
 
 门禁内建的规则清单与本文件的 `UI-n` 锚点必须一一对应：本文件缺锚点，或门禁存在本
 文件没有的规则号，都判红。改本文件与改门禁必须是同一个提交。
 
 ## 评审档（提交前人工对照）
 
-- **技术值等宽**：端口 / 代理命令 / 日志 / 规则 / 状态值一律等宽栈（`--font-mono`）；
-  正文与人机标签用 UI 栈（`--font-ui`）。
-- **异常三通道**：颜色 + 文本原因 + 建议动作，缺一不可；错误文案前半句给原因、
-  后半句给建议动作。
-- **语义色专用**：`--purple` 只用于规则集标识，`--cyan` 只用于日志「运行」事件；
-  语义色只表达状态，禁止作装饰色。
-- **主按钮每个视图区最多一个**；危险按钮文字常驻 `--bad`。
-- **破坏性操作**（删除环境 / 删除规则 / 重分配端口）必须在模态窗内二次确认，写明
-  后果与不可逆性，确认按钮需显式第二次点击；创建类模态不强制二次确认，但必须有
-  显式确认按钮。
-- **`--muted-2` 仅限白系表面**（`--panel` / `--bg-3`）；在 `--bg-2`（侧栏 / 日志栏 /
-  页签条）上一律用 `--muted`。
-- **对比度底线 WCAG AA**：正文对 `--panel` ≥ 4.5:1。新增颜色必须附对 `--panel` 的
-  实测对比度再进令牌区。
-- **可测试性**：保持 DOM 可断言结构（`data-*` 标记、语义化 class）；这些锚点改名
-  即破坏自动化验收。
-- **零构建链**：禁止引入框架 / 打包器 / 前端构建步骤；资产固定三文件、
-  `include_str!` 内嵌进二进制。
+- **设计语言**：全部设计规则（Token 纪律、布局骨架、按钮分级、反馈契约、抽屉模式、
+  可达性…）见 [design.md](design.md)；其附录 A 是 bsk 走查检查表，UI 每轮变更后执行。
+- **CSP 与资产形态一致**：构建产物必须保持外链脚本/样式（`modulePreload: false`），
+  任何内联注入都会被严格 CSP 拒绝且 curl 断言查不出来（v1 的教训）。
+- **可测试性**：保持 DOM 可断言结构（`data-*` 标记、语义化 class、中文 aria-label）；
+  这些锚点改名即破坏 live 验收与 bsk 走查。
+- **凭据永不回显**：UI 只消费服务端视图 DTO（protocol 词汇），不组凭据字段。
+- **构建产物入库**：`frontend/dist/` 是内嵌源（`include_dir!` 消费），改 `src/`
+  必须同提交重建 dist（verify 的 frontend 层做 drift 校验）。
 
 ## 修订规则
 
-1. 改本文件与改门禁（执行它的那个文件）必须同一提交；只改一边会被 UI-8 判红。
-2. 新增颜色 / 字号 / 圆角档位：先进 app.css 令牌区，再同步本文件相应条目的取值
-   清单，最后才允许在组件层使用。
+1. 改本文件与改门禁（执行它的那个文件）必须同一提交；只改一边会被 UI-6 判红。
+2. 新增机检规则：先在本文件立锚点条文，再在门禁实现；反向亦然，缺一判红。
 3. 门禁红了的修法只有两种：改资产回归契约；或确属契约过时——按第 1 条同时改契约
    与门禁。禁止在门禁里加文件级豁免。

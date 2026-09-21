@@ -12,6 +12,7 @@ name = "envboard"
 path = "src/main.rs"
 
 [dependencies]
+envboard-admin.workspace = true
 envboard-engine.workspace = true
 envboard-manager.workspace = true
 envboard-web.workspace = true

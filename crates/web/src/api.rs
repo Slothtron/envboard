@@ -1,8 +1,9 @@
 //! HTTP 面：静态资产 + REST API + SSE。
 //!
-//! 资产用 `include_str!` 内嵌（标准库宏，零依赖）：管理器/工作台因此没有任何运行时
-//! 依赖，也不需要前端构建链。**前端资产必须是外置文件** —— 内联 `<style>`/`<script>`
-//! 会被我们自己下发的严格 CSP 拒绝，而那种故障在 curl 断言里看不出来（v1 踩过）。
+//! 资产是 `frontend/`（Vite 工程）的构建产物，编译期 `include_dir!` 内嵌：
+//! 运行时零 Node、零 CDN。**前端资产必须保持外置文件形态**（dist 的脚本与样式
+//! 都走 `<link>` / `<script src>`）—— 内联注入会被我们自己下发的严格 CSP 拒绝，
+//! 而那种故障在 curl 断言里看不出来（v1 踩过）。
 //!
 //! 推送流的帧形状由 `envboard-protocol` 统一供给（`spec/protocol.md` 是语言中立
 //! 契约）：三条 SSE 流的每帧都带显式 `cursor`，帧名统一为
@@ -18,25 +19,26 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use envboard_admin::AdminService;
 use envboard_engine::{Error, ErrorCode};
-use envboard_manager::Manager;
 use envboard_protocol::{
     DebugEvents, DebugSnapshot, ErrorBody, ErrorFrame, SnapshotFrame, TrajectoryWindow,
 };
 use futures_util::stream::Stream;
+use include_dir::{Dir, include_dir};
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 
 use crate::config::{CONTENT_SECURITY_POLICY, REQUEST_HEADER, TOKEN_HEADER, WebConfig};
 
-const INDEX_HTML: &str = include_str!("../assets/index.html");
-const APP_CSS: &str = include_str!("../assets/app.css");
-const APP_JS: &str = include_str!("../assets/app.js");
+/// 前端构建产物（内嵌源，提交入库；src↔dist 成对判定由 toolchain 门禁、
+/// drift 校验由 `ci/verify.sh` 的 frontend 层负责）。
+const DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend/dist");
 
 #[derive(Clone)]
 pub struct AppState {
-    pub manager: Arc<Manager>,
+    pub admin: Arc<AdminService>,
     pub config: WebConfig,
     /// 设置页「证书信息」的只读摘要（组合根从共享 CA 读出后转成 JSON）。
     pub ca: Option<Value>,
@@ -53,9 +55,9 @@ pub struct CaAssets {
 
 /// 起 HTTP 服务并常驻（只做 HTTP 绑定与横幅；reconcile 与日志照看是宿主
 /// 组合根的编排职责，在 `envboard-server` 里）。
-pub async fn serve(manager: Arc<Manager>, config: WebConfig, ca: CaAssets) -> Result<(), Error> {
+pub async fn serve(admin: Arc<AdminService>, config: WebConfig, ca: CaAssets) -> Result<(), Error> {
     let state = AppState {
-        manager,
+        admin,
         config: config.clone(),
         ca: ca.info,
         ca_pem: ca.pem,
@@ -99,8 +101,7 @@ pub async fn serve(manager: Arc<Manager>, config: WebConfig, ca: CaAssets) -> Re
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/app.css", get(css))
-        .route("/app.js", get(js))
+        .route("/assets/*file", get(serve_asset))
         .route("/api/status", get(api_status))
         // 设置页「证书」：只读摘要 + 下载 + 二维码（全部走统一门禁，token 档照常 401）。
         .route("/api/ca", get(api_ca))
@@ -197,15 +198,15 @@ async fn guard(
     // ② 配了 token 就必须带对：header 优先，未带时接受 `?token=`（SSE 的
     // EventSource 带不了自定义头，浏览器直接打开工作台也只能靠 URL 携带）。
     //
-    // **静态资产豁免**：`/app.css` / `/app.js` 是编译期内嵌的代码，不含任何数据
-    // （数据只从 API 出）。浏览器解析 `<link>`/`<script>` 时带不了 header、
-    // 也不会把页面 URL 上的 `?token=` 复制到子资源请求上 —— 豁免它们，
+    // **静态资产豁免**：`/assets/*` 是编译期内嵌的构建产物（hashed JS/CSS），
+    // 不含任何数据（数据只从 API 出）。浏览器解析 `<link>`/`<script>` 时带不了
+    // header、也不会把页面 URL 上的 `?token=` 复制到子资源请求上 —— 豁免它们，
     // 否则开了 token 工作台必然白屏。API 与页面本体（`/`）不豁免。
     let path = request.uri().path();
     let public_asset = matches!(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
-    ) && matches!(path, "/app.css" | "/app.js");
+    ) && path.starts_with("/assets/");
     if let Some(expected) = state.config.token.as_deref()
         && !public_asset
     {
@@ -310,7 +311,7 @@ fn error_response(error: Error) -> Response {
 // 静态资产
 // --------------------------------------------------------------------------- #
 
-fn asset(body: &'static str, content_type: &'static str) -> Response {
+fn asset(body: &'static [u8], content_type: &'static str, immutable: bool) -> Response {
     let mut response = (StatusCode::OK, body).into_response();
     response
         .headers_mut()
@@ -319,22 +320,64 @@ fn asset(body: &'static str, content_type: &'static str) -> Response {
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if immutable {
+        // hashed 文件名 = 内容即版本：可永久缓存（重新构建即换名，无失效问题）。
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
     response
 }
 
+/// 入口页：不缓存（它引用 hashed 资产，自身必须常新）。
 async fn index() -> Response {
-    asset(INDEX_HTML, "text/html; charset=utf-8")
+    match DIST.get_file("index.html") {
+        Some(file) => {
+            let mut response = asset(file.contents(), "text/html; charset=utf-8", false);
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }
+        // 编译期内嵌：缺文件 = 构建被破坏，响亮失败。
+        None => failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::InternalError,
+            "embedded frontend dist is missing index.html".to_string(),
+        ),
+    }
 }
 
-async fn css() -> Response {
-    asset(APP_CSS, "text/css; charset=utf-8")
-}
-
-async fn js() -> Response {
-    asset(APP_JS, "application/javascript; charset=utf-8")
+/// hashed 资产（`/assets/<name>`）：文件名带内容哈希 → immutable 缓存。
+async fn serve_asset(Path(file): Path<String>) -> Response {
+    // 路径段白名单（防遍历；include_dir 查的也是编译期固定的树）。
+    let safe = !file.is_empty()
+        && file
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let content_type = if file.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if file.ends_with(".js") {
+        "text/javascript; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    };
+    if !safe {
+        return failure(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "asset not found".to_string(),
+        );
+    }
+    match DIST.get_file(format!("assets/{file}").as_str()) {
+        Some(asset_file) => asset(asset_file.contents(), content_type, true),
+        None => failure(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "asset not found".to_string(),
+        ),
+    }
 }
 
 // --------------------------------------------------------------------------- #
@@ -342,10 +385,10 @@ async fn js() -> Response {
 // --------------------------------------------------------------------------- #
 
 async fn api_status(State(state): State<AppState>) -> Response {
-    let manager = &state.manager;
-    let core = manager.core_info();
-    let capabilities = manager.capabilities();
-    match manager.list() {
+    let admin = &state.admin;
+    let core = admin.core_info();
+    let capabilities = admin.capabilities();
+    match admin.list() {
         Ok(views) => Json(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "core": {"name": core.name, "version": core.version},
@@ -358,12 +401,12 @@ async fn api_status(State(state): State<AppState>) -> Response {
                 "http1_only": capabilities.http1_only,
             },
             "config": {
-                "state_dir": manager.config().state_dir.display().to_string(),
-                "port_range": format!("{}-{}", manager.config().port_range.0, manager.config().port_range.1),
+                "state_dir": admin.config().state_dir.display().to_string(),
+                "port_range": format!("{}-{}", admin.config().port_range.0, admin.config().port_range.1),
             },
             "environments": views.len(),
             "running": views.iter().filter(|view| view.health == "running").count(),
-            "events_dropped": manager.events_dropped(),
+            "events_dropped": admin.events_dropped(),
         }))
         .into_response(),
         Err(error) => error_response(error),
@@ -383,7 +426,7 @@ async fn api_trajectory(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(200)
         .clamp(1, 2000);
-    match state.manager.trajectory(&name, limit) {
+    match state.admin.trajectory(&name, limit) {
         Ok((cursor, events)) => Json(TrajectoryWindow { cursor, events }).into_response(),
         Err(error) => error_response(error),
     }
@@ -400,7 +443,7 @@ async fn api_captures(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 2000);
-    match state.manager.captures(&name, limit) {
+    match state.admin.captures(&name, limit) {
         Ok(Some(view)) => Json(view).into_response(),
         Ok(None) => not_found_response(&name),
         Err(error) => error_response(error),
@@ -419,7 +462,7 @@ async fn api_capture(
         ));
     };
     // 全缓冲查找（曾经的实现是 tail(1) 再比对 —— 只有最新一条查得到，旧的必 404）。
-    match state.manager.capture_detail(&name, request_id) {
+    match state.admin.capture_detail(&name, request_id) {
         Ok(Some(record)) => Json(record).into_response(),
         Ok(None) => not_found_response(&name),
         Err(error) => error_response(error),
@@ -428,7 +471,7 @@ async fn api_capture(
 
 /// POST /api/environments/:name/capture/clear —— 手动清空会话（会话延续）。
 async fn api_capture_clear(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.clear_capture(&name) {
+    match state.admin.clear_capture(&name) {
         Ok(true) => Json(json!({"ok": true})).into_response(),
         Ok(false) => not_found_response(&name),
         Err(error) => error_response(error),
@@ -442,7 +485,7 @@ async fn api_captures_export(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let format = params.get("format").map(String::as_str).unwrap_or("har");
-    let Some(view) = state.manager.captures(&name, usize::MAX).unwrap_or(None) else {
+    let Some(view) = state.admin.captures(&name, usize::MAX).unwrap_or(None) else {
         return not_found_response(&name);
     };
     match format {
@@ -593,7 +636,7 @@ async fn api_trajectory_stream(
     Path(name): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let manager = state.manager.clone();
+    let admin = state.admin.clone();
     let name = name.clone();
     let cursor = params
         .get("cursor")
@@ -607,7 +650,7 @@ async fn api_trajectory_stream(
         let mut offset = match cursor {
             Some(offset) => offset,
             None => {
-                let (window_cursor, events) = manager.trajectory(&name, 200).unwrap_or_default();
+                let (window_cursor, events) = admin.trajectory(&name, 200).unwrap_or_default();
                 let payload = serde_json::to_value(&TrajectoryWindow {
                     cursor: window_cursor,
                     events,
@@ -623,7 +666,7 @@ async fn api_trajectory_stream(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            match manager.trajectory_since(&name, offset) {
+            match admin.trajectory_since(&name, offset) {
                 Ok((new_offset, events)) if !events.is_empty() => {
                     offset = new_offset;
                     let payload = serde_json::to_value(&TrajectoryWindow {
@@ -661,7 +704,7 @@ async fn api_debug_start(State(state): State<AppState>, Json(body): Json<Value>)
     let Some(env) = body.get("env").and_then(Value::as_str) else {
         return error_response(Error::invalid_config("env", "env is required"));
     };
-    match state.manager.start_debug(env) {
+    match state.admin.start_debug(&json!({"env": env})) {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
@@ -669,7 +712,7 @@ async fn api_debug_start(State(state): State<AppState>, Json(body): Json<Value>)
 
 /// POST /api/debug/stop —— 停止并清空调试会话。
 async fn api_debug_stop(State(state): State<AppState>) -> Response {
-    match state.manager.stop_debug() {
+    match state.admin.stop_debug() {
         Ok(stopped) => Json(json!({"ok": stopped})).into_response(),
         Err(error) => error_response(error),
     }
@@ -677,7 +720,7 @@ async fn api_debug_stop(State(state): State<AppState>) -> Response {
 
 /// GET /api/debug —— 当前调试会话视图。
 async fn api_debug(State(state): State<AppState>) -> Response {
-    match state.manager.debug_view() {
+    match state.admin.debug_view() {
         Some(view) => Json(view).into_response(),
         None => Json(json!({"env": null})).into_response(),
     }
@@ -695,7 +738,7 @@ async fn api_debug(State(state): State<AppState>) -> Response {
 async fn api_debug_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let manager = state.manager.clone();
+    let admin = state.admin.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     tokio::spawn(async move {
         let encode = |event: &str, value: &serde_json::Value| {
@@ -711,7 +754,7 @@ async fn api_debug_stream(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let Some((env, delta)) = manager.debug_delta(cursor, 500) else {
+            let Some((env, delta)) = admin.debug_delta(cursor, 500) else {
                 if !announced || session_key.is_some() {
                     session_key = None;
                     cursor = 0;
@@ -734,7 +777,7 @@ async fn api_debug_stream(
             if session_key != Some(key) {
                 // 新会话/换代：snapshot 用尾部窗口（与拉取端点同形），
                 // 游标推进到窗口内最新一条；本 tick 的 delta 记录被窗口覆盖，丢弃。
-                let Some(view) = manager.captures(&env, 500).ok().flatten() else {
+                let Some(view) = admin.captures(&env, 500).ok().flatten() else {
                     continue; // 目标实例刚好停了：下个 tick 走 idle 分支
                 };
                 cursor = view
@@ -795,7 +838,7 @@ async fn api_har_import(
         .get("name")
         .cloned()
         .unwrap_or_else(|| "imported.har".to_string());
-    match state.manager.har_import(&name, &body) {
+    match state.admin.har_import(&name, &body) {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
@@ -803,7 +846,7 @@ async fn api_har_import(
 
 /// GET /api/har —— 导入会话列表。
 async fn api_har_list(State(state): State<AppState>) -> Response {
-    Json(json!({ "sessions": state.manager.har_list() })).into_response()
+    Json(json!({ "sessions": state.admin.har_list() })).into_response()
 }
 
 /// GET /api/har/:id?limit=N —— 导入会话条目窗口。
@@ -820,7 +863,7 @@ async fn api_har_get(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(200)
         .clamp(1, 5000);
-    match state.manager.har_get(id, limit) {
+    match state.admin.har_get(id, limit) {
         Some(view) => Json(view).into_response(),
         None => not_found_response(&id.to_string()),
     }
@@ -831,7 +874,7 @@ async fn api_har_delete(State(state): State<AppState>, Path(id): Path<String>) -
     let Ok(id) = id.parse::<u64>() else {
         return not_found_response(&id);
     };
-    Json(json!({"ok": state.manager.har_delete(id)})).into_response()
+    Json(json!({"ok": state.admin.har_delete(id)})).into_response()
 }
 
 /// GET /api/history?name=<env>&limit=N —— 控制面审计事件（只读、拉取式）。
@@ -846,7 +889,7 @@ async fn api_history(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 1000);
-    match state.manager.history(name, limit) {
+    match state.admin.history(name, limit) {
         Ok(events) => Json(json!({ "events": events })).into_response(),
         Err(error) => error_response(error),
     }
@@ -918,21 +961,21 @@ async fn api_ca_qrcode(
 }
 
 async fn api_list(State(state): State<AppState>) -> Response {
-    match state.manager.list() {
+    match state.admin.list() {
         Ok(views) => Json(views).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_get(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.get(&name) {
+    match state.admin.get(&name) {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_create(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    match state.manager.create(&body) {
+    match state.admin.create(&body) {
         Ok(view) => (StatusCode::CREATED, Json(view)).into_response(),
         Err(error) => error_response(error),
     }
@@ -943,42 +986,42 @@ async fn api_update(
     Path(name): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    match state.manager.update(&name, &body) {
+    match state.admin.update(&name, &body) {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_remove(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.remove(&name) {
+    match state.admin.remove(&name) {
         Ok(()) => Json(json!({"removed": name})).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_start(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.start(&name).await {
+    match state.admin.start(&name).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_stop(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.stop(&name).await {
+    match state.admin.stop(&name).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_restart(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.restart(&name).await {
+    match state.admin.restart(&name).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_reallocate(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.reallocate_port(&name) {
+    match state.admin.reallocate_port(&name) {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
@@ -1004,7 +1047,7 @@ async fn api_fault(State(state): State<AppState>, Json(body): Json<Value>) -> Re
         .and_then(Value::as_str)
         .unwrap_or("fault injection");
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.manager.inject_fault(env, reason)
+        state.admin.inject_fault(env, reason)
     })) {
         Ok(true) => Json(serde_json::json!({"injected": true, "env": env})).into_response(),
         Ok(false) => (
@@ -1027,14 +1070,14 @@ async fn api_logs(
     Path(name): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Response {
-    match state.manager.logs_tail(&name, query.lines) {
+    match state.admin.logs_tail(&name, query.lines) {
         Ok(lines) => Json(json!({"env": name, "lines": lines})).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_rules_list(State(state): State<AppState>) -> Response {
-    match state.manager.rules_list() {
+    match state.admin.rules_list() {
         Ok(names) => Json(json!({"rules": names})).into_response(),
         Err(error) => error_response(error),
     }
@@ -1053,7 +1096,7 @@ async fn api_rules_import(
 ) -> Response {
     // 导入挂在**集合**上（`POST /api/rules`），不用 `/api/rules/import` ——
     // `import` 是合法资源名，会与 `{name}` 路由撞车（v1 踩过 405）。
-    match state.manager.import_rules(&body.name, &body.text) {
+    match state.admin.import_rules(&body.name, &body.text) {
         Ok(path) => (
             StatusCode::CREATED,
             Json(json!({"name": body.name, "path": path.display().to_string()})),
@@ -1064,42 +1107,42 @@ async fn api_rules_import(
 }
 
 async fn api_rules_read(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.rules_read(&name) {
+    match state.admin.rules_read(&name) {
         Ok(text) => Json(json!({"name": name, "text": text})).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_rules_delete(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.rules_delete(&name) {
+    match state.admin.rules_delete(&name) {
         Ok(()) => Json(json!({"removed": name})).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_proxy_list(State(state): State<AppState>) -> Response {
-    match state.manager.proxy_list() {
+    match state.admin.proxy_list() {
         Ok(views) => Json(views).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_proxy_put(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    match state.manager.proxy_put(&body) {
+    match state.admin.proxy_put(&body) {
         Ok(view) => (StatusCode::CREATED, Json(view)).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_proxy_get(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.proxy_get(&name) {
+    match state.admin.proxy_get(&name) {
         Ok(view) => Json(view).into_response(),
         Err(error) => error_response(error),
     }
 }
 
 async fn api_proxy_delete(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.manager.proxy_delete(&name) {
+    match state.admin.proxy_delete(&name) {
         Ok(()) => Json(json!({"removed": name})).into_response(),
         Err(error) => error_response(error),
     }
@@ -1111,7 +1154,7 @@ struct CompareQuery {
 }
 
 async fn api_compare(State(state): State<AppState>, Query(query): Query<CompareQuery>) -> Response {
-    match state.manager.compare(&query.host) {
+    match state.admin.compare(&query.host) {
         Ok(value) => Json(value).into_response(),
         Err(error) => error_response(error),
     }
@@ -1129,8 +1172,8 @@ async fn api_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let interval = tokio::time::interval(Duration::from_millis(1_000));
     let stream = IntervalStream::new(interval).map(move |_| {
-        let cursor = state.manager.state_generation();
-        let payload = match state.manager.list() {
+        let cursor = state.admin.state_generation();
+        let payload = match state.admin.list() {
             Ok(views) => {
                 let environments = views
                     .iter()

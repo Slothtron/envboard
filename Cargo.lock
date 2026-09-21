@@ -321,6 +321,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "envboard-admin"
+version = "0.3.0"
+dependencies = [
+ "envboard-engine",
+ "envboard-manager",
+ "envboard-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "envboard-contract-tests"
 version = "0.3.0"
 dependencies = [
@@ -375,7 +386,6 @@ dependencies = [
  "envboard-engine-fake",
  "envboard-events",
  "envboard-protocol",
- "libc",
  "serde",
  "serde_json",
  "tokio",
@@ -401,6 +411,7 @@ name = "envboard-server"
 version = "0.3.0"
 dependencies = [
  "clap",
+ "envboard-admin",
  "envboard-engine",
  "envboard-manager",
  "envboard-web",
@@ -413,11 +424,12 @@ name = "envboard-web"
 version = "0.3.0"
 dependencies = [
  "axum",
+ "envboard-admin",
  "envboard-engine",
  "envboard-events",
- "envboard-manager",
  "envboard-protocol",
  "futures-util",
+ "include_dir",
  "qrcode",
  "serde",
  "serde_json",
@@ -592,6 +604,25 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tower-service",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]

@@ -72,6 +72,47 @@ fn envboard_binary() -> &'static str {
     env!("CARGO_BIN_EXE_envboard")
 }
 
+/// 收集 TS 联合类型（`export type X = ... ;`）里的全部字符串字面量。
+fn union_literals(text: &str, anchor: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let Some(start) = text.find(anchor) else {
+        return found;
+    };
+    let rest = &text[start..];
+    let region = match rest.find(';') {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+    let mut cursor = region;
+    while let Some(open) = cursor.find('"') {
+        cursor = &cursor[open + 1..];
+        match cursor.find('"') {
+            Some(close) => {
+                found.insert(cursor[..close].to_string());
+                cursor = &cursor[close + 1..];
+            }
+            None => break,
+        }
+    }
+    found
+}
+
+/// 收集 TS/TSX 数组定义里 `key: "…"` 字面量的值（NAV 的视图键）。
+fn key_literals(text: &str, anchor: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let needle = "key: \"";
+    for (index, _) in text.match_indices(needle) {
+        if index < text.find(anchor).unwrap_or(usize::MAX) {
+            continue;
+        }
+        let rest = &text[index + needle.len()..];
+        if let Some(close) = rest.find('"') {
+            found.insert(rest[..close].to_string());
+        }
+    }
+    found
+}
+
 #[test]
 fn the_release_artifact_contains_only_expected_files() {
     let root = repo_root();
@@ -127,115 +168,128 @@ fn the_release_artifact_contains_only_expected_files() {
         }
     }
 
-    // 内嵌资产没有编译期检查 —— 最阴险的坏法是"截断"：头部完好、尾部消失，
-    // 页面白屏或卡死却处处绿灯。钉住两端：最小规模 + 关键符号在场。
-    let app_js = std::fs::read_to_string(root.join("crates/web/assets/app.js"))
-        .expect("内嵌的 app.js 必须存在");
-    if app_js.lines().count() < 1_800 {
+    // ------------------------------------------------------------------ #
+    // v4：内嵌资产 = frontend/dist（Vite 构建产物，include_dir! 进二进制）。
+    // 最阴险的坏法仍是"截断/漂移"：头部完好、尾部消失，页面白屏却处处绿灯。
+    // 钉住：dist 在位 + 体积下限 + 外链形态 + 关键符号；旧三件套必须已退场。
+    // ------------------------------------------------------------------ #
+    if root.join("crates/web/assets").exists() {
+        problems
+            .push("crates/web/assets 应已随 v4 前端工程化退场 —— 留着会出现两套资产".to_string());
+    }
+
+    let dist_dir = root.join("frontend/dist");
+    let dist_index = std::fs::read_to_string(dist_dir.join("index.html"))
+        .expect("内嵌的 frontend/dist/index.html 必须存在（pnpm build 产物，提交入库）");
+    let assets_dir = dist_dir.join("assets");
+    let mut js_files: Vec<_> = std::fs::read_dir(&assets_dir)
+        .expect("frontend/dist/assets 必须存在")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "js"))
+        .collect();
+    let css_files: Vec<_> = std::fs::read_dir(&assets_dir)
+        .expect("frontend/dist/assets 必须存在")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "css"))
+        .collect();
+    if js_files.is_empty() || css_files.is_empty() {
+        problems.push("dist/assets 缺 JS 或 CSS 产物 —— 构建不完整？".to_string());
+    }
+    js_files.sort();
+    let js_bundle = js_files
+        .first()
+        .map(|path| std::fs::read_to_string(path).expect("dist js 可读"))
+        .unwrap_or_default();
+    let css_bundle = css_files
+        .first()
+        .map(|path| std::fs::read_to_string(path).expect("dist css 可读"))
+        .unwrap_or_default();
+    if js_bundle.len() < 400_000 {
         problems.push(format!(
-            "app.js 只剩 {} 行 —— 疑似截断（基线 2000+ 行）",
-            app_js.lines().count()
+            "dist JS 只有 {} B —— 疑似截断（HeroUI+React 基线 400KB+）",
+            js_bundle.len()
         ));
     }
-    for marker in [
-        "envboardReady",
-        "function renderDetail(",
-        "refreshAll",
-        "addEventListener",
-    ] {
-        if !app_js.contains(marker) {
-            problems.push(format!("app.js 缺关键符号 {marker:?} —— 被截断或改写了？"));
-        }
-    }
-    let index_html = std::fs::read_to_string(root.join("crates/web/assets/index.html"))
-        .expect("内嵌的 index.html 必须存在");
-    for id in ["env-form", "detail-actions", "panel-config"] {
-        if !index_html.contains(id) {
-            problems.push(format!(
-                "index.html 缺 id {id:?} —— 前端结构变了，门禁与契约要一起更新"
-            ));
-        }
+    if css_bundle.len() < 300_000 {
+        problems.push(format!(
+            "dist CSS 只有 {} B —— 疑似截断（Tailwind+HeroUI 基线 300KB+）",
+            css_bundle.len()
+        ));
     }
 
-    // 导航项与视图主体必须**一一对应**，且主体开关**由 data-view 派生**。
-    // 曾经的坏法：setView 逐个枚举 `getElementById("view-xxx")`，加「调试」视图时漏写
-    // 一行 —— 导航点亮、内容区因 is-hidden 初值永远空白，而默认层全绿。
-    let nav_views = nav_view_names(&index_html);
-    let body_views = body_view_names(&index_html);
-    for name in &nav_views {
-        if !body_views.contains(name) {
-            problems.push(format!(
-                "导航项 data-view={name:?} 没有对应的 `id=\"view-{name}\"` 主体 —— 点它必然白屏"
-            ));
-        }
-    }
-    for name in &body_views {
-        if !nav_views.contains(name) {
-            problems.push(format!(
-                "视图主体 `id=\"view-{name}\"` 没有对应的导航项 —— 这个视图永远进不去"
-            ));
-        }
-    }
-    if !app_js.contains("view-${node.dataset.view}") {
+    // 资产形态 = 外链（严格 CSP 的前提）：index.html 引 hashed 资源、无内联脚本、无 CDN。
+    if !dist_index.contains("/assets/") {
         problems.push(
-            "setView 没有按 data-view 派生视图主体的开关 —— 新增视图极易漏 toggle（整页空白）"
-                .to_string(),
+            "dist/index.html 没有引用 /assets/ 外链 —— 资产形态漂移（CSP 会拒绝内联）".to_string(),
         );
     }
-    if app_js.contains("getElementById(\"view-") {
+    if dist_index.contains("<script>") {
         problems.push(
-            "setView 又出现逐个枚举 getElementById(\"view-…\") —— 开关只允许由 data-view 派生"
-                .to_string(),
+            "dist/index.html 出现内联 <script> —— 严格 CSP 下静默失效，且违反资产纪律".to_string(),
         );
+    }
+    if dist_index.contains("src=\"http") || dist_index.contains("href=\"http") {
+        problems.push("dist/index.html 引用外部 CDN —— 离线单二进制的前提被破坏".to_string());
     }
 
-    // 规范 7.2.6：明亮主题禁纯黑。真实教训是 .traj-row:hover 引用了不存在的
-    // --surface-2，纯黑 rgba(0, 0, 0, …) fallback 悄悄生效 —— 令牌永远不在场，
-    // fallback 永远在生效，肉眼与运行时都不报错。
-    let app_css = std::fs::read_to_string(root.join("crates/web/assets/app.css"))
-        .expect("内嵌的 app.css 必须存在");
-    if app_css.contains("rgba(0, 0, 0") {
-        problems.push(
-            "app.css 出现纯黑 rgba(0, 0, 0, …) —— 规范禁纯黑，hover/浮起一律走 --panel-hover 等令牌"
-                .to_string(),
-        );
-    }
-    // 原生 file 控件不属于令牌体系（浏览器默认外观）：必须隐藏，入口由样式化按钮代理。
-    if let Some(pos) = index_html.find("type=\"file\"") {
-        let tag = &index_html[pos..(pos + 240).min(index_html.len())];
-        if !tag.contains("is-hidden") {
-            problems.push(
-                "input[type=file] 裸奔在页面上 —— 必须带 is-hidden，由「导入 HAR 文件」按钮代理"
-                    .to_string(),
-            );
-        }
-    }
-    // 规范 7.2.3：破坏性操作必须经确认模态。调试页的停止/清空与 HAR 删除各有 actionKey，
-    // 少了就是回到「点击即丢数据」。
-    for key in [
-        "actionKey: \"debug/stop\"",
-        "actionKey: \"debug/clear\"",
-        "actionKey: `har/delete:",
-    ] {
-        if !app_js.contains(key) {
-            problems.push(format!(
-                "app.js 缺 {key} —— 破坏性操作必须由 openConfirm 包住再执行"
-            ));
-        }
-    }
-
-    // 抓包记录必须走实时流自动上屏 —— 曾经的坏法是进页一次性拉取、之后永不刷新
-    // 且处处绿灯。接线两端各钉一枚：前端连流 + 服务端路由在场。
+    // 接线两端各钉一枚：前端连流 + 关键交互文案在 bundle 里。
     for (needle, where_) in [
-        ("startDebugStream", "app.js"),
-        ("/api/debug/stream", "app.js"),
+        ("工作台导航", "dist js"),
+        ("/api/debug/stream", "dist js"),
+        ("/api/events", "dist js"),
+        ("此操作不可撤销", "dist js"),
     ] {
-        if !app_js.contains(needle) {
-            problems.push(format!(
-                "{where_} 缺 {needle:?} —— 调试页实时推送接线退场，抓包记录不会再自动上屏"
-            ));
+        if !js_bundle.contains(needle) {
+            problems.push(format!("{where_} 缺 {needle:?} —— 前端接线/交互契约退场"));
         }
     }
+
+    // 规范：明亮主题禁纯黑（v1 的教训：令牌缺席时 fallback 悄悄生效）。
+    if css_bundle.contains("rgba(0, 0, 0") {
+        problems.push("dist css 出现纯黑 rgba(0, 0, 0, …) —— 规范禁纯黑".to_string());
+    }
+
+    // v4 的"导航 ↔ 视图主体一一对应"等价断言：data.ts 的 ViewKey、SideBar 的
+    // GROUPS keys、Workbench 的 `view === "…"` 分支三个集合必须相等 ——
+    // 加视图漏任何一处，点它必然白屏（旧三件套时代真坏过）。
+    let view_keys = union_literals(
+        &std::fs::read_to_string(root.join("frontend/src/data.ts")).expect("data.ts"),
+        "export type ViewKey",
+    );
+    let nav_keys = key_literals(
+        &std::fs::read_to_string(root.join("frontend/src/SideBar.tsx")).expect("SideBar.tsx"),
+        "const NAV",
+    );
+    let workbench_src =
+        std::fs::read_to_string(root.join("frontend/src/Workbench.tsx")).expect("Workbench.tsx");
+    let body_keys: std::collections::BTreeSet<String> = workbench_src
+        .match_indices("view === \"")
+        .filter_map(|(index, _)| {
+            let rest = &workbench_src[index + "view === \"".len()..];
+            rest.split('"').next().map(str::to_string)
+        })
+        .collect();
+    if view_keys != nav_keys {
+        problems.push(format!(
+            "ViewKey {view_keys:?} 与侧栏导航 {nav_keys:?} 不一致 —— 加视图必须三处同改"
+        ));
+    }
+    if view_keys != body_keys {
+        problems.push(format!(
+            "ViewKey {view_keys:?} 与 Workbench 渲染分支 {body_keys:?} 不一致 —— 漏分支的视图点开即白屏"
+        ));
+    }
+
+    // 内嵌在场证明：二进制里找得到入口页的标题字符串（include_dir! 真的嵌了）。
+    if !binary
+        .windows("envboard 环境代理工作台".len())
+        .any(|window| window == "envboard 环境代理工作台".as_bytes())
+    {
+        problems.push("二进制里找不到前端入口页标题 —— dist 没有内嵌进产物？".to_string());
+    }
+
     let api_rs =
         std::fs::read_to_string(root.join("crates/web/src/api.rs")).expect("api.rs 必须存在");
     if !api_rs.contains("\"/api/debug/stream\"") {
@@ -260,35 +314,6 @@ fn the_release_artifact_contains_only_expected_files() {
         REQUIRED.len(),
         REMOVED_IN_V2.len(),
         RELEASE_ARTIFACTS.len(),
-        nav_views.len()
+        view_keys.len()
     );
-}
-
-/// 取 `prefix` 之后到下一个引号之间的全部取值（属性值的极简提取：这两个资产文件
-/// 里的写法固定，够用即可，不为它引入 HTML 解析依赖）。
-fn attribute_values(html: &str, prefix: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut rest = html;
-    while let Some(pos) = rest.find(prefix) {
-        rest = &rest[pos + prefix.len()..];
-        let Some(end) = rest.find('"') else { break };
-        values.push(rest[..end].to_string());
-        rest = &rest[end..];
-    }
-    values.sort();
-    values.dedup();
-    values
-}
-
-/// 导航项声明的视图名（`data-view="x"`）。
-fn nav_view_names(html: &str) -> Vec<String> {
-    attribute_values(html, "data-view=\"")
-}
-
-/// 视图主体声明的视图名（`id="view-x"`）；`view-switch` 是导航容器本身，不是主体。
-fn body_view_names(html: &str) -> Vec<String> {
-    attribute_values(html, "id=\"view-")
-        .into_iter()
-        .filter(|name| name != "switch")
-        .collect()
 }

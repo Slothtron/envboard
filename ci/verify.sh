@@ -11,11 +11,14 @@
 #   rust     fmt / clippy / check / build / test —— 纯 Rust
 #   contract 契约 fixture 的形状与消费
 #   artifact 发布物与产物纪律
+#   frontend Vite 工程（typecheck + build + dist drift）—— 显式层，**不在** all 里，
+#            构建调用圈禁在 frontend/verify-frontend.sh（toolchain 边界）
 #   live     实机层（真网络、真进程起停；仅需 openssl/curl），默认**不在** all 里
 #
 # 用法：
 #   bash ci/verify.sh            # 默认层：policy + rust + contract + artifact
 #   bash ci/verify.sh rust       # 纯 Rust 子集（policy + rust）
+#   bash ci/verify.sh frontend   # 前端工程层（需要前端工具链，见 frontend/verify-frontend.sh）
 #   bash ci/verify.sh live       # 实机层（需要宿主）
 set -euo pipefail
 
@@ -89,6 +92,14 @@ step_artifact() {
 }
 
 # --------------------------------------------------------------------------- #
+# frontend 层：Vite 工程（显式层；调用体在 frontend/ 边界内，默认路径 cargo-only）。
+# --------------------------------------------------------------------------- #
+
+step_frontend() {
+  run "frontend" bash frontend/verify-frontend.sh
+}
+
+# --------------------------------------------------------------------------- #
 # live 层：真宿主（真网络、真进程起停；仅需 openssl/curl）。默认**不进 all**。
 # --------------------------------------------------------------------------- #
 
@@ -106,10 +117,11 @@ case "$STEP" in
   rust)     step_policy; step_rust ;;
   contract) step_contract ;;
   artifact) step_artifact ;;
+  frontend) step_frontend ;;
   live)     step_live ;;
   *)
     echo "unknown step: $STEP" >&2
-    echo "可选：all（默认）/ policy / rust / contract / artifact / live" >&2
+    echo "可选：all（默认）/ policy / rust / contract / artifact / frontend / live" >&2
     exit 2
     ;;
 esac

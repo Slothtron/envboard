@@ -1,0 +1,9 @@
+# Node 依赖树与构建中间物永不入库；dist 是内嵌源，**必须提交**。
+node_modules/
+.pnpm-store/
+
+# vite 依赖预打包缓存（本地物，不入库）
+.vite/
+
+# bsk/Playwright 走查截图 = 本地产物（结论以 verify/*.md 入库，图不入库）
+verify/shots/

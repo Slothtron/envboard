@@ -1,0 +1,68 @@
+/* ==========================================================================
+   envboard 工作台 · 全局样式覆盖
+   --------------------------------------------------------------------------
+   入口样式已含 @import "tailwindcss"; 与 @import "@heroui/styles";，此处不重复引入。
+   暗色模式靠 <html class="dark" data-theme="dark"> 切换，本文件不写任何深色覆盖。
+   自定义样式一律走 BEM 类，不在 JSX 内联写死 hex / px。
+   ========================================================================== */
+
+@layer components {
+  /* 按钮四档中的「警示」：中断服务但可逆（停止 / 停止抓包） */
+  .btn-action--warn {
+    @apply border-warning/40 text-warning;
+  }
+
+  /* 按钮四档中的「危险」：不可逆破坏（删除 / 重置根证书），页面内用描边 */
+  .btn-action--danger {
+    @apply border-danger/40 text-danger;
+  }
+
+  /* 抓包详情抽屉内的请求 / 响应体等宽文本块 */
+  .wb-body-block {
+    @apply h-full rounded bg-surface-secondary p-2;
+  }
+
+  /* 右侧详情停靠面板（非模态抽屉）：默认隐藏，打开时从右滑入 */
+  .wb-detail-panel {
+    display: none;
+  }
+
+  .wb-detail-panel--open {
+    @apply flex min-h-0 flex-col border-l border-border bg-surface;
+    flex: 0 0 clamp(420px, 36vw, 640px);
+    animation: wb-drawer-in 200ms ease-out;
+  }
+
+  /* 环境详情抽屉：需容纳配置表单（max-w-3xl），比抓包面板更宽 */
+  .wb-detail-panel--env.wb-detail-panel--open {
+    flex-basis: clamp(520px, 48vw, 860px);
+  }
+
+  @keyframes wb-drawer-in {
+    from {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* 概览分组：自适应键值网格 */
+  .wb-kv-grid {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  }
+
+  /* 抓包详情头部字段：窄屏单列，≥640px 转「键列固定 + 值列自适应」 */
+  .wb-header-row {
+    @apply grid grid-cols-1 gap-3 rounded p-2 font-mono text-sm;
+  }
+
+  @media (min-width: 640px) {
+    .wb-header-row {
+      grid-template-columns: 180px minmax(0, 1fr);
+    }
+  }
+}
