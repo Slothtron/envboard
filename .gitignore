@@ -5,9 +5,6 @@ __pycache__/
 .eggs/
 build/
 dist/
-# 例外：frontend/dist 是 include_dir! 的内嵌源，必须入库（toolchain 门禁 src↔dist 成对判定）
-!frontend/dist/
-!frontend/dist/**
 .venv/
 venv/
 

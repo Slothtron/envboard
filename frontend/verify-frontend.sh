@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 # frontend 层的实际执行体：pnpm 调用被圈禁在前端边界内 ——
 # toolchain 门禁 R3 只扫 ci/ 与 scripts/ 的可执行面，本文件在 frontend/ 下，
-# 是「显式 frontend 层动作」的合法落点（默认验证路径保持 cargo-only）。
+# 是「前端构建」这条衔接线的合法落点。
 #
-# 三步：typecheck（tsc strict）→ build（vite，产物 dist/ 是内嵌源）→
-# drift 校验（git diff 必须为空：提交的 dist 与 src 一致）。
+# 构建顺序纪律：先 pnpm build 产出 dist/（不入库），后 cargo build 内嵌。
+# 两步：typecheck（tsc strict）→ build（vite 产出 dist/）。
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 if ! command -v pnpm >/dev/null 2>&1; then
-  echo "!!! frontend: 未找到 pnpm —— 安装 pnpm（corepack enable）后重跑，或跳过 frontend 层" >&2
+  # 无前端工具链：dist 已在位则以既有产物通过（cargo 只消费产物）；
+  # 缺 dist 才失败 —— 构建顺序是先前端后 Rust，两条出路都要响亮给出。
+  if [[ -f dist/index.html ]]; then
+    echo "frontend: SKIP —— 未找到 pnpm，使用已在位的 dist/（改前端源码需装 pnpm 重跑本层）"
+    exit 0
+  fi
+  echo "!!! frontend: 未找到 pnpm 且 dist/ 缺失 —— 构建顺序是先前端后 Rust" >&2
+  echo "    出路一：安装 pnpm（corepack enable）后重跑" >&2
+  echo "    出路二：在有前端工具链的机器上构建，把 dist/ 带到本地（产物不入库）" >&2
   exit 1
 fi
 
@@ -23,11 +31,10 @@ pnpm run typecheck
 echo "--- frontend: build ---"
 pnpm run build
 
-echo "--- frontend: dist drift（src 与已提交 dist 必须一致） ---"
-if ! git diff --quiet -- frontend/dist; then
-  echo "!!! frontend/dist 与 src 漂移：提交前必须 pnpm run build 并把 dist 一起提交" >&2
-  git diff --stat -- frontend/dist >&2
+# 产物在位即达成本层职责（cargo 侧由 crates/web/build.rs 校验并消费）。
+if [[ ! -f dist/index.html ]]; then
+  echo "!!! frontend: 构建后 dist/index.html 仍缺失" >&2
   exit 1
 fi
 
-echo "frontend: OK"
+echo "frontend: OK（dist 已就绪，可进入 cargo 构建）"

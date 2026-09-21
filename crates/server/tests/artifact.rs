@@ -169,9 +169,10 @@ fn the_release_artifact_contains_only_expected_files() {
     }
 
     // ------------------------------------------------------------------ #
-    // v4：内嵌资产 = frontend/dist（Vite 构建产物，include_dir! 进二进制）。
-    // 最阴险的坏法仍是"截断/漂移"：头部完好、尾部消失，页面白屏却处处绿灯。
-    // 钉住：dist 在位 + 体积下限 + 外链形态 + 关键符号；旧三件套必须已退场。
+    // v4：内嵌资产 = frontend/dist（Vite 构建产物，include_dir! 进二进制；
+    // dist 不入库，能走到本测试说明 build.rs 的前置检查已过 —— 产物在位）。
+    // 最阴险的坏法是"截断"：头部完好、尾部消失，页面白屏却处处绿灯。
+    // 钉住：体积下限 + 外链形态 + 关键符号；旧三件套必须已退场。
     // ------------------------------------------------------------------ #
     if root.join("crates/web/assets").exists() {
         problems
@@ -180,7 +181,7 @@ fn the_release_artifact_contains_only_expected_files() {
 
     let dist_dir = root.join("frontend/dist");
     let dist_index = std::fs::read_to_string(dist_dir.join("index.html"))
-        .expect("内嵌的 frontend/dist/index.html 必须存在（pnpm build 产物，提交入库）");
+        .expect("内嵌的 frontend/dist/index.html 必须存在（pnpm build 的前置产物）");
     let assets_dir = dist_dir.join("assets");
     let mut js_files: Vec<_> = std::fs::read_dir(&assets_dir)
         .expect("frontend/dist/assets 必须存在")

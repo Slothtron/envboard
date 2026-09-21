@@ -11,14 +11,16 @@
 #   rust     fmt / clippy / check / build / test —— 纯 Rust
 #   contract 契约 fixture 的形状与消费
 #   artifact 发布物与产物纪律
-#   frontend Vite 工程（typecheck + build + dist drift）—— 显式层，**不在** all 里，
-#            构建调用圈禁在 frontend/verify-frontend.sh（toolchain 边界）
+#   frontend 前端工程（typecheck + build）—— **Rust 构建的前置**，在 all 最前；
+#            前端工具链的探测与调用整体圈禁在 frontend/verify-frontend.sh
+#            （可执行面扫描不覆盖 frontend/，见 toolchain 门禁 R3）。
+#            无前端工具链但 dist 已在位时以既有产物通过（cargo 只消费 dist）。
 #   live     实机层（真网络、真进程起停；仅需 openssl/curl），默认**不在** all 里
 #
 # 用法：
-#   bash ci/verify.sh            # 默认层：policy + rust + contract + artifact
-#   bash ci/verify.sh rust       # 纯 Rust 子集（policy + rust）
-#   bash ci/verify.sh frontend   # 前端工程层（需要前端工具链，见 frontend/verify-frontend.sh）
+#   bash ci/verify.sh            # 默认层：frontend + policy + rust + contract + artifact
+#   bash ci/verify.sh rust       # 纯 Rust 子集（policy + rust；要求 dist 已在位）
+#   bash ci/verify.sh frontend   # 只跑前端构建层（见 frontend/verify-frontend.sh）
 #   bash ci/verify.sh live       # 实机层（需要宿主）
 set -euo pipefail
 
@@ -96,6 +98,7 @@ step_artifact() {
 # --------------------------------------------------------------------------- #
 
 step_frontend() {
+  # 工具链探测、SKIP 与失败指引全部在 frontend/verify-frontend.sh 内（边界内自决）。
   run "frontend" bash frontend/verify-frontend.sh
 }
 
@@ -112,7 +115,7 @@ step_live() {
 }
 
 case "$STEP" in
-  all)      step_policy; step_rust; step_contract; step_artifact ;;
+  all)      step_frontend; step_policy; step_rust; step_contract; step_artifact ;;
   policy)   step_policy ;;
   rust)     step_policy; step_rust ;;
   contract) step_contract ;;
@@ -121,7 +124,7 @@ case "$STEP" in
   live)     step_live ;;
   *)
     echo "unknown step: $STEP" >&2
-    echo "可选：all（默认）/ policy / rust / contract / artifact / frontend / live" >&2
+    echo "可选：all（默认）/ frontend / policy / rust / contract / artifact / live" >&2
     exit 2
     ;;
 esac

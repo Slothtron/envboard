@@ -7,9 +7,10 @@
 //! - **文件面** R2：Node/TS 面按前缀判定 —— `frontend/` 内允许清单文件、TS 源码、
 //!   打包器配置与 `node_modules`；边界之外任何一处出现即红；
 //! - **调用面** R3：可执行面（ci/ scripts/ .service）仍然只许 cargo ——
-//!   **默认验证路径保持零 npm/pnpm/node**，前端构建是显式的 frontend 层动作；
-//! - **成对判定**：`frontend/src` 与 `frontend/dist` 同存同缺 —— dist 是内嵌进
-//!   二进制的构建产物（提交入库），缺一个就是漂移。
+//!   **cargo 自身永不驱动前端工具链**。两条工具链以**固定顺序**衔接：
+//!   先 `pnpm build` 产出 `frontend/dist`（构建产物，不入库），
+//!   再 `cargo build` 经 `include_dir!` 内嵌；缺 dist 时 `crates/web/build.rs`
+//!   在编译期响亮失败并给出构建指引。
 //!
 //! 关键区分不变：**禁的是工具链越界，不是文件类型**。`crates/web/assets/` 的
 //! 历史三件套已退场；浏览器资产现在是 `frontend/dist` 的构建产物（数据）。
@@ -193,27 +194,6 @@ fn node_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -
     problems
 }
 
-/// 成对判定：frontend/src ↔ frontend/dist（dist 是内嵌源，必须提交）。
-fn frontend_pair_is_consistent() {
-    let root = workspace_root();
-    let src = root.join(FRONTEND_DIR).join("src");
-    let dist = root.join(FRONTEND_DIR).join("dist");
-    let src_exists = src.is_dir();
-    let dist_exists = dist.is_dir();
-    let problems: Vec<String> = if src_exists == dist_exists {
-        Vec::new()
-    } else if src_exists {
-        vec!["frontend/dist: 有源码没有构建产物 —— 内嵌源缺失（pnpm build 后提交）".into()]
-    } else {
-        vec!["frontend/dist: 有构建产物没有源码 —— 产物失去可重建性".into()]
-    };
-    report(
-        "toolchain/frontend-pair",
-        problems,
-        format!("frontend/src 与 frontend/dist 成对（src={src_exists}, dist={dist_exists}）"),
-    );
-}
-
 /// 可执行面：会被 CI 或部署直接执行的文本。文档与注释不在此列。
 fn is_executable_surface(file: &str) -> bool {
     (file.starts_with("ci/") && file.ends_with(".sh"))
@@ -255,7 +235,7 @@ fn call_face(root: &std::path::Path, files: &[String], used: &mut Vec<String>) -
             for command in FORBIDDEN_COMMANDS {
                 if has_word(line, command) {
                     problems.push(format!(
-                        "{file}:{number}: 可执行面里不许调用 `{command}`（前端构建是显式 frontend 层动作，不进默认路径）"
+                        "{file}:{number}: 可执行面里不许调用 `{command}`（cargo 永不驱动前端工具链；顺序衔接圈禁在 frontend/ 侧）"
                     ));
                 }
             }
@@ -317,11 +297,6 @@ fn r3_executable_surface_never_calls_a_second_toolchain() {
         scan.call,
         "可执行面只用 cargo".to_string(),
     );
-}
-
-#[test]
-fn frontend_source_and_dist_are_a_pair() {
-    frontend_pair_is_consistent();
 }
 
 #[test]

@@ -32,8 +32,8 @@ use tokio_stream::wrappers::{IntervalStream, ReceiverStream};
 
 use crate::config::{CONTENT_SECURITY_POLICY, REQUEST_HEADER, TOKEN_HEADER, WebConfig};
 
-/// 前端构建产物（内嵌源，提交入库；src↔dist 成对判定由 toolchain 门禁、
-/// drift 校验由 `ci/verify.sh` 的 frontend 层负责）。
+/// 前端构建产物（`frontend/dist`，不入库、可随时再生；构建顺序先 `pnpm build`
+/// 后 cargo，缺失时由 build.rs 在编译期响亮失败）。
 const DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend/dist");
 
 #[derive(Clone)]

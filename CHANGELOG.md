@@ -13,11 +13,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   （`examples/envboard-workbench-heroui`）并接真实 Admin API；补建「活动」视图
   （`/api/history` 审计事件时间线）与主题切换（浅色/深色/跟随系统，localStorage 持久化）。
   旧原生三件套 `crates/web/assets/` 退场；`web` 改用 `include_dir!` 内嵌
-  `frontend/dist`（dist 为内嵌源，提交入库；hashed 资产走 `/assets/*` + immutable 缓存，
-  token 豁免面从两个固定路径改为 `/assets/` 前缀）。URL 与响应形状不变，前端零回归。
+  `frontend/dist`（hashed 资产走 `/assets/*` + immutable 缓存，token 豁免面从
+  两个固定路径改为 `/assets/` 前缀）。URL 与响应形状不变，前端零回归。
+- **构建顺序纪律：先 `pnpm build` 后 `cargo build`**。`frontend/dist/` 是构建
+  产物、不入库（与 `target/` 同类）；`crates/web/build.rs` 缺 dist 时编译期响亮
+  失败；`ci/verify.sh` 的 frontend 层（typecheck + build）成为默认 all 的最前置，
+  无 pnpm 但 dist 在位时以既有产物通过。
 - **工具链纪律重划**：Node/TS/Vite/pnpm 从「全仓禁止」改为「圈禁在 `frontend/` 边界内」；
-  默认验证路径仍 cargo-only（可执行面禁前端命令），新增 `bash ci/verify.sh frontend`
-  显式层（frozen-lockfile + typecheck + build + dist drift 校验）与 src↔dist 成对判定。
+  可执行面仍禁前端命令（cargo 永不驱动前端工具链），衔接发生在 verify 编排层。
 - **新增 `envboard-admin`（Admin 管理 API 门面）**：控制面用例的传输无关门面 ——
   类型化入口校验（`EnvCreateReq` / `EnvPatchReq` / `ProxyPutReq` / `RulesImportReq` /
   `DebugStartReq`，`deny_unknown_fields`）+ 统一错误信封；`web` 依赖从 `manager`

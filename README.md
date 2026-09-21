@@ -297,17 +297,22 @@ cargo test -p envboard-policy-tests --test registry   # 注册表 ↔ 内置实�
 
 ### 工具链纪律
 
-**默认验证路径只有一条工具链：`cargo`。** 第二种工具链（Node/TS/Vite/pnpm）被
-**圈禁在 `frontend/` 边界内**：清单文件、TS 源码、`node_modules` 只允许出现在该目录；
-`ci/*.sh` 与 `*.service` 的可执行面仍然零前端命令 —— cargo 构建**永不**调用前端工具链，
-`frontend/dist/` 作为内嵌源提交入库（src↔dist 成对判定 + drift 校验由
-`bash ci/verify.sh frontend` 层负责，该层是显式动作、不在默认 all 里）。
-这条约束由门禁自己证明：文件面（边界判定）、调用面（禁出现的命令形态）、
-成对判定（src 与 dist 同存同缺）、白名单双向判定（条目失效同样判红）。
-`bash ci/verify.sh rust` 是这条纪律的可执行形式：在没有 Python、没有 Node 的机器上全绿。
+**两条工具链，固定顺序：先前端，后 Rust。** `frontend/`（Vite + pnpm）先
+`pnpm build` 产出 `frontend/dist/`（构建产物，**不入库**，与 `target/` 同类、
+可随时再生）；`cargo build` 随后经 `include_dir!` 内嵌它。衔接点由
+`crates/web/build.rs` 把守：缺 dist 时编译期响亮失败并给出构建指引。
 
-前端开发流两步式：`pnpm dev`（5199，`/api` 代理到本机 8900 实跑实例联调）→
-`pnpm build` 后把 `frontend/dist` 与 `src` 一起提交。
+边界仍然成立：Node/TS/Vite/pnpm 的清单与源码**只允许出现在 `frontend/` 内**；
+`ci/*.sh` 与 `*.service` 的可执行面仍然零前端命令 —— **cargo 自身永不驱动前端
+工具链**，顺序衔接发生在 verify 的编排层（frontend 层在默认 all 的最前；无 pnpm
+但 dist 已在位时以既有产物通过，cargo 只消费产物）。这条边界由门禁自己证明：
+文件面（前缀判定）、调用面（禁出现的命令形态）、白名单双向判定。
+`bash ci/verify.sh policy` 在没有 Python、没有 Node 的机器上也能全绿（它不碰 dist）；
+`rust` 层要求 dist 在位。
+
+开发流：`pnpm dev`（5199，`/api` 代理到本机 8900 实跑实例联调，`ENVBOARD_PROXY`
+可换目标）→ 提交只含 `src`；产物经 `bash ci/verify.sh frontend`（typecheck +
+build）再生，不进 git。
 
 要加一条新门禁，就加一个新测试：纯文本 / 结构门禁放 `envboard-policy-tests`
 （一门禁一文件），需要已构建二进制的放所属 crate 的 `tests/`（用 `CARGO_BIN_EXE_<bin>`），

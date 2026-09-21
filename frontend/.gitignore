@@ -1,6 +1,9 @@
-# Node 依赖树与构建中间物永不入库；dist 是内嵌源，**必须提交**。
+# 构建产物与依赖树一律不入库（与 target/ 同类，可随时再生）。
+# 构建顺序纪律：先 pnpm build 产出 dist/，再 cargo build 经 include_dir! 内嵌；
+# 缺 dist 时 crates/web/build.rs 响亮失败。
 node_modules/
 .pnpm-store/
+dist/
 
 # vite 依赖预打包缓存（本地物，不入库）
 .vite/

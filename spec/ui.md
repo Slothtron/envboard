@@ -65,8 +65,10 @@ Tailwind 工具类写进 `className`。
 - **可测试性**：保持 DOM 可断言结构（`data-*` 标记、语义化 class、中文 aria-label）；
   这些锚点改名即破坏 live 验收与 bsk 走查。
 - **凭据永不回显**：UI 只消费服务端视图 DTO（protocol 词汇），不组凭据字段。
-- **构建产物入库**：`frontend/dist/` 是内嵌源（`include_dir!` 消费），改 `src/`
-  必须同提交重建 dist（verify 的 frontend 层做 drift 校验）。
+- **构建顺序**：先 `pnpm build` 产出 `frontend/dist/`（构建产物，**不入库**，
+  与 `target/` 同类），再 `cargo build` 经 `include_dir!` 内嵌；缺 dist 时
+  `crates/web/build.rs` 编译期响亮失败。改 `frontend/src/` 后重跑
+  `bash ci/verify.sh frontend` 即可再生。
 
 ## 修订规则
 
