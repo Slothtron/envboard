@@ -119,6 +119,7 @@ fn read_tail_window(path: &Path, window: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     fn write_lines(path: &Path, count: usize, prefix: &str) {
@@ -213,6 +214,7 @@ mod tests {
         let live = std::fs::metadata(&path).unwrap();
         // **崩溃现场守门断言**：截断（而不是删除/改名）→ inode 不变，
         // 子进程手里的 fd 仍然指向同一个文件。
+        #[cfg(unix)]
         assert_eq!(
             live.ino(),
             inode_before.ino(),

@@ -11,7 +11,6 @@ publish = false
 envboard-engine.workspace = true
 envboard-events.workspace = true
 envboard-protocol.workspace = true
-libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

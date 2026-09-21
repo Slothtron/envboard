@@ -277,22 +277,18 @@ impl InstanceLock {
         // 状态目录下的东西一律收紧（同款纪律）。
         restrict_permissions(path)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            // SAFETY: `fd` 来自仍然活着的 `file`；flock 只在同一 fd 上操作。
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc != 0 {
-                let error = std::io::Error::last_os_error();
-                return Err(Error::new(
-                    ErrorCode::Conflict,
-                    format!(
-                        "another envboard process holds {} ({error}); \
-                         state must have exactly one writer",
-                        path.display()
-                    ),
-                ));
-            }
+        // 独占建议锁：std 跨平台实现（unix = flock，Windows = LockFileEx）。
+        // 单写者契约必须在两个平台都成立 —— 旧实现只在 unix 加锁，Windows 上
+        // 第二个实例会静默启动（状态双写者，且 smoke 互斥断言永远挂死）。
+        if let Err(error) = file.try_lock() {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                format!(
+                    "another envboard process holds {} ({error}); \
+                     state must have exactly one writer",
+                    path.display()
+                ),
+            ));
         }
 
         Ok(Self { _file: file })
@@ -355,6 +351,8 @@ fn restrict_permissions(path: &Path) -> Result<(), Error> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -436,12 +434,14 @@ mod tests {
         let path = dir.join("lock");
 
         let first = InstanceLock::acquire(&path).unwrap();
-        // flock 是按**打开文件描述**加的，所以同一进程里第二次 open + LOCK_EX 也会失败 ——
+        // 锁按**打开文件描述/句柄**生效，所以同一进程里第二次 open + try_lock 也会失败 ——
         // 这正是我们要的：第二个管理器进程（或进程内的第二个 Manager）必须被挡住，
-        // 而不是"先跑起来再说"。
-        let second = InstanceLock::acquire(&path);
-        assert!(second.is_err(), "a second lock holder must be rejected");
-        assert_eq!(second.unwrap_err().code, ErrorCode::Conflict);
+        // 而不是"先跑起来再说"。（std try_lock 跨平台：unix flock / Windows LockFileEx。）
+        {
+            let second = InstanceLock::acquire(&path);
+            assert!(second.is_err(), "a second lock holder must be rejected");
+            assert_eq!(second.unwrap_err().code, ErrorCode::Conflict);
+        }
 
         drop(first);
         assert!(
