@@ -38,15 +38,20 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
         "envboard-manager",
         &["envboard-engine", "envboard-events", "envboard-protocol"],
     ),
-    // web 形态（资产 + HTTP/SSE 绑定）。envboard-engine 只允许错误词汇
-    // （Error/ErrorCode），装配符号由下面的源文件面判据禁绝 —— envboard-web
-    // 没有 main.rs 豁免，整 crate 都不认识引擎装配。
+    // Admin 管理 API 门面（spec/admin-api.md）：类型化入口校验 + 用例编排，
+    // 传输无关 —— 没有 axum，也没有引擎装配（源文件面判据同样覆盖它）。
+    (
+        "envboard-admin",
+        &["envboard-engine", "envboard-manager", "envboard-protocol"],
+    ),
+    // web 形态（资产 + HTTP/SSE 绑定）。只认识 Admin 门面与错误词汇；
+    // 不再直依 manager（v4：web 降级为纯传输绑定）。装配符号由源文件面判据禁绝。
     (
         "envboard-web",
         &[
+            "envboard-admin",
             "envboard-engine",
             "envboard-events",
-            "envboard-manager",
             "envboard-protocol",
         ],
     ),
@@ -54,7 +59,12 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
     // envboard-engine 只允许 src/main.rs（装配引擎与共享 CA）使用。
     (
         "envboard-server",
-        &["envboard-engine", "envboard-manager", "envboard-web"],
+        &[
+            "envboard-admin",
+            "envboard-engine",
+            "envboard-manager",
+            "envboard-web",
+        ],
     ),
     // 纯测试 crate
     ("envboard-contract-tests", &[]),
@@ -281,9 +291,9 @@ fn the_rust_layering_holds() {
         }
 
         // 8. UI 面不认识引擎装配（源文件面判据）：`envboard-server` 除组合根
-        //    main.rs 外、`envboard-web` 全部源码，都禁止出现引擎装配符号 ——
-        //    "只认识管理器的公开 API + 错误词汇"这条不变量随拆分继续成立。
-        if name == "envboard-server" || name == "envboard-web" {
+        //    main.rs 外、`envboard-web` 与 `envboard-admin` 全部源码，都禁止出现
+        //    引擎装配符号 —— "只认识管理器的公开 API + 错误词汇"这条不变量随拆分继续成立。
+        if name == "envboard-server" || name == "envboard-web" || name == "envboard-admin" {
             let web_src = crate_dir.join("src");
             if name == "envboard-server" {
                 let main_rs = web_src.join("main.rs");

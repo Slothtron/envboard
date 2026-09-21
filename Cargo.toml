@@ -16,6 +16,7 @@ rust-version = "1.98"
 
 [workspace.dependencies]
 # 内部 crate：只写 path，避免版本漂移
+envboard-admin = { path = "crates/admin" }
 envboard-engine = { path = "crates/engine" }
 envboard-events = { path = "crates/events" }
 envboard-engine-fake = { path = "crates/engine-fake" }
@@ -45,6 +46,7 @@ toml = "1.1.4"
 # 工作台「设置 · 证书」的根证书二维码：纯 Rust、零传递依赖（default-features 关掉
 # image 只留 svg 渲染），加入前核对过 Cargo.lock 增量只有它自己。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+include_dir = "0.7.4"
 
 # 引擎（envboard-engine）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
 # 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA

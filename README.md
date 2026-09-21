@@ -70,10 +70,10 @@ previous snapshot still serving" 呈现。
 
 ```
 spec/            语言中立契约：能力清单、错误码、协议（UI 边界词汇与推送流帧）、
-                 规则语法 BNF、66 个 golden fixture
+                 Admin API 端点契约、UI 契约与设计规范、规则语法 BNF、golden fixture
 crates/
-  protocol            UI 边界词汇：视图 DTO、推送流帧形状、游标、错误信封
-                      （纯 serde，零传输依赖；未来桌面形态与 web 共用）         ← 叶子
+  protocol            UI 边界词汇：视图 DTO、类型化请求 DTO、推送流帧形状、游标、
+                      错误信封（纯 serde，零传输依赖；未来桌面形态与 web 共用）   ← 叶子
   engine              ProxyEngine 接缝（EngineSpec / EngineHandle / EngineReport /
                       InstanceState）、错误码、端口（时钟 / 日志 LineWriter）
   │ domain             环境校验 / 合并、端口选择、reconcile 决策                   ← 纯逻辑
@@ -81,22 +81,30 @@ crates/
   │ 引擎：共享 CA、rustls 接线（ring + rcgen）、引擎实例、
                       hosts 改写、请求终局日志、有界日志总线
   engine-fake         ProxyEngine 的生命周期替身（测试 dev-dep，真绑端口）
+  events              事件词汇：控制面审计 / 数据面轨迹 / JSONL 存取（见 spec/events.md）
   envboard-manager    环境 CRUD、端口分配、账本持久化、锁、健康判定、reconcile、
                       规则账本、EngineSpec 编译与热装配接线、视图 DTO 构造
-  web                 web 形态：axum API + SSE + 内嵌前端（index.html / app.css /
-                      app.js）；只做传输绑定，不认识引擎装配
+                      （单一 Manager 类型，impl 按域拆模块文件：lifecycle /
+                       rules_store / proxies / reconcile_health / ledger /
+                       observability / debug_capture / projection）
+  admin               Admin 管理 API 门面（spec/admin-api.md）：类型化入口校验 +
+                      用例编排，传输无关（无 axum、无引擎装配）
+  web                 web 形态：axum HTTP/SSE 传输绑定 + 安全中间件 + 内嵌前端
+                      构建产物（include_dir! 嵌 frontend/dist）；只认识 Admin 门面
   server              envboard 二进制（唯一发布产物）：组合根在 src/main.rs
-                      （引擎装配 + 管理器 + web 的 serve 编排）
-  envboard-contract-tests   消费全部 66 个契约 fixture（只有测试目标）
+                      （引擎装配 + 管理器 → AdminService → web 的 serve 编排）
+  envboard-contract-tests   消费全部契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
+frontend/               工作台前端：Vite 7 + React 19 + HeroUI v3 + Tailwind v4
+                      （pnpm 管理；dist/ 是内嵌源，提交入库，src↔dist 成对判定）
 scripts/systemd/      部署工件（用户级 unit）
 ```
 
 依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：
-protocol 是叶子；domain / rules 是纯逻辑（不得依赖 tokio / libc）；UI 面（web 全部源码、
-宿主除 main.rs 外）只认识管理器的公开 API、不认识引擎装配（引擎装配只允许出现在
-src/main.rs 组合根，源文件面判据钉住）—— 换引擎实现不动界面，加界面形态
-（桌面 GUI 等）不动协议。
+protocol 是叶子；domain / rules 是纯逻辑（不得依赖 tokio / libc）；UI 面（web 与
+admin 全部源码、宿主除 main.rs 外）只认识管理器的公开 API、不认识引擎装配（引擎装配
+只允许出现在 src/main.rs 组合根，源文件面判据钉住）—— 换引擎实现不动界面，
+加界面形态（桌面 GUI 等）只接 Admin 门面、不动协议。
 
 ```
 <state_dir>/
@@ -205,7 +213,7 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
   `web.token`）—— 对外暴露是知情动作，不给"忘了开就裸奔"留路径。服务端接受 header
   `x-envboard-token`（优先）与 URL `?token=`（EventSource 带不了自定义头）两条等效
   通道；前端捕获 URL token 后**保留在地址栏**（reload 不 401），后续请求走 header。
-  `/app.css` / `/app.js` 两个内嵌静态资产豁免（浏览器子资源请求带不了凭据）。
+  `/assets/*`（hashed 前端构建产物）豁免（浏览器子资源请求带不了凭据）。
 - **与 token 无关、任何档位都不豁免的两道门**：`Host` 必须等于监听地址（DNS rebinding
   防线）；变更类请求必须带 `x-envboard-request: 1`（CSRF 防线）—— 回环免鉴权时，
   后者就是挡住恶意网页打本机端口的闸。**多用户共享的主机请在回环上也给 `--token`**：
@@ -230,7 +238,7 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/` | 工作台页面（内嵌 HTML 外壳） |
-| GET | `/app.css` / `/app.js` | 内嵌静态资产（唯一豁免 token 的两个路径） |
+| GET | `/assets/<hashed>` | 内嵌前端构建产物（唯一豁免 token 的路径前缀；immutable 缓存） |
 | GET | `/api/status` | 管理器与引擎概况、`port_range` 等配置回显、`events_dropped` |
 | GET/POST | `/api/environments` | 列表 / 建环境（`name` 必填；端口缺省 = 自动分配） |
 | GET/PATCH/DELETE | `/api/environments/:name` | 详情 / 改环境（PATCH 未提及不动、`null` 清空） / 删除（须先停止） |
@@ -289,10 +297,22 @@ cargo test -p envboard-policy-tests --test registry   # 注册表 ↔ 内置实�
 
 ### 工具链纪律
 
-**这个仓库只有一条工具链：`cargo`。** 没有第二种语言的源码、清单文件、包管理器或门禁
-脚本。这条约束由门禁自己证明：文件面（禁出现的清单与源码后缀）、调用面（`ci/*.sh` 与
-`*.service` 里禁出现的命令形态）、白名单双向判定（条目失效同样判红）。
-`bash ci/verify.sh rust` 是这条纪律的可执行形式：在没有 Python、没有 Node 的机器上全绿。
+**两条工具链，固定顺序：先前端，后 Rust。** `frontend/`（Vite + pnpm）先
+`pnpm build` 产出 `frontend/dist/`（构建产物，**不入库**，与 `target/` 同类、
+可随时再生）；`cargo build` 随后经 `include_dir!` 内嵌它。衔接点由
+`crates/web/build.rs` 把守：缺 dist 时编译期响亮失败并给出构建指引。
+
+边界仍然成立：Node/TS/Vite/pnpm 的清单与源码**只允许出现在 `frontend/` 内**；
+`ci/*.sh` 与 `*.service` 的可执行面仍然零前端命令 —— **cargo 自身永不驱动前端
+工具链**，顺序衔接发生在 verify 的编排层（frontend 层在默认 all 的最前；无 pnpm
+但 dist 已在位时以既有产物通过，cargo 只消费产物）。这条边界由门禁自己证明：
+文件面（前缀判定）、调用面（禁出现的命令形态）、白名单双向判定。
+`bash ci/verify.sh policy` 在没有 Python、没有 Node 的机器上也能全绿（它不碰 dist）；
+`rust` 层要求 dist 在位。
+
+开发流：`pnpm dev`（5199，`/api` 代理到本机 8900 实跑实例联调，`ENVBOARD_PROXY`
+可换目标）→ 提交只含 `src`；产物经 `bash ci/verify.sh frontend`（typecheck +
+build）再生，不进 git。
 
 要加一条新门禁，就加一个新测试：纯文本 / 结构门禁放 `envboard-policy-tests`
 （一门禁一文件），需要已构建二进制的放所属 crate 的 `tests/`（用 `CARGO_BIN_EXE_<bin>`），
@@ -335,9 +355,10 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
 - 没有"只跑环境不跑工作台"的形态，也不会收养 / 清理任何外部进程 —— 端口上蹲着
   别人的进程时，对应环境以 `port_conflict` 如实呈现。
 
-工作台界面的视觉令牌、CSP 约束与交互纪律以
-`crates/web/assets/app.css` 第 ① 区为准（那里是机器可读的唯一来源）；
-改 UI 前先读 `spec/ui.md`（机检条目 UI-1…UI-8 由 policy 门禁执行，违反即 `verify` 红）。
+工作台的设计语言以 `spec/design.md` 为准（Token 纪律、布局骨架、按钮分级、
+反馈契约、bsk 走查检查表）；机器可判的纪律以 `spec/ui.md` 为准
+（机检条目 UI-1…UI-6 由 policy 门禁执行，违反即 `verify` 红）。
+控制面端点契约见 `spec/admin-api.md`。
 
 ## 健康与错误码
 
@@ -383,7 +404,7 @@ curl -s localhost:8900/api/status | head -c 400     # 或直接在浏览器看�
 
 ## 版本与发布
 
-发布产物是**单一 `envboard` 二进制**（引擎、管理器、工作台全在其中；前端资产
-`include_str!` 内嵌，零构建步骤、零 CDN）。全部 crate 显式 `publish = false` ——
+发布产物是**单一 `envboard` 二进制**（引擎、管理器、工作台全在其中；前端构建产物
+`include_dir!` 内嵌，运行时零 Node、零 CDN）。全部 crate 显式 `publish = false` ——
 "不发布 crate"是 manifest 事实，由 `deps` 门禁钉住；发布物内容由 `artifact` 层做
-声明式清单校验（必需文件逐项在位）。当前版本：**0.2.0**，与 git tag 一致是发布前置条件。
+声明式清单校验（必需文件逐项在位）。当前版本：**0.3.0**，与 git tag 一致是发布前置条件。

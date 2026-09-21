@@ -196,6 +196,9 @@ mod tests {
     }
 
     #[test]
+    // Windows 上 std 的 bind 默认带 SO_REUSEADDR 语义差异，通配监听不会挡住
+    // 具体地址的试绑 —— 这条守的是 POSIX 的 SO_REUSEADDR 坑，只在 unix 上跑。
+    #[cfg(unix)]
     fn probe_catches_a_wildcard_listener() {
         // 这条是 `SO_REUSEADDR` 那个坑的守门测试：别的程序在 0.0.0.0 上监听时，
         // 具体地址上的试绑**必须**失败。若哪天有人把实现换成 tokio 的 bind

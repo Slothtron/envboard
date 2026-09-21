@@ -25,6 +25,16 @@ pub mod manager;
 pub mod ports;
 pub mod state;
 
+// Manager 的域拆分：各文件以 `impl Manager` 扩展同一类型（见 manager.rs 头注）。
+mod debug_capture;
+mod ledger;
+mod lifecycle;
+mod observability;
+mod projection;
+mod proxies;
+mod reconcile_health;
+mod rules_store;
+
 pub use envboard_protocol::{DebugView, Desired, EnvView, ProxyView, ReconcileReport};
 pub use manager::Manager;
 pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};

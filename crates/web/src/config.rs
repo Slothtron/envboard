@@ -24,11 +24,18 @@ pub const REQUEST_HEADER: &str = "x-envboard-request";
 /// token 头（启用鉴权时才要求）。
 pub const TOKEN_HEADER: &str = "x-envboard-token";
 
-/// CSP：**不含任何 `unsafe-inline`** —— 因为资产是外置的 `app.css` / `app.js`。
+/// CSP：**不含任何 `unsafe-inline`** —— 资产是外置的 Vite 构建产物（dist）。
 ///
 /// v1 的教训是"内联脚本被宿主 CSP 拒绝，而 curl 断言查不出来"；我们自己的宿主更要把
 /// 这条钉死：CSP 与资产形态必须一致，否则样式或脚本会静默失效。
-pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
+///
+/// `style-src` 上唯一的 hash 豁免是给 react-aria 的运行时注入：pressable 组件首挂载
+/// 时注入一张固定内容的 `<style>`（`[data-react-aria-pressable]{touch-action:…}`，
+/// 88 B）。内容恒定 → hash 恒定；react-aria 升级若改动内容，live 层的
+/// "零 CSP 报错"断言会红（升级时同步此 hash）。
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
+     style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o='; \
+     img-src 'self' data:; \
      connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 #[derive(Debug, Clone)]

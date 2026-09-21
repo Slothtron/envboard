@@ -52,10 +52,24 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_envboard")
 }
 
+/// 从入口页解析 hashed 资产路径（/assets/<name>.js / .css）。
+fn asset_paths(index_body: &str) -> (String, String) {
+    let find = |suffix: &str| -> String {
+        index_body
+            .split('"')
+            .find(|part| part.starts_with("/assets/") && part.ends_with(suffix))
+            .unwrap_or_default()
+            .to_string()
+    };
+    (find(".js"), find(".css"))
+}
+
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    // Windows 上可执行文件带扩展名：裸名找不到时补 .exe（Git Bash 的 curl/openssl 即如此）。
+    let exts: &[&str] = if cfg!(windows) { &["", ".exe"] } else { &[""] };
     std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
+        .flat_map(|dir| exts.iter().map(move |ext| dir.join(format!("{name}{ext}"))))
         .find(|candidate| candidate.is_file())
 }
 
@@ -516,29 +530,65 @@ fn start_tls_upstream(work: &Path, host: &str) -> (u16, Child) {
 
 /// 经代理请求 HTTPS，客户端用指定 CA 校验（不带 -k）：链验不过就是失败。
 fn curl_with_ca(proxy_port: u16, url: &str, cacert: &std::path::Path) -> u16 {
-    let output = Command::new("curl")
-        .args([
-            "-sS",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "-x",
-            &format!("http://127.0.0.1:{proxy_port}"),
-            "--cacert",
-            cacert.to_str().expect("cacert path"),
-            "--noproxy",
-            "",
-            "--max-time",
-            "20",
-            url,
-        ])
-        .output()
-        .expect("run curl --cacert");
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0)
+    // Git for Windows 的 curl 是 Schannel 后端，**忽略 --cacert**（系统信任库之外
+    // 无从信任预放 CA）—— 改用 openssl s_client -proxy + -CAfile 走同一 CONNECT
+    // 路径验证 MITM 链，信任语义一致；成功以 200 哨兵返回。
+    #[cfg(windows)]
+    {
+        let rest = url.trim_start_matches("https://");
+        let (host, port) = rest.rsplit_once(':').unwrap_or((rest, "443"));
+        let output = Command::new("openssl")
+            .args([
+                "s_client",
+                "-proxy",
+                &format!("127.0.0.1:{proxy_port}"),
+                "-connect",
+                &format!("{host}:{port}"),
+                "-servername",
+                host,
+                "-CAfile",
+                cacert.to_str().expect("cacert path"),
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run openssl s_client");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if text.contains("Verify return code: 0 (ok)") {
+            200
+        } else {
+            0
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let output = Command::new("curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-x",
+                &format!("http://127.0.0.1:{proxy_port}"),
+                "--cacert",
+                cacert.to_str().expect("cacert path"),
+                "--noproxy",
+                "",
+                "--max-time",
+                "20",
+                url,
+            ])
+            .output()
+            .expect("run curl --cacert");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
 }
 
 /// 经代理请求 **HTTPS** 并返回状态码。
@@ -864,23 +914,27 @@ fn the_workbench_behaves_on_a_real_host() {
         "4a CSP 无 unsafe-inline，且脚本/样式外置（v1 的教训）",
         !csp.contains("unsafe-inline")
             && !index.body.contains("<script>")
-            && index.body.contains("src=\"/app.js\""),
+            && index.body.contains("src=\"/assets/"),
         format!(
             "csp={}… inline_script={}",
             &csp[..csp.len().min(60)],
             index.body.contains("<script>")
         ),
     );
-    let css = api(web_port, "GET", "/app.css", None, true, None, None);
-    let js = api(web_port, "GET", "/app.js", None, true, None, None);
+    let (js_path, css_path) = asset_paths(&index.body);
+    let css = api(web_port, "GET", &css_path, None, true, None, None);
+    let js = api(web_port, "GET", &js_path, None, true, None, None);
     checks.record(
-        "4b 资产以正确类型提供",
+        "4b hashed 资产以正确类型提供且可永久缓存",
         css.header("content-type").contains("text/css")
-            && js.header("content-type").contains("javascript"),
+            && js.header("content-type").contains("javascript")
+            && js.header("cache-control").contains("immutable")
+            && css.header("cache-control").contains("immutable"),
         format!(
-            "css={} js={}",
+            "css={} js={} cache={}",
             css.header("content-type"),
-            js.header("content-type")
+            js.header("content-type"),
+            js.header("cache-control")
         ),
     );
 
@@ -1423,8 +1477,18 @@ fn the_workbench_behaves_on_a_real_host() {
     let s_bad_page = api(token_port, "GET", "/?token=nope", None, true, None, None).status;
     // 子资源：浏览器解析 <link>/<script> 时带不了 header 也不会复制 ?token=，
     // 内嵌资产必须豁免（否则开 token 必白屏）；API 仍要 401。
-    let s_css = api(token_port, "GET", "/app.css", None, true, None, None).status;
-    let s_js = api(token_port, "GET", "/app.js", None, true, None, None).status;
+    let token_page = api(
+        token_port,
+        "GET",
+        "/",
+        None,
+        true,
+        Some("s3cret-token"),
+        None,
+    );
+    let (token_js, token_css) = asset_paths(&token_page.body);
+    let s_css = api(token_port, "GET", &token_css, None, true, None, None).status;
+    let s_js = api(token_port, "GET", &token_js, None, true, None, None).status;
     let s_api_none = api(token_port, "GET", "/api/status", None, true, None, None).status;
     checks.record(
         "11c 显式 --token：header 与 ?token= 等效，横幅打印可点链接；静态资产豁免",

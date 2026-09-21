@@ -34,8 +34,15 @@ fn work_dir(tag: &str) -> PathBuf {
 }
 
 fn which(name: &str) -> bool {
+    // Windows 可执行文件带扩展名：裸名找不到时补 .exe（Git Bash 的 curl/openssl 即如此）。
+    let exts: &[&str] = if cfg!(windows) { &["", ".exe"] } else { &[""] };
     std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+        .map(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                exts.iter()
+                    .any(|ext| dir.join(format!("{name}{ext}")).is_file())
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -164,11 +171,45 @@ fn spawn_tls_upstream(dir: &Path, host: &str) -> (u16, std::process::Child) {
 }
 
 fn curl_code(proxy: u16, url: &str, cacert: Option<&Path>) -> u16 {
+    // Git for Windows 的 curl 是 Schannel 后端，**忽略 --cacert** ——
+    // 带 CA 的链验证改用 openssl s_client -proxy + -CAfile（同一 CONNECT 路径、
+    // 同一信任语义），成功以 200 哨兵返回；无 CA（-k）分支维持 curl。
+    #[cfg(windows)]
+    if let Some(ca) = cacert {
+        let rest = url.trim_start_matches("https://");
+        let (host, port) = rest.rsplit_once(':').unwrap_or((rest, "443"));
+        let output = Command::new("openssl")
+            .args([
+                "s_client",
+                "-proxy",
+                &format!("127.0.0.1:{proxy}"),
+                "-connect",
+                &format!("{host}:{port}"),
+                "-servername",
+                host,
+                "-CAfile",
+                ca.to_str().expect("cacert path"),
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run openssl s_client");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return if text.contains("Verify return code: 0 (ok)") {
+            200
+        } else {
+            0
+        };
+    }
+    let devnull: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut command = Command::new("curl");
     command.args([
         "-sS",
         "-o",
-        "/dev/null",
+        devnull,
         "-w",
         "%{http_code}",
         "-x",

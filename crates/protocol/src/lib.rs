@@ -121,6 +121,145 @@ pub struct ReconcileReport {
 }
 
 // --------------------------------------------------------------------------- #
+// 请求 DTO（UI → Admin API 的写入口）
+// --------------------------------------------------------------------------- #
+//
+// 这些形状是写端点请求体的**词汇化**：此前 handler 把裸 `Value` 直传 manager，
+// 校验在 domain 深处进行；Admin 层（`envboard-admin`）用这里的类型化请求做
+// 入口校验，错误仍走统一信封（spec/errors.md）。字段清单与
+// `envboard-engine::domain::KNOWN_FIELDS` 对齐，`deny_unknown_fields` 保持
+// 「未知字段响亮拒绝」的既有契约。
+
+/// `listen` 子对象（create 可整体缺省 = 自动分配；patch 可只给 host 或只给 port）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+/// `POST /api/environments` 请求体。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvCreateReq {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<ListenReq>,
+    /// 绑定的规则集名；缺省 = 不覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
+    /// 上游代理名；缺省 = 直连。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure_hosts: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_password: Option<String>,
+}
+
+/// patch 的「解绑」字段：`Option<Option<T>>` 三态桥接。
+///
+/// serde_json 默认把 JSON `null` 归为外层 `None`，与「字段缺失」不可区分；
+/// 这个 with-module 把 null 映射为 `Some(None)`（显式解绑），缺失走 `default`
+/// 映射为 `None`（未提及）——merge 语义的生命线。
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Option::Some)
+    }
+
+    pub fn serialize<T, S>(value: &Option<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: serde::Serialize,
+        S: Serializer,
+    {
+        use serde::Serialize;
+        match value {
+            Some(inner) => inner.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+/// `PATCH /api/environments/:name` 请求体。
+///
+/// `Option<Option<T>>` 区分「未提及」与「显式置 null（解绑）」——
+/// 这正是 domain merge 的既有语义，词汇化后不得丢失。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvPatchReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<ListenReq>,
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rules: Option<Option<String>>,
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub upstream: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure_hosts: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_password: Option<String>,
+}
+
+/// `POST /api/proxies` 请求体（put 语义：同名覆盖）。凭据只进不出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyPutReq {
+    pub name: String,
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// `POST /api/rules` 请求体（包装对象，非裸正文）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesImportReq {
+    pub name: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// `POST /api/debug` 请求体。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebugStartReq {
+    pub env: String,
+}
+
+// --------------------------------------------------------------------------- #
 // 游标：推送流断点续传的统一词汇
 // --------------------------------------------------------------------------- #
 
@@ -285,5 +424,49 @@ mod tests {
         assert_eq!(Cursor::Request(7).kind(), "request");
         assert_eq!(Cursor::Generation(7).kind(), "generation");
         assert_eq!(Cursor::Byte(7).value(), 7);
+    }
+
+    /// create 请求体：最小形状（只有 name）与完整形状都能解析，序列化省略缺省键。
+    #[test]
+    fn env_create_req_round_trips_minimal_and_full() {
+        let minimal: EnvCreateReq = serde_json::from_str(r#"{"name":"dev"}"#).unwrap();
+        assert_eq!(minimal.listen, None);
+        let encoded = serde_json::to_value(&minimal).unwrap();
+        assert!(
+            encoded.get("listen").is_none(),
+            "缺省键不得序列化出来：{encoded}"
+        );
+
+        let full: EnvCreateReq = serde_json::from_str(
+            r#"{"name":"dev","listen":{"host":"127.0.0.1","port":16000},
+               "rules":"beta","upstream":null,"description":"开发",
+               "insecure_hosts":["api.example.com"],"capture":true,
+               "proxy_user":"u","proxy_password":"p"}"#,
+        )
+        .unwrap();
+        assert_eq!(full.listen.as_ref().unwrap().port, Some(16000));
+        assert_eq!(full.upstream, None);
+    }
+
+    /// 未知字段响亮拒绝（与 domain KNOWN_FIELDS 契约同向）。
+    #[test]
+    fn request_dtos_reject_unknown_fields() {
+        let error = serde_json::from_str::<EnvCreateReq>(r#"{"name":"dev","nope":1}"#).unwrap_err();
+        assert!(error.to_string().contains("nope"), "{error}");
+        let error =
+            serde_json::from_str::<ProxyPutReq>(r#"{"name":"corp","host":"h","strict":true}"#)
+                .unwrap_err();
+        assert!(error.to_string().contains("strict"), "{error}");
+    }
+
+    /// patch 的「未提及 / 显式 null / 给值」三态必须可区分 —— merge 语义的生命线。
+    #[test]
+    fn env_patch_distinguishes_absent_null_and_value() {
+        let absent: EnvPatchReq = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.rules, None);
+        let cleared: EnvPatchReq = serde_json::from_str(r#"{"rules":null}"#).unwrap();
+        assert_eq!(cleared.rules, Some(None));
+        let bound: EnvPatchReq = serde_json::from_str(r#"{"rules":"beta"}"#).unwrap();
+        assert_eq!(bound.rules, Some(Some("beta".into())));
     }
 }

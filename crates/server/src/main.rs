@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+use envboard_admin::AdminService;
 use envboard_engine::{CaOutcome, EngineBackend, SharedCa};
 use envboard_engine::{ClockPort, Error, ErrorCode, LoggerPort, ProxyEngine};
 use envboard_manager::infra::{RealFiles, SocketPortProbe, StderrLogger, SystemClock};
@@ -146,7 +147,13 @@ fn run(cli: Cli) -> Result<(), Error> {
                 }
             });
         }
-        serve(manager, web_config, ca_assets).await
+        // 组合根把管理器交给 Admin 门面；web 只认识门面（deps 门禁）。
+        serve(
+            Arc::new(AdminService::new(Arc::clone(&manager))),
+            web_config,
+            ca_assets,
+        )
+        .await
     })
 }
 

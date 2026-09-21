@@ -6,6 +6,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed（v4 架构升级：前端工程化 + Admin API 门面 + manager 按域拆分）
+
+- **前端工程化（破坏性：资产形态）**：新增 `frontend/`（Vite 7 + React 19 +
+  HeroUI v3 + Tailwind v4，pnpm 管理），工作台 UI 转正自验证 demo
+  （`examples/envboard-workbench-heroui`）并接真实 Admin API；补建「活动」视图
+  （`/api/history` 审计事件时间线）与主题切换（浅色/深色/跟随系统，localStorage 持久化）。
+  旧原生三件套 `crates/web/assets/` 退场；`web` 改用 `include_dir!` 内嵌
+  `frontend/dist`（hashed 资产走 `/assets/*` + immutable 缓存，token 豁免面从
+  两个固定路径改为 `/assets/` 前缀）。URL 与响应形状不变，前端零回归。
+- **构建顺序纪律：先 `pnpm build` 后 `cargo build`**。`frontend/dist/` 是构建
+  产物、不入库（与 `target/` 同类）；`crates/web/build.rs` 缺 dist 时编译期响亮
+  失败；`ci/verify.sh` 的 frontend 层（typecheck + build）成为默认 all 的最前置，
+  无 pnpm 但 dist 在位时以既有产物通过。
+- **工具链纪律重划**：Node/TS/Vite/pnpm 从「全仓禁止」改为「圈禁在 `frontend/` 边界内」；
+  可执行面仍禁前端命令（cargo 永不驱动前端工具链），衔接发生在 verify 编排层。
+- **新增 `envboard-admin`（Admin 管理 API 门面）**：控制面用例的传输无关门面 ——
+  类型化入口校验（`EnvCreateReq` / `EnvPatchReq` / `ProxyPutReq` / `RulesImportReq` /
+  `DebugStartReq`，`deny_unknown_fields`）+ 统一错误信封；`web` 依赖从 `manager`
+  改为 `admin`（web 降级为纯传输绑定），契约成文为 `spec/admin-api.md`。
+  `envboard-protocol` 同步补请求 DTO（patch 的「未提及/显式 null/给值」三态保真）。
+- **`manager.rs` 按域拆分**（行为不变，48 个公开方法签名逐字未动）：单一 `Manager`
+  类型的 impl 拆入 lifecycle / rules_store / proxies / reconcile_health / ledger /
+  observability / debug_capture / projection 八个模块文件；跨域共享私有项留
+  manager.rs 改 `pub(crate)`。
+- **UI 契约升 v2.0**：机检档从「三件套资产扫描」改为「frontend 源码扫描」
+  （UI-1 色值零容忍 / UI-2 禁内联样式 / UI-3 禁手写 dark: / UI-4 禁裸 px 任意值 /
+  UI-5 交互形态 / UI-6 锚点对账）；新增 `spec/design.md` v1.0 设计规范
+  （12 组设计语言 + bsk 走查检查表，转正自 demo 的 REVIEW_NOTES P1–P14）。
+- 文档修正：README 版本号 0.2.0→0.3.0、crate 树补 events/admin/frontend、
+  架构图与工具链纪律改写。
+
 ### Changed（UI crate 拆分：protocol + web，前后端协议成文）
 
 - **新增 `envboard-protocol`（叶子 crate）**：UI 边界词汇的唯一定义处 —— 视图 DTO

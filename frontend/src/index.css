@@ -1,0 +1,4 @@
+/* 入口样式：@heroui/styles 内部已含 @import "tailwindcss"，此处不重复引入。
+   暗色模式靠 <html class="dark" data-theme="dark"> 切换。 */
+@import "@heroui/styles";
+@import "./globals.css";

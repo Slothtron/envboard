@@ -43,8 +43,8 @@ fn wait_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
-/// 裸 HTTP：返回状态码。token 走 header 或 query 两个通道之一。
-fn get(port: u16, path: &str, token: Option<&str>) -> u16 {
+/// 裸 HTTP：返回状态码 + 全文。token 走 header 或 query 两个通道之一。
+fn get_full(port: u16, path: &str, token: Option<&str>) -> (u16, String) {
     let mut request =
         format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
     if let Some(token) = token {
@@ -58,16 +58,19 @@ fn get(port: u16, path: &str, token: Option<&str>) -> u16 {
     stream.write_all(request.as_bytes()).expect("write");
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).expect("read");
-    let first = String::from_utf8_lossy(&raw)
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    first
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let first = text.lines().next().unwrap_or_default().to_string();
+    let status = first
         .split_whitespace()
         .nth(1)
         .and_then(|code| code.parse().ok())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    (status, text)
+}
+
+/// 只要状态码的简写。
+fn get(port: u16, path: &str, token: Option<&str>) -> u16 {
+    get_full(port, path, token).0
 }
 
 struct Workbench(Child);
@@ -178,7 +181,14 @@ fn loopback_is_open_by_default_and_token_mode_gates_both_channels() {
     assert_eq!(get(port, "/api/status", Some("smoke-secret")), 200);
     assert_eq!(get(port, "/api/status?token=smoke-secret", None), 200);
     assert_eq!(get(port, "/", None), 401, "页面本体同样要 token");
-    assert_eq!(get(port, "/app.js", None), 200, "内嵌静态资产保持豁免");
+    // 内嵌资产 = hashed 构建产物：从入口页解析真实文件名，再验 token 档下仍豁免
+    // （浏览器子资源请求带不了凭据 —— 豁免失效 = 工作台白屏）。
+    let (_, page) = get_full(port, "/", Some("smoke-secret"));
+    let asset = page
+        .split('"')
+        .find(|part| part.starts_with("/assets/") && part.ends_with(".js"))
+        .expect("入口页应引用 /assets/ 下的 hashed JS");
+    assert_eq!(get(port, asset, None), 200, "内嵌静态资产保持豁免");
     let _ = std::fs::remove_dir_all(&state);
 }
 

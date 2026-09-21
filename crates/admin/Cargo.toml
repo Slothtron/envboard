@@ -1,0 +1,17 @@
+[package]
+name = "envboard-admin"
+description = "Admin 管理 API：控制面用例的传输无关门面（类型化入口校验 + 统一错误信封）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 本仓不发布 crate：发布物是 `envboard` 二进制。
+publish = false
+
+[dependencies]
+envboard-engine.workspace = true
+envboard-manager.workspace = true
+envboard-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
