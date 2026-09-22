@@ -19,7 +19,7 @@ envboard.json
 *.log
 
 # 本机工作材料：设计文档、开发计划、实机验收转录。它们**故意不入库** ——
-# 入库的面向交付文档是 README.md / CHANGELOG.md / core/spec/，以及 docs/ 下的交付文档
+# 入库的面向交付文档是 README.md / CHANGELOG.md / spec/，以及 docs/ 下的交付文档
 # （准入：面向读者、自包含、随实现维护；本仓目前没有 docs/）。
 .agents/
 
@@ -30,10 +30,14 @@ envboard.json
 
 # 测试 fixture 的假值 CA 必须入库（mitm.rs 消费）—— 全局 gitignore 的 *.pem
 # 会静默吞掉它们，这里显式豁免。判据由 artifact 门禁钉（文件不在必红）。
-!core/rs/crates/envboard-core/tests/fixtures/
-!core/rs/crates/envboard-core/tests/fixtures/**
+!crates/engine/tests/fixtures/
+!crates/engine/tests/fixtures/**
 
 # 编辑器 / 系统
 .DS_Store
 .idea/
 .vscode/
+
+# mise.toml 是仓库交付的一部分（工具版本锁定 + 任务入口）：
+# 全局 gitignore 把它当本机配置忽略，这里显式豁免。
+!mise.toml

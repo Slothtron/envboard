@@ -6,6 +6,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed（工程整理：验收材料出库 + CI 编排跨平台化 + mise 工具链锁定）
+
+- **实机验收转录出库**：`frontend/verify/round{1,2,3}-conclusion.md` 是 bsk 验收
+  过程记录（工作材料），从仓库移除、归档到本机工作材料目录；`spec/design.md`
+  附录 A 的截图存放指引同步改为「截图不入库」的表述（原先指向的
+  `verify/shots/` 本就不在仓库里）。
+- **CI 编排 bash → Python**：`ci/verify.sh` 与 `frontend/verify-frontend.sh`
+  合并为 `scripts/verify.py`（仅标准库，Linux/macOS/Windows 原生通用），分层
+  语义与子命令不变（`all`/`policy`/`rust`/`contract`/`artifact`/`frontend`/`live`，
+  默认 all 以 frontend 层最前置）；frontend 层的 pnpm 探测、SKIP 与响亮失败
+  指引逻辑原样收编。`ci/` 目录退场。
+- **工具链门禁重划（toolchain 门禁）**：Python 从「全仓禁止」改为「圈禁在
+  `scripts/` 编排位」；可执行面（`scripts/`、`mise.toml`、`*.service`）里前端
+  工具链（pnpm/node）只许同行点名 frontend 边界；npm/yarn/bun/deno/vite 与
+  Python 工具（pip/pytest 等）仍整词禁用；迁移白名单机制随之清空退场。
+- **文本自包含门禁（doc_scope）**：路径存在性前缀清单随 `ci/` 退场移除 `ci/`。
+
+### Added（工程整理）
+
+- **根目录 `mise.toml`**：工具版本锁定（python 3.14.7 / node 22.20.0 /
+  pnpm 10.18.2，rust 仍由 `rust-toolchain.toml` 钉死）+ 跨平台任务入口
+  （`mise run dev|build|typecheck|test|verify|package`，recipe 单命令不用
+  `&&`，PowerShell 原生可执行）。
+
+### Removed（工程整理）
+
+- `frontend/verify/round{1,2,3}-conclusion.md`（验收转录，出库归档到本机
+  工作材料目录）。
+- `ci/verify.sh`、`frontend/verify-frontend.sh`（被 `scripts/verify.py` 取代）。
+
 ### Changed（v4 架构升级：前端工程化 + Admin API 门面 + manager 按域拆分）
 
 - **前端工程化（破坏性：资产形态）**：新增 `frontend/`（Vite 7 + React 19 +

@@ -64,7 +64,6 @@ const PATH_PREFIXES: &[&str] = &[
     "adapters/",
     "platforms/",
     "scripts/",
-    "ci/",
     "docs/",
 ];
 const PATH_SUFFIXES: &[&str] = &[

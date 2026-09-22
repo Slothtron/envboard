@@ -33,10 +33,10 @@
 //! 请求里的端口决定 —— 于是"同一域名 + 两个环境各覆盖不同域名"就构造出了判别性对照。
 //!
 //! **为什么标 `#[ignore]`**：它需要真宿主工具与真网络（真进程起停）。默认的
-//! `cargo test --workspace` 因此不需要宿主；`ci/verify.sh live` 用 `--ignored` 显式触发。
+//! `cargo test --workspace` 因此不需要宿主；`scripts/verify.py live` 用 `--ignored` 显式触发。
 //! 显式要跑这一层时宿主缺失**响亮失败**（不静默跳过 —— 跳过等于这些断言消失）。
 //!
-//! 跑法：`bash ci/verify.sh live`（或本测试加 `--ignored` 直跑）
+//! 跑法：`python scripts/verify.py live`（或本测试加 `--ignored` 直跑）
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -680,7 +680,7 @@ fn spawn_workbench(state: &Path, extra: &[&str]) -> Child {
 }
 
 #[test]
-#[ignore = "需要真宿主工具（openssl / curl）与真网络；由 ci/verify.sh 的 live 层用 --ignored 触发"]
+#[ignore = "需要真宿主工具（openssl / curl）与真网络；由 scripts/verify.py 的 live 层用 --ignored 触发"]
 fn the_workbench_behaves_on_a_real_host() {
     let missing: Vec<&str> = ["openssl", "curl"]
         .into_iter()

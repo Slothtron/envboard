@@ -7,7 +7,7 @@
 //! 3. 回环默认免鉴权可用；`--token` 档 header 与 `?token=` 双通道等效、无凭据 401；
 //! 4. 状态单写者：第二个实例抢不到锁必须响亮失败。
 //!
-//! 原先写在 `ci/verify.sh` `step_smoke` 里的判据全部搬进测试：入口脚本只做编排。
+//! 原先写在 `scripts/verify.py` `step_smoke` 里的判据全部搬进测试：入口脚本只做编排。
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

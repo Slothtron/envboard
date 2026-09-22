@@ -5,11 +5,11 @@
 | 适用范围 | `frontend/`（Vite 工程：index.html + src/**）与其构建产物 `frontend/dist/` |
 | 设计语言权威 | [design.md](design.md)（布局、分级、反馈契约等设计规则）；本文件只收**机器可判**的纪律 |
 | 令牌权威 | HeroUI v3 语义类 + Tailwind v4（组件库内置）；自定义样式唯一落点 `src/globals.css` |
-| 执行 | policy 门禁 `tests/policy-tests/tests/ui_style.rs`（一门禁一文件，`bash ci/verify.sh` 默认层） |
+| 执行 | policy 门禁 `tests/policy-tests/tests/ui_style.rs`（一门禁一文件，`python scripts/verify.py` 默认层） |
 | 版本 | v2.0（2026-09-21，前端工程化改版：机检对象从三件套资产改为 frontend 源码） |
 
 本文件回答「改工作台 UI 之前必须知道什么」。分两档：**机检档**（UI-1…UI-6，
-违反即 `ci/verify.sh` 红）与**评审档**（门禁不可达，提交前人工对照）。锚点 `UI-n`
+违反即 `scripts/verify.py` 红）与**评审档**（门禁不可达，提交前人工对照）。锚点 `UI-n`
 是门禁与本文件的双向对账依据：本文件缺锚点、或门禁实现了本文件没有的规则号，
 都判红（见 UI-6）。
 
@@ -68,7 +68,7 @@ Tailwind 工具类写进 `className`。
 - **构建顺序**：先 `pnpm build` 产出 `frontend/dist/`（构建产物，**不入库**，
   与 `target/` 同类），再 `cargo build` 经 `include_dir!` 内嵌；缺 dist 时
   `crates/web/build.rs` 编译期响亮失败。改 `frontend/src/` 后重跑
-  `bash ci/verify.sh frontend` 即可再生。
+  `python scripts/verify.py frontend` 即可再生。
 
 ## 修订规则
 

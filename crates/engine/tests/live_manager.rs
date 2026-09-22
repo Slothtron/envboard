@@ -11,7 +11,7 @@
 //! * ③ 按域名放宽：名单外 502 → 热 apply 后首个请求 200、同实例未列域名仍 502
 //!   （v2 的 reload 轮询等待在 v3 塌缩成"第一次就中"）。
 //!
-//! 标 #[ignore]：需要 openssl 与 curl；由 ci/verify.sh 的 live 层触发。
+//! 标 #[ignore]：需要 openssl 与 curl；由 scripts/verify.py 的 live 层触发。
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -260,7 +260,7 @@ async fn settle(backend: &EngineBackend, handle: &EngineHandle) -> EngineReport 
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "需要 openssl 与 curl；由 ci/verify.sh 的 live 层触发"]
+#[ignore = "需要 openssl 与 curl；由 scripts/verify.py 的 live 层触发"]
 async fn engine_drives_preseeded_ca_with_honest_receipts() {
     require_tools();
     let dir = work_dir("ca");
@@ -316,7 +316,7 @@ async fn engine_drives_preseeded_ca_with_honest_receipts() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "需要真端口 bind；由 ci/verify.sh 的 live 层触发"]
+#[ignore = "需要真端口 bind；由 scripts/verify.py 的 live 层触发"]
 async fn injected_failure_is_visible_ports_release_and_restart_works() {
     require_tools();
     let dir = work_dir("fault");
@@ -356,7 +356,7 @@ async fn injected_failure_is_visible_ports_release_and_restart_works() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "需要 openssl 与 curl；由 ci/verify.sh 的 live 层触发"]
+#[ignore = "需要 openssl 与 curl；由 scripts/verify.py 的 live 层触发"]
 async fn insecure_hosts_hot_flip_takes_effect_on_the_first_request() {
     require_tools();
     let dir = work_dir("insecure");

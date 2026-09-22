@@ -18,7 +18,7 @@ fn main() {
         panic!(
             "frontend/dist 缺失或为空 —— 构建顺序是先前端后 Rust：\n  \
              cd frontend && pnpm install --frozen-lockfile && pnpm build\n  \
-             （或 bash ci/verify.sh frontend）\n\
+             （或 python scripts/verify.py frontend）\n\
              产物 dist/ 不入库，由本 crate 的 include_dir! 在编译期内嵌。"
         );
     }

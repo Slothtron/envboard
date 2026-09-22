@@ -4,7 +4,7 @@
 //! `spec/capabilities.md`「多语言实现的仲裁规则」），必须能对同一批 fixture
 //! **逐字节**比较输出，而"起两个代理比流量"既慢又脆。
 //!
-//! 用法（`ci/verify.sh` 的 contract-dual 步骤就是这么调的）：
+//! 用法（`scripts/verify.py` 的 contract-dual 步骤就是这么调的）：
 //!
 //! ```text
 //! cargo run -q -p envboard-engine --bin render_fixture -- <fixture.json>

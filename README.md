@@ -96,8 +96,9 @@ crates/
   envboard-contract-tests   消费全部契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
 frontend/               工作台前端：Vite 7 + React 19 + HeroUI v3 + Tailwind v4
-                      （pnpm 管理；dist/ 是内嵌源，提交入库，src↔dist 成对判定）
-scripts/systemd/      部署工件（用户级 unit）
+                      （pnpm 管理；dist/ 是构建产物，不入库，由 crates/web 内嵌）
+scripts/verify.py     验证编排（仅标准库，跨平台）；scripts/systemd/ 部署工件
+mise.toml             工具版本锁定（python/node/pnpm）+ 任务入口（mise run <task>）
 ```
 
 依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：
@@ -119,7 +120,9 @@ admin 全部源码、宿主除 main.rs 外）只认识管理器的公开 API、�
 
 ## 构建与快速开始
 
-工具链只有一条：**cargo**（`rust-toolchain.toml` 钉死 1.98.0）。没有 Python、没有 Node。
+工具链只有一条：**cargo**（`rust-toolchain.toml` 钉死 1.98.0）。不用 Node 也能
+构建运行（`frontend/dist` 缺席时由 `crates/web/build.rs` 编译期给出指引）；装了
+mise 的话 `mise install` 一次拿齐 python/node/pnpm，`mise run` 可用全部任务。
 
 ```bash
 cargo build --release --locked --offline      # 产物：target/release/envboard
@@ -267,13 +270,13 @@ curl -s localhost:8900/api/rules/beta          # 改规则原文前先取回，�
 
 ## 验证
 
-单一入口（托管方无关，CI 直接调它即可）：
+单一入口（托管方无关，CI 直接调它即可；`mise run verify` 等价于默认层）：
 
 ```bash
-bash ci/verify.sh            # 默认层：policy + rust + contract + artifact
-bash ci/verify.sh rust       # 纯 Rust 最小子集：policy + rust
-bash ci/verify.sh live       # 实机层：真宿主（只需 openssl 与 curl 两个命令行工具）
-bash ci/verify.sh policy     # 只跑仓库纪律那一层
+python scripts/verify.py            # 默认层：frontend + policy + rust + contract + artifact
+python scripts/verify.py rust       # 纯 Rust 最小子集：policy + rust
+python scripts/verify.py live       # 实机层：真宿主（只需 openssl 与 curl 两个命令行工具）
+python scripts/verify.py policy     # 只跑仓库纪律那一层
 ```
 
 `--locked --offline` 全程在位：`Cargo.lock` 入库，离线可构建是验收项。
@@ -295,29 +298,35 @@ cargo test -p envboard-engine --test data_plane  # 规则命中、502、407、in
 cargo test -p envboard-policy-tests --test registry   # 注册表 ↔ 内置实现 ↔ 契约表 三方一致
 ```
 
-### 工具链纪律
+### 工具链与任务入口
 
 **两条工具链，固定顺序：先前端，后 Rust。** `frontend/`（Vite + pnpm）先
 `pnpm build` 产出 `frontend/dist/`（构建产物，**不入库**，与 `target/` 同类、
 可随时再生）；`cargo build` 随后经 `include_dir!` 内嵌它。衔接点由
 `crates/web/build.rs` 把守：缺 dist 时编译期响亮失败并给出构建指引。
 
-边界仍然成立：Node/TS/Vite/pnpm 的清单与源码**只允许出现在 `frontend/` 内**；
-`ci/*.sh` 与 `*.service` 的可执行面仍然零前端命令 —— **cargo 自身永不驱动前端
-工具链**，顺序衔接发生在 verify 的编排层（frontend 层在默认 all 的最前；无 pnpm
-但 dist 已在位时以既有产物通过，cargo 只消费产物）。这条边界由门禁自己证明：
-文件面（前缀判定）、调用面（禁出现的命令形态）、白名单双向判定。
-`bash ci/verify.sh policy` 在没有 Python、没有 Node 的机器上也能全绿（它不碰 dist）；
-`rust` 层要求 dist 在位。
+**工具版本由 mise 锁定**（根目录 `mise.toml`：python / node / pnpm，rust 由
+`rust-toolchain.toml` 钉死），任务入口也是它：`mise run` 列出全部任务，
+`mise run dev` / `build` / `typecheck` / `test` / `verify` / `package` 即用。
+编排脚本 `scripts/verify.py` 只用标准库，Linux / macOS / Windows 原生通用。
 
-开发流：`pnpm dev`（5199，`/api` 代理到本机 8900 实跑实例联调，`ENVBOARD_PROXY`
-可换目标）→ 提交只含 `src`；产物经 `bash ci/verify.sh frontend`（typecheck +
-build）再生，不进 git。
+边界仍然成立：Node/TS/Vite/pnpm 的清单与源码**只允许出现在 `frontend/` 内**；
+Python 只许出现在 `scripts/` 编排位。可执行面（`scripts/`、`mise.toml`、
+`*.service`）里前端工具链只许指向 frontend/ 边界，顺序衔接发生在 verify 的
+编排层（frontend 层在默认 all 的最前；无 pnpm 但 dist 已在位时以既有产物通过，
+cargo 只消费产物）。这条边界由门禁自己证明：文件面（前缀判定）+ 调用面
+（禁出现的命令形态、pnpm/node 调用必须点名 frontend）。
+`python scripts/verify.py policy` 不碰 dist，机器上没有 Node 也能全绿（但编排
+本身需要 Python，版本见 `mise.toml`）；`rust` 层要求 dist 在位。
+
+开发流：`mise run dev`（5199，`/api` 代理到本机 8900 实跑实例联调，
+`ENVBOARD_PROXY` 可换目标）→ 提交只含 `src`；产物经
+`mise run build`（typecheck + build）再生，不进 git。
 
 要加一条新门禁，就加一个新测试：纯文本 / 结构门禁放 `envboard-policy-tests`
 （一门禁一文件），需要已构建二进制的放所属 crate 的 `tests/`（用 `CARGO_BIN_EXE_<bin>`），
-需要真宿主的标 `#[ignore]` 由 `ci/verify.sh live` 显式触发。禁止在门禁里嵌套
-`cargo fmt|clippy|check|build`；`ci/verify.sh` 只做编排、不含判据。
+需要真宿主的标 `#[ignore]` 由 `scripts/verify.py live` 显式触发。禁止在门禁里嵌套
+`cargo fmt|clippy|check|build`；`scripts/verify.py` 只做编排、不含判据。
 
 ### 文本自包含（doc_scope 门禁）
 

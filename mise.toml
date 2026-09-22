@@ -1,0 +1,40 @@
+# 工具版本锁定 + 跨平台任务入口。`mise run` / `mise run <task>` 即用。
+# rust 不在此管理：由 rust-toolchain.toml（rustup）钉死，避免双头。
+# 任务 recipe 一律单命令、不用 `&&`，sh 与 PowerShell 均可直接执行（Windows 原生可用）。
+
+[tools]
+python = "3.14.7"
+node = "22.20.0"        # frontend 工具链；Vite 7 要求 ≥ 22.12
+pnpm = "10.18.2"        # 与 frontend/package.json 的 packageManager 字段一致
+
+[tasks.dev]
+description = "前端开发服务器（代理本机 8900）"
+run = "pnpm -C frontend dev"
+
+[tasks.build]
+description = "前端构建（tsc 类型检查 + 打包产出 dist/）"
+run = "pnpm -C frontend build"
+
+[tasks.typecheck]
+description = "仅前端类型检查（tsc --noEmit）"
+run = "pnpm -C frontend typecheck"
+
+[tasks.test]
+description = "Rust 全量测试（参数透传给 cargo）"
+raw = true
+run = "cargo test"
+
+[tasks.verify]
+description = "全量验证门禁（分层参数透传：all/policy/rust/contract/frontend/artifact/live）"
+raw = true
+run = "python scripts/verify.py"
+
+[tasks.package]
+description = "打包单二进制：先前端产出 dist/，再 cargo release 构建"
+depends = ["verify-frontend"]
+run = "cargo build --release"
+
+# package 的前置：只跑 frontend 层产出并校验 dist/（独立成任务以便单独调用）。
+[tasks.verify-frontend]
+description = "前端构建层（产出 dist/，cargo 内嵌的前置）"
+run = "python scripts/verify.py frontend"

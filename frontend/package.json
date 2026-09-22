@@ -4,7 +4,7 @@
   "version": "0.3.0",
   "type": "module",
   "packageManager": "pnpm@10.18.2",
-  "description": "envboard 工作台前端（Vite + React 19 + HeroUI v3 + Tailwind v4）。开发期 vite dev 代理到本机 8900；构建产物 dist/ 提交入库，由 crates/web 内嵌进单二进制。",
+  "description": "envboard 工作台前端（Vite + React 19 + HeroUI v3 + Tailwind v4）。开发期 vite dev 代理到本机 8900；构建产物 dist/ 不入库，由 crates/web 编译期内嵌进单二进制。",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
