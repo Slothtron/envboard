@@ -27,6 +27,8 @@ envboard-protocol.workspace = true
 envboard-engine.workspace = true
 # 跨界通道要 tokio 的原语（oneshot / mpsc / interval），不要它的宏。
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
+# 写操作的请求体是 JSON 形状（与 admin-api 的类型化 DTO 同一份），界面不拼领域对象。
+serde_json.workspace = true
 clap.workspace = true
 
 [dev-dependencies]
