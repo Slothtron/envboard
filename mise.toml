@@ -29,6 +29,14 @@ description = "全量验证门禁（分层参数透传：all/policy/rust/contrac
 raw = true
 run = "python scripts/verify.py"
 
+[tasks.desktop]
+description = "桌面形态（GPUI）：进程内直连组合根，不起 HTTP；与 web 宿主共用状态目录（单实例锁互斥）"
+run = "cargo run -p envboard-desktop --bin envboard-desktop"
+
+[tasks.verify-desktop]
+description = "桌面形态的编译 + 单测（P0.3 起含 tokio↔GPUI 桥与无头 UI 测试）"
+run = "cargo test -p envboard-desktop"
+
 [tasks.package]
 description = "打包单二进制：先前端产出 dist/，再 cargo release 构建"
 depends = ["verify-frontend"]

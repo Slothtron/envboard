@@ -17,6 +17,7 @@ rust-version = "1.98"
 [workspace.dependencies]
 # 内部 crate：只写 path，避免版本漂移
 envboard-admin = { path = "crates/admin" }
+envboard-desktop = { path = "crates/desktop" }
 envboard-engine = { path = "crates/engine" }
 envboard-events = { path = "crates/events" }
 envboard-engine-fake = { path = "crates/engine-fake" }
@@ -30,7 +31,12 @@ envboard-web = { path = "crates/web" }
 #
 # 两条纪律：
 #   1. `Cargo.lock` 必须入库，`cargo build --offline` 是验收项 —— 依赖要克制；
-#   2. 不引模板引擎/WASM/前端构建链；CLI 之外不引大框架。
+#   2. 不引模板引擎/WASM/新的前端构建链；CLI 之外不引大框架 —— 唯一的例外是
+#      `gpui-kit`（桌面形态的 GUI 框架），且只允许出现在 `crates/desktop`。
+#      破例的理由、候选对比与代价见 docs/adr-001-gpui-desktop-form.md。
+gpui-kit = "0.8"
+# 0.8 锁 gpui-pre 0.3.9 + gpui-component 0.8.0 + gpui-base 0.8.0 + kit-assets。
+# 全 workspace 只许这一份 gpui：出现两份就是两套类型系统（Entity 按 TypeId 寻址）。
 async-trait = "0.1.92"
 axum = "0.7.9"
 futures-util = "0.3.34"
@@ -64,6 +70,25 @@ rustls-pemfile = "2.2.0"
 time = { version = "0.3", default-features = false, features = ["std"] }
 # 热更新单快照：数据面每请求 load_full，装配即整体换入，无文件通道、无轮询。
 arc-swap = "1.9.2"
+
+# GPUI 的即时模式渲染在未优化时慢到不可用（dipswitch 实测），所以框架包必须有优化。
+# **逐包点名**，两处偏离本地先例 dipswitch（它是纯 GUI 产物，用了
+# `[profile.dev] opt-level = 1` + `[profile.dev.package."*"] opt-level = 3`）：
+#   - 不用通配：那会把引擎的 rustls / rcgen / tokio 全抬到 O3，而本仓的日常是跑
+#     引擎与管理器的测试，与界面无关的编译成本不该由界面框架付；
+#   - 不动 `[profile.dev]`：本仓成员代码不是渲染瓶颈（瓶颈在框架包，已单独优化）。
+# 若 P0.3 之后界面在 dev 下确实迟钝，再回来加全局 opt-level（一次改动，可实测比较）。
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.gpui-component]
+opt-level = 3
+
+[profile.dev.package.gpui-base]
+opt-level = 3
+
+[profile.dev.package.gpui-kit]
+opt-level = 3
 
 [profile.release]
 # 单机工具，体积与启动速度优先于极致优化

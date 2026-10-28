@@ -1,0 +1,33 @@
+[package]
+name = "envboard-desktop"
+description = "envboard 的桌面形态：GPUI 工作台，进程内直连 Admin 门面（不起 HTTP 服务）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 本仓不发布 crate：发布物是 GUI 二进制。
+publish = false
+
+[[bin]]
+name = "envboard-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# 唯一 GUI 框架：gpui-kit = gpui + gpui-component + gpui-base + 默认图标资产。
+# 全 workspace 只允许这一个版本（两份 gpui 就是两套类型系统）。
+gpui-kit.workspace = true
+# 组合根（引擎装配与宿主编排都在那里）；本 crate 拿不到管理器类型。
+envboard-host.workspace = true
+# 管理门面：视图只通过它取数与下命令（显式声明这条边，门禁才认得出本 crate 是
+# "门面消费方"，见 tests/policy-tests/tests/deps.rs 的装配盲区判据）。
+envboard-admin.workspace = true
+# 只取词汇：视图 DTO 与共享错误码。
+envboard-protocol.workspace = true
+envboard-engine.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+envboard-engine-fake.workspace = true
+# 注：`gpui-kit/test-support`（无头 UI 集成测试）**在本版本不可解析**，理由与
+# 接替验证方案见 docs/adr-001-gpui-desktop-form.md 的「本机验证边界」。

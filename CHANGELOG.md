@@ -6,6 +6,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added（桌面形态骨架 `envboard-desktop`：GPUI 入库）
+
+- 新 crate `crates/desktop`（lib + bin `envboard-desktop`）：现成件搭起的窗口骨架 ——
+  `TitleBar`（含深色开关）+ `Sidebar`（环境/规则/代理）+ 内容区 + `StatusBar`
+  （状态目录、端口区间、当前屏）。未落地的屏显示"属于 P0.8"而不是假数据。
+- 依赖纪律破例并写死：`gpui-kit = "0.8"`（内含 gpui-pre 0.3.9 + gpui-component 0.8.0），
+  **只允许出现在 `crates/desktop`** —— `deps` 门禁新增第 11 条在 manifest 产物依赖面上判。
+  理由、候选对比与实测代价见 docs/adr-001-gpui-desktop-form.md。
+- dev profile 逐包点名四个框架包 `opt-level = 3`（GPUI 未优化不可用），**不**用
+  `package."*"` 通配、**不**动 `[profile.dev]`：本仓日常是跑引擎与管理器的测试。
+- `mise run desktop` / `mise run verify-desktop` 两个任务入口。
+- 实测（P0.2）：`Cargo.lock` 157 → 848 包，gpui 血脉单条，tokio/ring/rustls 版本
+  **零漂移**；`envboard-desktop.exe` release 23,930,880 B；框架包首次 release 构建 109 s；
+  web 宿主 `envboard.exe` 与 HEAD 同 dist 对照 +1.03%（thin LTO 自身有约 ±40 KB 抖动，
+  故只支撑量级结论）。截图验收：`PrintWindow(PW_RENDERFULLCONTENT)` 110 色非黑帧，
+  中文与三个侧栏图标都真的画出来了。
+- **未验证项（如实记）**：本机 agent 会话被 OS 拒了输入注入
+  （`SetCursorPos 拒绝访问 0x80070005`），而框架的无头 UI 测试又依赖
+  `gpui-kit/test-support` —— 该 feature 在 0.8.0 上**不可解析**
+  （`cocoa =0.26.0` vs `^0.26.0`，强钉后接着撞 `unicode-properties`），
+  所以标题栏内控件的点击（坑 #1 的 `stop_propagation`）目前没有自动证据。
+  接替分工：纯逻辑单测 + 实体级测试 + 人工点击与 `PrintWindow` 截图，
+  详见 docs/adr-001-gpui-desktop-form.md 的「本机验证边界」。
+
 ### Changed（引擎装配收进唯一组合根 `envboard-host`）
 
 - 新增 `crates/host`（lib）：原来写在 `crates/server/src/main.rs` 的引擎装配、共享 CA

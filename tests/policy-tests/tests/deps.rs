@@ -11,7 +11,7 @@
 //! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）；
 //! 8. **引擎装配只住在组合根**：装配符号必须出现在 `envboard-host/src/**`
 //!    （正判据：装配没被搬回界面），而 `envboard-server` / `envboard-web` /
-//!    `envboard-admin` 的全部源码禁止出现它们 —— "只认识
+//!    `envboard-admin` / `envboard-desktop` 的全部源码禁止出现它们 —— "只认识
 //!    管理器的公开 API"这条不变量依旧成立，裁决在源文件面（manifest 分不出
 //!    lib 与 bin）。配套登记判据：凡产物边里消费 `envboard-admin` 或
 //!    `envboard-manager` 的 crate，除了组合根本身，都必须在装配盲区表里 ——
@@ -21,6 +21,9 @@
 //! 10. **控制面事件的单一发射点**：`envboard-manager` 的 `manager.rs` 里 `repo.save`
 //!     只允许恰一处、且在 `commit` 内 —— 先 save 后 emit 的顺序由 `commit` 固定，
 //!     绕过它直接落盘的动作就没有审计事件；
+//! 11. **GUI 框架只住在桌面形态**：`gpui-kit` 只允许出现在 `envboard-desktop` 的
+//!     产物依赖里。它一个包带来约 660 个传递依赖（本仓其余产物约 157 个包），
+//!     谁引它谁的产物就无声翻几倍 —— 判据写在 manifest 的产物依赖面，不看代码。
 
 mod common;
 
@@ -79,6 +82,17 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
         "envboard-server",
         &["envboard-engine", "envboard-host", "envboard-web"],
     ),
+    // 桌面形态（GPUI）。与 web 宿主同一条纪律：只认门面与词汇，不认识装配也不认识
+    // 管理器 —— 装配在 envboard-host。它同时是 gpui-kit 的唯一容身处（体积守卫）。
+    (
+        "envboard-desktop",
+        &[
+            "envboard-admin",
+            "envboard-engine",
+            "envboard-host",
+            "envboard-protocol",
+        ],
+    ),
     // 纯测试 crate
     ("envboard-contract-tests", &[]),
     // 工程门禁：不依赖任何内部 crate
@@ -94,6 +108,8 @@ const ALLOWED_DEV_INTERNAL: &[(&str, &[&str])] = &[
     ("envboard-manager", &["envboard-engine-fake"]),
     // 组合根的测试注入口：真管理器 + 假引擎（不起进程、不占端口）。
     ("envboard-host", &["envboard-engine-fake"]),
+    // 桌面形态的界面测试走同一条注入路径（真管理器 + 假引擎）。
+    ("envboard-desktop", &["envboard-engine-fake"]),
     ("envboard-contract-tests", &["envboard-engine"]),
 ];
 
@@ -128,12 +144,21 @@ const ASSEMBLY_SYMBOLS: &[&str] = &[
 /// 那种脆约束在多界面形态下必然被搬来搬去）。
 const ASSEMBLY_OWNER: &str = "envboard-host";
 
+/// GUI 框架（外部依赖名）与它唯一的容身处：见第 11 条的产物体积守卫。
+const GUI_FRAMEWORK: &str = "gpui-kit";
+const GUI_FRAMEWORK_OWNER: &str = "envboard-desktop";
+
 /// **装配盲区**：消费 Admin 门面或充当宿主的 crate，一律不认识装配。
 ///
 /// `envboard-engine` 与 `envboard-engine-fake` 不在其列 —— 前者定义这些符号，
 /// 后者是引擎的测试替身（必须与真后端同一抽象面）。新增界面形态/宿主必须同时
-/// 登记进来，判据见第 8 条的登记判据。
-const ASSEMBLY_BLIND: &[&str] = &["envboard-server", "envboard-web", "envboard-admin"];
+/// 登记进来，判据见第 8' 条。
+const ASSEMBLY_BLIND: &[&str] = &[
+    "envboard-server",
+    "envboard-web",
+    "envboard-admin",
+    "envboard-desktop",
+];
 
 /// 认识门面或管理器的 crate（按 ALLOWED_INTERNAL 的产物边判定，不看磁盘）。
 fn is_consumer_of_facade(name: &str) -> bool {
@@ -328,6 +353,18 @@ fn the_rust_layering_holds() {
             problems.push(format!(
                 "{name}: 必须在 [package] 里显式写 `publish = false`（本仓不发布 crate，\
                  发布物是 `envboard` 二进制；不写不等于声明了）"
+            ));
+        }
+
+        // 11. GUI 框架只许住在桌面形态里。gpui-kit 一个包带来约 660 个传递依赖
+        //     （本仓其余产物约 157 个包），谁不小心把它引进 web 宿主或引擎，
+        //     产物体积就无声地翻几倍 —— 所以判据写在 manifest 的产物依赖面上。
+        if name != GUI_FRAMEWORK_OWNER
+            && external_deps(&manifest, PROD_SECTIONS).contains(GUI_FRAMEWORK)
+        {
+            problems.push(format!(
+                "{name} 依赖 {GUI_FRAMEWORK:?}：GUI 框架只允许出现在 {GUI_FRAMEWORK_OWNER}，\
+                 否则会把它约 660 个传递依赖拖进与服务/引擎同名的产物"
             ));
         }
 
