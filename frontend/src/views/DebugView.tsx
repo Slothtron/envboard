@@ -19,6 +19,8 @@ import {
   type CaptureRecord,
   type DebugView as DebugViewState,
   type EnvView,
+  type HarSession,
+  type HarSessionView,
 } from "../api/types";
 import { formatBytes } from "../data";
 import {
@@ -84,7 +86,7 @@ export function DebugView({ environments, onFeedback }: DebugViewProps) {
   const [sessionTab, setSessionTab] = useState("live");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [harSessions, setHarSessions] = useState<unknown[]>([]);
+  const [harSessions, setHarSessions] = useState<HarSession[]>([]);
 
   /* 抓包增量按 request_id 去重合并（events 帧是游标之后的新记录），并同步计数 */
   const mergeRecords = useCallback(
@@ -512,11 +514,22 @@ function HarPanel({
   onChanged,
   onFeedback,
 }: {
-  sessions: unknown[];
+  sessions: HarSession[];
   onChanged: () => void;
   onFeedback: (status: "success" | "warning" | "danger", title: string) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [view, setView] = useState<HarSessionView | null>(null);
+
+  const openSession = useCallback((id: number) => {
+    setOpenId(id);
+    setView(null);
+    api
+      .harGet(id)
+      .then(setView)
+      .catch(() => setOpenId(null));
+  }, []);
 
   function importFile(file: File) {
     file
@@ -525,11 +538,22 @@ function HarPanel({
         const har = JSON.parse(raw) as unknown;
         return api.harImport(har, file.name);
       })
-      .then(() => {
-        onFeedback("success", "HAR 已导入");
+      .then((imported) => {
+        onFeedback("success", `HAR 已导入（${imported.entries} 条）`);
         onChanged();
+        openSession(imported.id);
       })
-      .catch(() => onFeedback("danger", "导入失败：文件需为合法 HAR 1.2 JSON"));
+      .catch((error: unknown) => {
+        if (error instanceof SyntaxError) {
+          onFeedback("danger", "导入失败：文件不是合法 JSON");
+        } else if (error instanceof ApiError && error.status === 413) {
+          onFeedback("danger", "导入失败：文件超过请求体大小上限");
+        } else if (error instanceof ApiError) {
+          onFeedback("danger", `导入失败：${error.message}`);
+        } else {
+          onFeedback("danger", "导入失败：文件需为合法 HAR 1.2 JSON");
+        }
+      });
   }
 
   function remove(id: number) {
@@ -537,6 +561,10 @@ function HarPanel({
       .harDelete(id)
       .then(() => {
         onFeedback("danger", `已删除导入会话 #${id}`);
+        if (openId === id) {
+          setOpenId(null);
+          setView(null);
+        }
         onChanged();
       })
       .catch((error: unknown) =>
@@ -545,7 +573,7 @@ function HarPanel({
   }
 
   return (
-    <div className="flex flex-col gap-3 p-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <input
         ref={fileRef}
         accept=".har,application/json"
@@ -558,47 +586,107 @@ function HarPanel({
           e.target.value = "";
         }}
       />
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="secondary" onPress={() => fileRef.current?.click()}>
+          导入 HAR
+        </Button>
+      </div>
       {sessions.length === 0 ? (
         <EmptyState
           hint="导入 HAR 文件后，它会与实时会话分轨展示，互不干扰。"
           title="还没有导入的会话"
-          action={
-            <Button size="sm" variant="secondary" onPress={() => fileRef.current?.click()}>
-              导入 HAR
-            </Button>
-          }
         />
       ) : (
-        <>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="secondary" onPress={() => fileRef.current?.click()}>
-              导入 HAR
-            </Button>
-          </div>
-          {sessions.map((s) => {
-            const session = s as { session?: { id?: number }; captured?: number };
-            const id = session.session?.id ?? 0;
-            return (
-              <div key={id} className="flex items-center gap-3 border-b border-border py-2">
-                <span className="font-mono text-base text-foreground">#{id}</span>
+        <div aria-label="导入会话列表" className="flex flex-col">
+          {sessions.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 border-b border-border py-2">
+              <button
+                className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                onClick={() => openSession(s.id)}
+              >
+                <span className="font-mono text-base text-foreground">#{s.id}</span>
+                <span className="truncate font-mono text-base text-muted">{s.name}</span>
                 <Chip size="sm" variant="soft">
-                  <Chip.Label>{session.captured ?? 0} 条</Chip.Label>
+                  <Chip.Label>{s.entries} 条</Chip.Label>
                 </Chip>
-                <span className="ml-auto" />
-                <Button
-                  aria-label={`删除导入会话 ${id}`}
-                  className="btn-action--danger"
-                  size="sm"
-                  variant="outline"
-                  onPress={() => remove(id)}
-                >
-                  删除
-                </Button>
-              </div>
-            );
-          })}
-        </>
+              </button>
+              <span className="ml-auto" />
+              <Button
+                aria-label={`删除导入会话 ${s.id}`}
+                className="btn-action--danger"
+                size="sm"
+                variant="outline"
+                onPress={() => remove(s.id)}
+              >
+                删除
+              </Button>
+            </div>
+          ))}
+        </div>
       )}
+
+      {openId != null ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <SectionTitle>会话 #{openId} 的记录</SectionTitle>
+          {view == null ? (
+            <TableSkeleton rows={6} />
+          ) : (
+            <Table>
+              <Table.ScrollContainer>
+                <Table.Content aria-label="导入会话记录" className="min-w-240">
+                  <Table.Header>
+                    <Table.Column isRowHeader>#</Table.Column>
+                    <Table.Column>方法</Table.Column>
+                    <Table.Column>状态</Table.Column>
+                    <Table.Column>域名</Table.Column>
+                    <Table.Column>路径</Table.Column>
+                    <Table.Column className="text-end">大小</Table.Column>
+                  </Table.Header>
+                  <Table.Body
+                    items={view.records}
+                    renderEmptyState={() => (
+                      <EmptyState title="该会话没有记录" hint="HAR 文件里 entries 为空。" />
+                    )}
+                  >
+                    {(cap) => (
+                      <Table.Row id={String(cap.request_id)}>
+                        <Table.Cell>
+                          <span className="font-mono text-base text-muted">{cap.request_id}</span>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <MethodChip method={cap.request.method} />
+                        </Table.Cell>
+                        <Table.Cell>
+                          <span className={statusTone(cap.response?.status ?? 0)}>
+                            {cap.error !== null ? "ERR" : (cap.response?.status ?? "—")}
+                          </span>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <span className="truncate font-mono text-base text-muted">
+                            {cap.request.authority}
+                          </span>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <span className="truncate font-mono text-base text-foreground">
+                            {cap.request.path}
+                          </span>
+                        </Table.Cell>
+                        <Table.Cell className="text-end">
+                          <span className="font-mono text-base text-muted">
+                            {formatBytes(
+                              (cap.request.body?.size ?? 0) + (cap.response?.body?.size ?? 0),
+                            )}
+                          </span>
+                        </Table.Cell>
+                      </Table.Row>
+                    )}
+                  </Table.Body>
+                </Table.Content>
+              </Table.ScrollContainer>
+            </Table>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

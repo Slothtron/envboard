@@ -83,7 +83,7 @@
 | 方法 路径 | 请求 | 响应 |
 |---|---|---|
 | GET `/api/har` | — | `{"sessions":[…]}` |
-| POST `/api/har?name=`（query 可选，默认 `imported.har`） | 裸 HAR 1.2 JSON | 导入会话 view |
+| POST `/api/har?name=`（query 可选，默认 `imported.har`；请求体上限 512 MiB） | 裸 HAR 1.2 JSON | 导入会话 view |
 | GET `/api/har/:id?limit=`（默认 200，≤5000） | — | 会话 view |
 | DELETE `/api/har/:id` | — | `{"ok": bool}` |
 

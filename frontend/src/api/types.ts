@@ -105,6 +105,21 @@ export interface DebugView {
   capture: CaptureView | null;
 }
 
+/* ---------------- HAR 导入会话 ---------------- */
+
+/** 会话列表项（GET /api/har 的 sessions[]，形状对齐 crates/manager/src/har.rs）。 */
+export interface HarSession {
+  id: number;
+  name: string;
+  imported_at: number;
+  entries: number;
+}
+
+/** 会话窗口（GET /api/har/:id，records 与抓包记录同形状）。 */
+export interface HarSessionView extends HarSession {
+  records: CaptureRecord[];
+}
+
 /* ---------------- 推送流帧 ---------------- */
 
 export interface SnapshotFrame {

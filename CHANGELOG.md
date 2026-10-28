@@ -6,6 +6,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed（HAR 导入两处缺陷：大文件被请求体上限拦截 + 会话列表字段错位）
+
+- **大 HAR 文件导入失败**：axum 默认 2 MiB 请求体上限把大于该值的导入请求
+  拦成 413 纯文本（前端只显示笼统的「需为合法 HAR 1.2 JSON」）。web router
+  显式放开到 512 MiB（导入会话库 256 MiB 预算按 entries 体积估算，裸 HAR
+  JSON 会更大）；前端导入失败提示按原因区分（非法 JSON / 超限 / 服务端错误）。
+- **导入会话显示 `#0 0 条`**：`HarPanel` 按不存在的 `{session:{id},captured}`
+  形状读取 `GET /api/har` 的列表项（真实形状 `{id,name,imported_at,entries}`），
+  永远兜底为 0。改按真实形状渲染（会话 id / 文件名 / 条数），点击会话行
+  `GET /api/har/:id` 拉取记录窗口并以抓包同款表格展示；导入成功后自动展开
+  新会话。前端类型新增 `HarSession` / `HarSessionView`。
+
 ### Changed（工程整理：验收材料出库 + CI 编排跨平台化 + mise 工具链锁定）
 
 - **实机验收转录出库**：`frontend/verify/round{1,2,3}-conclusion.md` 是 bsk 验收

@@ -17,6 +17,8 @@ import {
   type EnvPatchReq,
   type EnvView,
   type ErrorBody,
+  type HarSession,
+  type HarSessionView,
   type ProxyPutReq,
   type ProxyView,
   type RuleSummary,
@@ -129,15 +131,15 @@ export const api = {
 
   /* ---------------- HAR ---------------- */
 
-  harList: () => request<{ sessions: unknown[] }>("GET", "/api/har"),
+  harList: () => request<{ sessions: HarSession[] }>("GET", "/api/har"),
   harImport: (har: unknown, name?: string) =>
-    request<CaptureView>(
+    request<HarSessionView>(
       "POST",
       `/api/har${name ? `?name=${encodeURIComponent(name)}` : ""}`,
       har,
     ),
   harGet: (id: number, limit = 200) =>
-    request<CaptureView>("GET", `/api/har/${id}?limit=${limit}`),
+    request<HarSessionView>("GET", `/api/har/${id}?limit=${limit}`),
   harDelete: (id: number) => request<{ ok: boolean }>("DELETE", `/api/har/${id}`),
 
   /* ---------------- 规则库 ---------------- */

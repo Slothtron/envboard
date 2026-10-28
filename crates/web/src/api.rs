@@ -158,6 +158,9 @@ pub fn router(state: AppState) -> Router {
         // API 的 404 也要是 JSON：前端按 {error:{code,message}} 解析，
         // 让它面对 axum 的纯文本 404 只能报"响应不是 JSON"，排查体验很差。
         .fallback(api_not_found)
+        // HAR 导入是整文件 JSON POST（库预算 256 MiB 按 entries 体积估算，裸
+        // HAR 会更大），axum 默认 2 MiB 请求体上限会先把它拦成 413 纯文本。
+        .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
