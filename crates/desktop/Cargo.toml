@@ -25,6 +25,8 @@ envboard-admin.workspace = true
 # 只取词汇：视图 DTO 与共享错误码。
 envboard-protocol.workspace = true
 envboard-engine.workspace = true
+# 跨界通道要 tokio 的原语（oneshot / mpsc / interval），不要它的宏。
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 clap.workspace = true
 
 [dev-dependencies]

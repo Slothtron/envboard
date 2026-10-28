@@ -7,16 +7,18 @@
 //! 与 web 宿主的两处不同：
 //!
 //! * 不起 HTTP 服务，也就没有 `--listen` / `--token`：界面进程内直连 Admin 门面；
-//! * tokio 运行时属于 P0.3（桥与 1s 快照轮询）那一步，骨架阶段先不持有它 ——
-//!   届时要连同"退出"一起处理：日志照看循环是无界的，运行时不能靠默认 Drop 收尾。
+//! * tokio 运行时由本文件的栈帧持有（日志照看与 reconcile 是常驻任务），界面只拿
+//!   `Handle`；退出时按超时收尾 —— 照看循环无界，靠默认 Drop 会一直等。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
-use gpui_kit::{AppContext as _, Entity, WindowBounds, px, size};
+use gpui_kit::{AppContext as _, WindowBounds, px, size};
 
-use envboard_desktop::{HostInfo, Workbench};
+use envboard_desktop::{Host, Workbench};
 use envboard_engine::Error;
 use envboard_host::{HostOptions, parse_port_range, prepare};
 
@@ -26,6 +28,9 @@ const DEFAULT_WINDOW_WIDTH: f32 = 1180.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
 const MIN_WINDOW_WIDTH: f32 = 880.0;
 const MIN_WINDOW_HEIGHT: f32 = 560.0;
+
+/// 退出时给 tokio 运行时的收尾窗口：日志照看循环是无界的，超时后转入后台丢弃。
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -87,23 +92,45 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
+    // 运行时由本栈帧持有，界面只拿 Handle：日志照看与 reconcile 都是常驻任务，
+    // 不能压在 GPUI 主线程上。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Error::internal_error(format!("cannot start tokio runtime: {error}")))?;
+
     // 装配 + 单实例锁：拿不到锁必须在这里响亮失败，而不是开一个空白窗口。
-    let prepared = prepare(host_options(&cli)?)?;
+    // 包一层 Arc：宿主编排要用它，界面的 Global 也要引用它交付的东西。
+    let prepared = Arc::new(prepare(host_options(&cli)?)?);
     // 装配期的警告先打到 stderr；界面里的常驻提示属于设置屏（P2）。
     for warning in &prepared.warnings {
         eprintln!("warning: {warning}");
     }
-    let host = HostInfo {
-        state_dir: prepared.state_dir.display().to_string().into(),
-        port_range: format!("{}-{}", prepared.port_range.0, prepared.port_range.1).into(),
-        warnings: prepared.warnings.clone(),
-    };
+    let host = Host::new(&prepared, runtime.handle().clone());
+
+    // 宿主编排（reconcile + 日志照看）**不等它完成**：端口定态可能要几秒，
+    // 界面先出来显示"取数中"才是对的顺序（也才是 Loading 态的真实用途）。
+    runtime.handle().spawn(async move {
+        match prepared.startup().await {
+            Ok(report) => {
+                for (env, action) in &report.actions {
+                    println!("reconcile: {action:<14} {env}");
+                }
+                for warning in &report.warnings {
+                    eprintln!("warning: {warning}");
+                }
+            }
+            Err(error) => eprintln!("envboard: startup failed: {}", error.message),
+        }
+    });
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             // 必须先初始化 Component/Base，再创建任何组件视图。
             gpui_kit::init(cx);
+            // 后端进 Global：视图经 cx.global::<Host>() 取门面，不各存一份。
+            cx.set_global(host);
 
             // 自绘标题栏：隐藏系统标题栏，拖拽区与窗口按钮由 TitleBar 绘制。
             let mut options = gpui_kit::WindowOptions {
@@ -122,13 +149,15 @@ fn run(cli: Cli) -> Result<(), Error> {
             });
 
             // open_window 会把根视图包进 Root，通知 / 对话框等框架能力依赖它。
-            gpui_kit::open_window(options, cx, move |window, cx| {
-                let view: Entity<Workbench> = cx.new(|cx| Workbench::new(window, cx, host.clone()));
-                view
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| Workbench::new(window, cx))
             })
             .expect("failed to open window");
         });
 
+    // 退出：日志照看循环是无界的，靠 Runtime 的默认 Drop 会一直等下去，
+    // 所以按超时收尾（超时后运行时转入后台丢弃，不阻塞进程退出）。
+    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
     Ok(())
 }
 

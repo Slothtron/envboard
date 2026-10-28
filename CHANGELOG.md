@@ -6,6 +6,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added（桌面形态接上数据：tokio ↔ GPUI 桥与环境列表出数）
+
+- `crates/desktop/src/host.rs`：`Host`（GPUI Global，持 `Arc<AdminService>` +
+  tokio `Handle` + 宿主信息）与 `hop()` —— 全仓唯一一条跨界通道。用例在 tokio 上跑，
+  结果经 `oneshot` 送回主线程（`oneshot` 是传输原语不是 reactor 原语，可在 GPUI 的
+  主线程执行器上 poll）；返回的 `Task` 存进视图字段，drop 即取消。
+- `crates/desktop/src/views/environments.rs`：环境列表整体交给现成的
+  `TableState<EnvTable>` + `DataTable`（虚拟滚动、可排序表头、可拖拽列宽、空态与
+  骨架加载态都是组件自带的），本文件没有一行手搓表格度量。1s 快照轮询器跑在 tokio 上，
+  经 `mpsc(1)` + `try_send` **丢帧**（快照全量，积压无意义；与 web 的 `/api/events`
+  同一语义），只在数据真变时 `refresh` + `notify`。
+- `crates/desktop/src/display.rs`：展示层派生（健康中文/色调、"需处理"判定、监听地址、
+  字节短表示）逐字移植自 `frontend/src/data.ts`，**纯函数 + 6 条单测**；视图不许自算。
+- `main` 现在持有 tokio 运行时并在退出时按超时收尾（日志照看循环是无界的，
+  靠默认 Drop 会一直等）；宿主编排 `startup()` 在运行时里 spawn，**不等它完成**，
+  界面先出 Loading 态。
+- 端到端实测（本机，release）：用 web 宿主往临时状态目录写三个环境后停掉它，
+  再开桌面形态 —— 表格画出三行（`beta` / `yunshu-beta` / `kad-offline`，
+  健康列「已停止」、规则「未绑定」、上游「直连」），状态栏显示状态目录与端口区间，
+  `PrintWindow` 抓取 150 色非黑帧。首轮截图暴露「说明」列被裁出视口，
+  按最小窗口内容宽（1192 逻辑 − 侧栏）重排固定列宽后复测已完整可见。
+- 桌面产物体积随功能长到 25,033,216 B（骨架那次是 23,930,880 B）；
+  构建计时是单次测量，不作基线（同配置抖动见工作区记忆）。
+
 ### Added（桌面形态骨架 `envboard-desktop`：GPUI 入库）
 
 - 新 crate `crates/desktop`（lib + bin `envboard-desktop`）：现成件搭起的窗口骨架 ——
