@@ -1696,6 +1696,7 @@ dependencies = [
  "envboard-host",
  "envboard-protocol",
  "gpui-kit",
+ "serde_json",
  "tokio",
 ]
 
