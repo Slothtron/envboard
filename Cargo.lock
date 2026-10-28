@@ -378,6 +378,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "envboard-host"
+version = "0.3.0"
+dependencies = [
+ "envboard-admin",
+ "envboard-engine",
+ "envboard-engine-fake",
+ "envboard-manager",
+ "envboard-protocol",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "envboard-manager"
 version = "0.3.0"
 dependencies = [
@@ -411,9 +424,8 @@ name = "envboard-server"
 version = "0.3.0"
 dependencies = [
  "clap",
- "envboard-admin",
  "envboard-engine",
- "envboard-manager",
+ "envboard-host",
  "envboard-web",
  "serde_json",
  "tokio",
@@ -1227,18 +1239,18 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "1.1.1+spec-1.1.0"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
 dependencies = [
  "serde_core",
 ]
 
 [[package]]
 name = "toml_parser"
-version = "1.1.3+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
+checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
 ]

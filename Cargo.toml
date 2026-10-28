@@ -20,6 +20,7 @@ envboard-admin = { path = "crates/admin" }
 envboard-engine = { path = "crates/engine" }
 envboard-events = { path = "crates/events" }
 envboard-engine-fake = { path = "crates/engine-fake" }
+envboard-host = { path = "crates/host" }
 envboard-manager = { path = "crates/manager" }
 envboard-protocol = { path = "crates/protocol" }
 envboard-server = { path = "crates/server" }

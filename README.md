@@ -89,10 +89,15 @@ crates/
                        observability / debug_capture / projection）
   admin               Admin 管理 API 门面（spec/admin-api.md）：类型化入口校验 +
                       用例编排，传输无关（无 axum、无引擎装配）
+  host                唯一组合根（lib）：引擎装配 + 共享 CA 物化 + 管理器构造（含单实例
+                      锁）+ 宿主编排（reconcile、日志照看）。引擎装配符号只允许出现在
+                      这里；界面形态与宿主只拿到 Admin 门面，管理器类型不出 crate。
+                      测试经 prepare_with 注入假引擎，走的就是生产那条构造路径
+                      （见 docs/adr-002-composition-root-in-envboard-host.md）
   web                 web 形态：axum HTTP/SSE 传输绑定 + 安全中间件 + 内嵌前端
                       构建产物（include_dir! 嵌 frontend/dist）；只认识 Admin 门面
-  server              envboard 二进制（唯一发布产物）：组合根在 src/main.rs
-                      （引擎装配 + 管理器 → AdminService → web 的 serve 编排）
+  server              envboard 的 web 宿主二进制：CLI 翻译 + tokio 运行时归属 +
+                      把组合根装好的宿主接到 web 的 serve（不再自己装配引擎）
   envboard-contract-tests   消费全部契约 fixture（只有测试目标）
   envboard-policy-tests     工程门禁本身（只有测试目标，不进发布物）
 frontend/               工作台前端：Vite 7 + React 19 + HeroUI v3 + Tailwind v4
@@ -102,10 +107,12 @@ mise.toml             工具版本锁定（python/node/pnpm）+ 任务入口（m
 ```
 
 依赖方向由工程门禁强制（`cargo test -p envboard-policy-tests --test deps`）：
-protocol 是叶子；domain / rules 是纯逻辑（不得依赖 tokio / libc）；UI 面（web 与
-admin 全部源码、宿主除 main.rs 外）只认识管理器的公开 API、不认识引擎装配（引擎装配
-只允许出现在 src/main.rs 组合根，源文件面判据钉住）—— 换引擎实现不动界面，
-加界面形态（桌面 GUI 等）只接 Admin 门面、不动协议。
+protocol 是叶子；domain / rules 是纯逻辑（不得依赖 tokio / libc）；UI 面（web、admin
+与宿主的全部源码）只认识管理器的公开 API、不认识引擎装配 —— 引擎装配**只允许出现在
+`crates/host`**（唯一组合根），判据有三层：装配符号必须真的在 host 里（搬回去就红）、
+盲区表里的 crate 出现它就红、新界面形态消费门面却没登记进盲区表也红。
+于是换引擎实现不动界面，加界面形态（桌面 GUI 等）只接 Admin 门面、不动协议
+（见 docs/adr-002-composition-root-in-envboard-host.md）。
 
 ```
 <state_dir>/

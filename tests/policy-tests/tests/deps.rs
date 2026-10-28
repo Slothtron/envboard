@@ -9,12 +9,18 @@
 //! 5. 注册表与磁盘**一一对应**（未登记即失败、登记了但没了也失败）；
 //! 6. **只有测试目标**的 crate 不得有产物依赖（它们不进产物，也不该拖进产物依赖）；
 //! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）；
-//! 8. **UI 面不认识引擎装配**：`envboard-server` 的源码（除 `src/main.rs`
-//!    组合根外）与 `envboard-web` 的全部源码，禁止出现引擎装配符号 —— "只认识
+//! 8. **引擎装配只住在组合根**：装配符号必须出现在 `envboard-host/src/**`
+//!    （正判据：装配没被搬回界面），而 `envboard-server` / `envboard-web` /
+//!    `envboard-admin` 的全部源码禁止出现它们 —— "只认识
 //!    管理器的公开 API"这条不变量依旧成立，裁决在源文件面（manifest 分不出
-//!    lib 与 bin）；
+//!    lib 与 bin）。配套登记判据：凡产物边里消费 `envboard-admin` 或
+//!    `envboard-manager` 的 crate，除了组合根本身，都必须在装配盲区表里 ——
+//!    漏登记等于白送装配权限（反判据对它无效），所以判红；
 //! 9. **每份 manifest 显式声明 `publish = false`** —— 本仓不发布 crate，发布物是二进制；
 //!    把这件事写成 manifest 事实，才让默认层"不跑 `cargo package --list`"有据可依。
+//! 10. **控制面事件的单一发射点**：`envboard-manager` 的 `manager.rs` 里 `repo.save`
+//!     只允许恰一处、且在 `commit` 内 —— 先 save 后 emit 的顺序由 `commit` 固定，
+//!     绕过它直接落盘的动作就没有审计事件；
 
 mod common;
 
@@ -55,16 +61,23 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
             "envboard-protocol",
         ],
     ),
-    // 宿主 = 唯一入口（[[bin]] 组合根 + serve 编排）。边表里的
-    // envboard-engine 只允许 src/main.rs（装配引擎与共享 CA）使用。
+    // 唯一组合根：引擎装配 + 管理器构造 + 宿主编排。引擎装配符号**只允许**出现在
+    // 本 crate 的 src/**（见第 8 条）。它向上只交给界面形态一个 Admin 门面，
+    // 管理器类型不出 crate。
     (
-        "envboard-server",
+        "envboard-host",
         &[
             "envboard-admin",
             "envboard-engine",
             "envboard-manager",
-            "envboard-web",
+            "envboard-protocol",
         ],
+    ),
+    // 宿主 = 入口（[[bin]]）。不认识装配也不认识管理器：装配在 envboard-host，
+    // 这里只做 CLI 翻译 + 运行时归属 + 接上传输面。
+    (
+        "envboard-server",
+        &["envboard-engine", "envboard-host", "envboard-web"],
     ),
     // 纯测试 crate
     ("envboard-contract-tests", &[]),
@@ -79,6 +92,8 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
 /// 加进上面那张表更清楚：它没有被发布出去。
 const ALLOWED_DEV_INTERNAL: &[(&str, &[&str])] = &[
     ("envboard-manager", &["envboard-engine-fake"]),
+    // 组合根的测试注入口：真管理器 + 假引擎（不起进程、不占端口）。
+    ("envboard-host", &["envboard-engine-fake"]),
     ("envboard-contract-tests", &["envboard-engine"]),
 ];
 
@@ -99,6 +114,32 @@ const TEST_ONLY_CRATES: &[&str] = &["envboard-contract-tests", "envboard-policy-
 
 /// 门禁 crate：谁都不许依赖它。
 const GATE_CRATE: &str = "envboard-policy-tests";
+
+/// 引擎装配符号：构造一个真引擎需要什么。
+const ASSEMBLY_SYMBOLS: &[&str] = &[
+    "EngineInstance",
+    "EngineConfig",
+    "CompiledConfig",
+    "SharedCa",
+    "EngineBackend",
+];
+
+/// 装配符号的**合法出处**：唯一组合根 crate（整 crate，不再"只许一个文件"——
+/// 那种脆约束在多界面形态下必然被搬来搬去）。
+const ASSEMBLY_OWNER: &str = "envboard-host";
+
+/// **装配盲区**：消费 Admin 门面或充当宿主的 crate，一律不认识装配。
+///
+/// `envboard-engine` 与 `envboard-engine-fake` 不在其列 —— 前者定义这些符号，
+/// 后者是引擎的测试替身（必须与真后端同一抽象面）。新增界面形态/宿主必须同时
+/// 登记进来，判据见第 8 条的登记判据。
+const ASSEMBLY_BLIND: &[&str] = &["envboard-server", "envboard-web", "envboard-admin"];
+
+/// 认识门面或管理器的 crate（按 ALLOWED_INTERNAL 的产物边判定，不看磁盘）。
+fn is_consumer_of_facade(name: &str) -> bool {
+    allowed(ALLOWED_INTERNAL, name)
+        .is_some_and(|edges| edges.contains("envboard-admin") || edges.contains("envboard-manager"))
+}
 
 const PROD_SECTIONS: &[&str] = &["dependencies", "build-dependencies"];
 const DEV_SECTIONS: &[&str] = &["dev-dependencies"];
@@ -290,44 +331,52 @@ fn the_rust_layering_holds() {
             ));
         }
 
-        // 8. UI 面不认识引擎装配（源文件面判据）：`envboard-server` 除组合根
-        //    main.rs 外、`envboard-web` 与 `envboard-admin` 全部源码，都禁止出现
-        //    引擎装配符号 —— "只认识管理器的公开 API + 错误词汇"这条不变量随拆分继续成立。
-        if name == "envboard-server" || name == "envboard-web" || name == "envboard-admin" {
-            let web_src = crate_dir.join("src");
-            if name == "envboard-server" {
-                let main_rs = web_src.join("main.rs");
-                if !main_rs.exists() {
-                    problems.push(
-                        "envboard-server/src/main.rs 缺失：二进制 = 工作台启动器，组合根就在这里"
-                            .to_string(),
-                    );
-                }
+        // 8. 引擎装配只允许住在唯一组合根里（源文件面判据）。
+        //    正判据：装配符号必须真的出现在 `envboard-host/src/**`（装配没有搬回界面）；
+        //    反判据：任何"界面形态 / 宿主 / 门面"crate 出现装配符号即红 ——
+        //    "只认识管理器的公开 API + 错误词汇"这条不变量随界面形态增多依旧成立。
+        if name == ASSEMBLY_OWNER {
+            let host_src = crate_dir.join("src");
+            let assembled = walk_relative(&host_src)
+                .iter()
+                .filter_map(|relative| read_text(&host_src.join(relative)))
+                .any(|text| text.contains("EngineBackend") && text.contains("SharedCa"));
+            if !assembled {
+                problems.push(
+                    "envboard-host/src/** 里没有引擎装配符号（EngineBackend + SharedCa）：\
+                     组合根已经不在组合根里了，装配被搬回某个二进制或界面"
+                        .to_string(),
+                );
             }
-            for entry in walk_relative(&web_src) {
-                let relative = entry.clone();
-                if name == "envboard-server" && relative.ends_with("main.rs") {
-                    continue;
-                }
-                let Some(text) = read_text(&web_src.join(&relative)) else {
+        }
+        if ASSEMBLY_BLIND.contains(&name.as_str()) {
+            let blind_src = crate_dir.join("src");
+            for entry in walk_relative(&blind_src) {
+                let Some(text) = read_text(&blind_src.join(&entry)) else {
                     continue;
                 };
-                let assembly = [
-                    "EngineInstance",
-                    "EngineConfig",
-                    "CompiledConfig",
-                    "SharedCa",
-                    "EngineBackend",
-                ]
-                .iter()
-                .find(|symbol| text.contains(*symbol));
-                if let Some(symbol) = assembly {
+                if let Some(symbol) = ASSEMBLY_SYMBOLS
+                    .iter()
+                    .find(|symbol| text.contains(*symbol))
+                {
                     problems.push(format!(
-                        "{name}/src/{relative} 引用了引擎装配符号 {symbol:?}：\
-                         UI 面只许认识管理器的公开 API（共享错误码等词汇除外），引擎装配只允许 envboard-server 的 src/main.rs"
+                        "{name}/src/{entry} 引用了引擎装配符号 {symbol:?}：\
+                         引擎装配只允许出现在 envboard-host（唯一组合根），\
+                         界面形态与宿主只许认识管理器的公开 API（共享错误码等词汇除外）"
                     ));
                 }
             }
+        }
+        // 8'. 登记一致性：新 crate 想碰门面（或成为宿主），必须先进装配盲区表 ——
+        //     漏登记等于白送装配权限，所以这里让它红，而不是默默放过。
+        if is_consumer_of_facade(&name)
+            && !ASSEMBLY_BLIND.contains(&name.as_str())
+            && name != ASSEMBLY_OWNER
+        {
+            problems.push(format!(
+                "{name} 消费 Admin 门面（或直接持有管理器）却不在装配盲区表 {ASSEMBLY_BLIND:?} 里：\
+                 新界面形态/宿主必须同时登记，否则引擎装配的禁令对它无效"
+            ));
         }
 
         // 2'. 纯逻辑模块（源文件面判据）：api / rules / domain 不碰运行时与 TLS 栈。

@@ -1,6 +1,6 @@
 [package]
 name = "envboard-server"
-description = "envboard 宿主：唯一二进制 `envboard` 的组合根（引擎装配 + 管理器 + web 工作台）"
+description = "envboard 的 web 宿主：把组合根（envboard-host）装配好的宿主接到 HTTP 传输面"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,10 +12,14 @@ name = "envboard"
 path = "src/main.rs"
 
 [dependencies]
-envboard-admin.workspace = true
-envboard-engine.workspace = true
-envboard-manager.workspace = true
+# 组合根提供装配；本 crate 只翻译 CLI 参数、持有 tokio 运行时、绑定 web 传输面。
+envboard-host.workspace = true
 envboard-web.workspace = true
+# 只取共享词汇（Error / Retryability）做退出码翻译，不碰任何领域判定。
+envboard-engine.workspace = true
 clap.workspace = true
-serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+
+# 测试目标解析 HTTP/SSE 帧（`live_workbench.rs`）；主目标不解析 JSON。
+[dev-dependencies]
+serde_json.workspace = true

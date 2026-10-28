@@ -1,0 +1,21 @@
+[package]
+name = "envboard-host"
+description = "envboard 的唯一组合根：引擎装配 + 管理器构造 + 宿主编排（reconcile / 日志照看），供各界面形态与测试共用"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 本仓不发布 crate：发布物是 `envboard` 二进制。
+publish = false
+
+[dependencies]
+envboard-admin.workspace = true
+envboard-engine.workspace = true
+envboard-manager.workspace = true
+envboard-protocol.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+envboard-engine-fake.workspace = true

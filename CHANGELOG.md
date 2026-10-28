@@ -6,6 +6,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed（引擎装配收进唯一组合根 `envboard-host`）
+
+- 新增 `crates/host`（lib）：原来写在 `crates/server/src/main.rs` 的引擎装配、共享 CA
+  物化、管理器构造（含单实例锁）与宿主编排（reconcile + 日志照看）整体搬进来，
+  web 宿主与将来的桌面形态共用**同一条构造路径**。决策与迁移表见
+  docs/adr-002-composition-root-in-envboard-host.md。
+- 出口收窄：`prepare(HostOptions)` / `prepare_with(HostOptions, Arc<dyn ProxyEngine>)`
+  （后者是测试注入口，真管理器 + 假引擎，走生产那条路径）/ `Prepared::startup()`
+  返回 `ReconcileReport`（报告是数据，打印由调用方决定）。内部持有的
+  `Arc<Manager>` 是 `pub(crate)` —— 界面向外界只拿到 `Arc<AdminService>`。
+- CA 重新物化的两条警告从装配中途的 `eprintln!` 提升为 `Prepared::warnings`：
+  宿主照旧打到 stderr（文本逐字未改），界面形态将来可以渲染成提示。
+- 门禁 `deps` 第 8 条改成三条判据：装配符号必须真的出现在 `crates/host/src/**`
+  （搬回界面就红）、盲区表（server / web / admin / desktop）出现即红、
+  新 crate 消费门面却未登记进盲区表也红。原来的"只许 `src/main.rs` 一个文件"
+  是脆约束 —— 第二个二进制出现时它会静默失效。
+- `envboard-server` 依赖边收窄为 host / web / engine（词汇），不再直依 admin 与
+  manager；`serde_json` 降为 dev 依赖（只有 `live_workbench.rs` 解析帧）。
+- HTTP / SSE 行为**零变化**：`crates/server/tests/` 与 `tests/contract-tests/` 逐条钉住，
+  `Cargo.lock` 只新增 `envboard-host` 一个包（无版本漂移）。
+
 ### Fixed（HAR 导入两处缺陷：大文件被请求体上限拦截 + 会话列表字段错位）
 
 - **大 HAR 文件导入失败**：axum 默认 2 MiB 请求体上限把大于该值的导入请求
