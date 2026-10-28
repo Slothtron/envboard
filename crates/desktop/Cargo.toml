@@ -9,8 +9,10 @@ rust-version.workspace = true
 # 本仓不发布 crate：发布物是 GUI 二进制。
 publish = false
 
+# 二进制名沿用 web 形态下线前的 `envboard`：它是现在**唯一**的发布物
+# （旧宿主 crates/server 已出库，见 docs/adr-003-retire-web-frontend.md）。
 [[bin]]
-name = "envboard-desktop"
+name = "envboard"
 path = "src/main.rs"
 
 [dependencies]

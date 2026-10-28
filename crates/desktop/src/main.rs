@@ -1,10 +1,10 @@
-//! envboard 桌面形态的二进制入口。
+//! envboard 桌面形态的二进制入口（发布物名就叫 `envboard`）。
 //!
 //! 只做三件事：**把命令行翻译成组合根入参**、**装配宿主**、**开界面**。
 //! 引擎装配与宿主编排都在 `envboard-host`（唯一组合根，判据见 deps 门禁第 8 条），
-//! 领域规则不在这里重新判定 —— 与 `envboard-server` 的分工完全对称。
+//! 领域规则不在这里重新判定。
 //!
-//! 与 web 宿主的两处不同：
+//! 与已经下线的 web 宿主（`crates/server`）的两处不同：
 //!
 //! * 不起 HTTP 服务，也就没有 `--listen` / `--token`：界面进程内直连 Admin 门面；
 //! * tokio 运行时由本文件的栈帧持有（日志照看与 reconcile 是常驻任务），界面只拿
@@ -34,7 +34,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "envboard-desktop",
+    name = "envboard",
     version,
     about = "envboard 工作台（桌面形态）：一个环境 = 一个实例 = 一个端口"
 )]
@@ -139,7 +139,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                     cx,
                 )),
                 window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
-                app_id: Some("envboard-desktop".to_owned()),
+                app_id: Some("envboard".to_owned()),
                 ..gpui_kit::component::TitleBar::window_options()
             };
             // 保留窗口标题（任务栏 / 无障碍名称），但标题栏外观完全由组件绘制。

@@ -10,12 +10,11 @@
 //! 6. **只有测试目标**的 crate 不得有产物依赖（它们不进产物，也不该拖进产物依赖）；
 //! 7. 门禁 crate 不得被任何 crate 依赖（判据必须是文本事实，不该被产品类型牵着走）；
 //! 8. **引擎装配只住在组合根**：装配符号必须出现在 `envboard-host/src/**`
-//!    （正判据：装配没被搬回界面），而 `envboard-server` / `envboard-web` /
-//!    `envboard-admin` / `envboard-desktop` 的全部源码禁止出现它们 —— "只认识
-//!    管理器的公开 API"这条不变量依旧成立，裁决在源文件面（manifest 分不出
-//!    lib 与 bin）。配套登记判据：凡产物边里消费 `envboard-admin` 或
-//!    `envboard-manager` 的 crate，除了组合根本身，都必须在装配盲区表里 ——
-//!    漏登记等于白送装配权限（反判据对它无效），所以判红；
+//!    （正判据：装配没被搬回界面），而 `envboard-admin` / `envboard-desktop`
+//!    的全部源码禁止出现它们 —— "只认识管理器的公开 API"这条不变量依旧成立，
+//!    裁决在源文件面（manifest 分不出 lib 与 bin）。配套登记判据：凡产物边里消费
+//!    `envboard-admin` 或 `envboard-manager` 的 crate，除了组合根本身，都必须在
+//!    装配盲区表里 —— 漏登记等于白送装配权限（反判据对它无效），所以判红；
 //! 9. **每份 manifest 显式声明 `publish = false`** —— 本仓不发布 crate，发布物是二进制；
 //!    把这件事写成 manifest 事实，才让默认层"不跑 `cargo package --list`"有据可依。
 //! 10. **控制面事件的单一发射点**：`envboard-manager` 的 `manager.rs` 里 `repo.save`
@@ -53,17 +52,9 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
         "envboard-admin",
         &["envboard-engine", "envboard-manager", "envboard-protocol"],
     ),
-    // web 形态（资产 + HTTP/SSE 绑定）。只认识 Admin 门面与错误词汇；
-    // 不再直依 manager（v4：web 降级为纯传输绑定）。装配符号由源文件面判据禁绝。
-    (
-        "envboard-web",
-        &[
-            "envboard-admin",
-            "envboard-engine",
-            "envboard-events",
-            "envboard-protocol",
-        ],
-    ),
+    // web 形态（资产 + HTTP/SSE 绑定）与它的宿主 `envboard-server` 已随 SPA 一起
+    // 出库（见 docs/adr-003-retire-web-frontend.md）：本表里不再给它们留位置，
+    // 想把传输面带回来就得同时改这张表 —— 改表就是评审点。
     // 唯一组合根：引擎装配 + 管理器构造 + 宿主编排。引擎装配符号**只允许**出现在
     // 本 crate 的 src/**（见第 8 条）。它向上只交给界面形态一个 Admin 门面，
     // 管理器类型不出 crate。
@@ -76,14 +67,9 @@ const ALLOWED_INTERNAL: &[(&str, &[&str])] = &[
             "envboard-protocol",
         ],
     ),
-    // 宿主 = 入口（[[bin]]）。不认识装配也不认识管理器：装配在 envboard-host，
-    // 这里只做 CLI 翻译 + 运行时归属 + 接上传输面。
-    (
-        "envboard-server",
-        &["envboard-engine", "envboard-host", "envboard-web"],
-    ),
-    // 桌面形态（GPUI）。与 web 宿主同一条纪律：只认门面与词汇，不认识装配也不认识
-    // 管理器 —— 装配在 envboard-host。它同时是 gpui-kit 的唯一容身处（体积守卫）。
+    // 桌面形态（GPUI）= 现在唯一的入口与发布物：CLI 翻译 + 运行时归属 + 界面。
+    // 只认门面与词汇，不认识装配也不认识管理器 —— 装配在 envboard-host。
+    // 它同时是 gpui-kit 的唯一容身处（体积守卫）。
     (
         "envboard-desktop",
         &[
@@ -153,12 +139,7 @@ const GUI_FRAMEWORK_OWNER: &str = "envboard-desktop";
 /// `envboard-engine` 与 `envboard-engine-fake` 不在其列 —— 前者定义这些符号，
 /// 后者是引擎的测试替身（必须与真后端同一抽象面）。新增界面形态/宿主必须同时
 /// 登记进来，判据见第 8' 条。
-const ASSEMBLY_BLIND: &[&str] = &[
-    "envboard-server",
-    "envboard-web",
-    "envboard-admin",
-    "envboard-desktop",
-];
+const ASSEMBLY_BLIND: &[&str] = &["envboard-admin", "envboard-desktop"];
 
 /// 认识门面或管理器的 crate（按 ALLOWED_INTERNAL 的产物边判定，不看磁盘）。
 fn is_consumer_of_facade(name: &str) -> bool {

@@ -97,7 +97,7 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
    - 每段非空，且不含 `:`、空白与控制字符。`:` 的禁用与 mitmproxy `proxyauth` 的
      `split(":")` 切分有关：那里要求**恰好一个**冒号，含 `:` 的段会让两侧语义分叉；
    - 长度上限：`proxy_user` ≤64、`proxy_password` ≤128（按字符计）；
-   - **任何错误信息都不回显取值**；视图 / 日志 / SSE 只暴露 `proxy_auth_enabled` 布尔；
+   - **任何错误信息都不回显取值**；视图与日志只暴露 `proxy_auth_enabled` 布尔；
    - 明文**只**落在两处：0600 的状态存储文件，以及实例的启动参数
      （`--set proxyauth=<user>:<password>`，由 core 拼装）。记录进程身份时
      cmdline 里的凭据值必须先脱敏成 `***`，比对存活进程时两侧都脱敏后再比。
@@ -225,8 +225,8 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 - **热矩阵**：环境改 `upstream` 绑定、改代理实体的 host/port/凭据，对运行中环境都是
   热的（重编译 spec → 同步 `apply`）；`config_hash` 覆盖代理的 host/port/user 与
   密码摘要。
-- **API 面**：`GET /api/proxies`（清单 + `references[]`）、`POST /api/proxies`
-  （创建/同名整体替换）、`GET/DELETE /api/proxies/:name`。
+- **门面面**：`proxy_list()`（清单 + `references[]`）、`proxy_put(body)`
+  （创建/同名整体替换）、`proxy_get(name)` / `proxy_delete(name)`。
 - **明确不做**：SOCKS5；与代理本身的 TLS（`https://` 代理形态）；PAC / 透明代理；
   按域名分流到不同代理；代理链（代理的代理）。
 

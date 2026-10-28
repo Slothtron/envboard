@@ -6,6 +6,42 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed（web 形态整体下线：只留桌面形态）
+
+P1 执行，判据与代价见 docs/adr-003-retire-web-frontend.md，行为对账前置证据见
+spec/desktop-parity.md。删除规模：40 个文件、12,545 行；`Cargo.lock` 848 → 837 包。
+
+- 出库：`frontend/`（Vite + React 19 + HeroUI v3 + Tailwind v4，7,313 行）、
+  `crates/web`（axum 路由 + SSE 三流 + token/CSRF/CSP 中间件 + `include_dir!` 内嵌 +
+  二维码，1,540 行）、`crates/server`（web 宿主二进制与它的 `smoke`/`artifact`/
+  `live_workbench` 三套测试，3,026 行）、`scripts/systemd/envboard.service`、
+  `spec/ui.md` + `spec/design.md` + `ui_style` 门禁。
+- 依赖出库：`axum` / `tokio-stream` / `futures-util` / `include_dir` / `qrcode`。
+- **接受的损失（明确记录，不是待办）**：远程访问（浏览器从别的机器管理工作台）、
+  无头常驻服务（systemd 用户服务）、脚本化管理面（`curl` 打 HTTP API）、
+  以及 CA 的「下载 pem / 扫码装证书」两条端点。
+- 唯一发布物更名：`crates/desktop` 的 `[[bin]]` 由 `envboard-desktop` 改为 `envboard`
+  （旧宿主出库后这个名字空出来），`clap` 的 command name 与 `app_id` 同步。
+- 门禁同步：`deps` 允许表与装配盲区表删掉 `envboard-web` / `envboard-server` 两行
+  （想带回来必须改表 = 评审点）；`toolchain` 门禁语义从"圈禁前端工具链"改为
+  **回归守卫**（仓库里已无合法容身处，任何 Node/TS 面出现即红）。
+- 发布物判据拆两半各归其位：仓库文件面（必需文件、历史残留为零、`target/` 被忽略、
+  四件 CA 测试资产必须在库）→ 新门禁 `tests/policy-tests/tests/artifacts.rs`；
+  二进制内容（产物里真的带着进程内引擎的线程名标记）→
+  `crates/desktop/tests/artifact.rs`（只有产物 crate 的集成测试拿得到
+  `CARGO_BIN_EXE_envboard`）。
+- 验证分层收窄：`scripts/verify.py` 去掉 `frontend` 与 `artifact` 两层，默认层变为
+  policy + rust + contract；`live` 层只剩引擎侧 `live_manager`（走 HTTP 的 29 条
+  实机断言随宿主出库，其覆盖的行为改由门面直连验证）。
+  `mise.toml` 去掉 node/pnpm 工具钉与 `dev`/`build`/`typecheck`/`verify-frontend` 任务。
+- 文档改写：`spec/admin-api.md` 从 HTTP 端点表改写成 **AdminService 方法契约**（v2.0，
+  方法语义与形状一条没改）；`spec/protocol.md` 从"前后端通信协议"改为"界面边界词汇"，
+  SSE 帧语义保留为界面的取数节奏（游标域与 advisory 语义不变），HTTP 安全三档
+  （Host 校验 / token / CSRF 头）标注为"要把传输面带回来时必须一起回来"；
+  `spec/events.md` / `spec/capabilities.md` / `spec/errors.md` 里的端点指称改指门面方法
+  （errors 的 HTTP 列降级为非契约的历史刻度）；README 全面改写（构建不再有两条工具链、
+  快速开始去掉 curl、启动参数删 `--listen`/`--token`、"运维（systemd）"整节退场）。
+
 ### Added（桌面形态四屏齐平：详情面板、配置与规则、规则/代理目录）
 
 P0.5–P0.8 四个里程碑一起补上，逐屏对账见 spec/desktop-parity.md。

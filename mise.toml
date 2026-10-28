@@ -1,23 +1,12 @@
 # 工具版本锁定 + 跨平台任务入口。`mise run` / `mise run <task>` 即用。
 # rust 不在此管理：由 rust-toolchain.toml（rustup）钉死，避免双头。
 # 任务 recipe 一律单命令、不用 `&&`，sh 与 PowerShell 均可直接执行（Windows 原生可用）。
+#
+# 这里**没有**前端工具链：web 形态（SPA + HTTP 宿主）已整体出库，本仓只剩 Rust
+# 与一份 Python 编排（scripts/verify.py）。想把它带回来，先读 docs/adr-003。
 
 [tools]
 python = "3.14.7"
-node = "22.20.0"        # frontend 工具链；Vite 7 要求 ≥ 22.12
-pnpm = "10.18.2"        # 与 frontend/package.json 的 packageManager 字段一致
-
-[tasks.dev]
-description = "前端开发服务器（代理本机 8900）"
-run = "pnpm -C frontend dev"
-
-[tasks.build]
-description = "前端构建（tsc 类型检查 + 打包产出 dist/）"
-run = "pnpm -C frontend build"
-
-[tasks.typecheck]
-description = "仅前端类型检查（tsc --noEmit）"
-run = "pnpm -C frontend typecheck"
 
 [tasks.test]
 description = "Rust 全量测试（参数透传给 cargo）"
@@ -25,24 +14,18 @@ raw = true
 run = "cargo test"
 
 [tasks.verify]
-description = "全量验证门禁（分层参数透传：all/policy/rust/contract/frontend/artifact/live）"
+description = "全量验证门禁（分层参数透传：all/policy/rust/contract/live）"
 raw = true
 run = "python scripts/verify.py"
 
 [tasks.desktop]
-description = "桌面形态（GPUI）：进程内直连组合根，不起 HTTP；与 web 宿主共用状态目录（单实例锁互斥）"
-run = "cargo run -p envboard-desktop --bin envboard-desktop"
+description = "跑工作台（GPUI 桌面形态，进程内直连组合根，不起 HTTP）"
+run = "cargo run -p envboard-desktop --bin envboard"
 
 [tasks.verify-desktop]
-description = "桌面形态的编译 + 单测（P0.3 起含 tokio↔GPUI 桥与无头 UI 测试）"
+description = "桌面形态的编译 + 单测（纯逻辑 + 实体级；无头 UI 测试的边界见 docs/adr-001）"
 run = "cargo test -p envboard-desktop"
 
 [tasks.package]
-description = "打包单二进制：先前端产出 dist/，再 cargo release 构建"
-depends = ["verify-frontend"]
+description = "打包唯一发布物：桌面 GUI 二进制 envboard"
 run = "cargo build --release"
-
-# package 的前置：只跑 frontend 层产出并校验 dist/（独立成任务以便单独调用）。
-[tasks.verify-frontend]
-description = "前端构建层（产出 dist/，cargo 内嵌的前置）"
-run = "python scripts/verify.py frontend"

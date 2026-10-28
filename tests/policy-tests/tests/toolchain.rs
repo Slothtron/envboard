@@ -1,21 +1,22 @@
 //! 工具链收敛门禁：**工具链各居其位，不许蔓延**。
 //!
-//! v5 修订（CI 编排跨平台化）：CI 编排从 bash 改为 Python（仅标准库，跨 Linux /
-//! Windows 原生），Python 因此从「全仓禁止」改为「**圈禁**在 `scripts/` 的编排位」；
-//! Node/TS/Vite/pnpm 维持圈禁在 `frontend/`。三个语言面：
+//! v6 修订（web 形态下线）：SPA 与它的 HTTP 宿主一起出库后，本仓只剩**一种**工具链
+//! 面（Rust）加一个 Python 编排位（`scripts/`）。Node/TS 面没有合法容身处了 ——
+//! 于是 R2/R3 从"圈禁"变成**回归守卫**：谁想把前端构建链带回来，第一件事就是
+//! 在这里撞红，而不是悄悄多出一个 `package.json`。
+//! 三个语言面：
 //!
 //! - **文件面** R1：`.py` 只许出现在 `scripts/`（CI 编排位）；产品代码仍禁 Python；
 //!   Python 工具链的清单文件哪里都不许有；
-//! - **文件面** R2：Node/TS 面按前缀判定 —— `frontend/` 内允许清单文件、TS 源码、
-//!   打包器配置与 `node_modules`；边界之外任何一处出现即红；
-//! - **调用面** R3：可执行面（`scripts/` `mise.toml` `.service`）里，前端工具链
-//!   （pnpm/node）只许**指向 frontend/ 边界**（同一行必须点名 frontend）；cargo
-//!   不受此限。两条工具链以**固定顺序**衔接：先前端构建产出 `frontend/dist`
-//!   （构建产物，不入库），再 `cargo build` 经 `include_dir!` 内嵌；缺 dist 时
-//!   `crates/web/build.rs` 在编译期响亮失败并给出构建指引。
+//! - **文件面** R2：Node/TS 面按前缀判定 —— 仓库里**不该再有** `frontend/`，
+//!   所以任何一处出现清单文件、TS 源码、打包器配置或 `node_modules` 即红；
+//! - **调用面** R3：可执行面（`scripts/` `mise.toml` `.service`）里出现前端工具链
+//!   命令（pnpm/node）时，同一行必须点名一个 `frontend/` 边界 —— 边界已经不存在，
+//!   于是这条实际判成"可执行面里根本不许调用前端工具链"。cargo 不受此限。
 //!
-//! 关键区分不变：**禁的是工具链越界，不是文件类型**。`crates/web/assets/` 的
-//! 历史三件套已退场；浏览器资产现在是 `frontend/dist` 的构建产物（数据）。
+//! 关键区分不变：**禁的是工具链越界，不是文件类型**。曾经的浏览器资产是
+//! `frontend/dist` 的构建产物、由 web crate 在编译期内嵌（缺 dist 就响亮失败），
+//! 那条衔接链随形态一起退场；现在唯一的发布物由 `cargo build --release` 直接产出。
 
 mod common;
 

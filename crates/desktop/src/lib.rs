@@ -1,7 +1,6 @@
-//! envboard-desktop —— envboard 的**桌面形态**：GPUI 原生工作台。
-//!
-//! 与曾经的 web 形态（`envboard-web` + `crates/server`）平级，消费同一份词汇
-//! （`envboard-protocol` 的视图 DTO）与同一个门面（`envboard-admin`）。
+//! envboard-desktop —— envboard 的**桌面形态**：GPUI 原生工作台，也是现在唯一的
+//! 界面形态与唯一发布物（二进制名 `envboard`）。它消费词汇（`envboard-protocol` 的
+//! 视图 DTO）与门面（`envboard-admin`），与已经出库的 web 形态用的是同一份。
 //!
 //! 取数方式与 web 不同：**进程内直连**。
 //!

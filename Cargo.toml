@@ -24,23 +24,22 @@ envboard-engine-fake = { path = "crates/engine-fake" }
 envboard-host = { path = "crates/host" }
 envboard-manager = { path = "crates/manager" }
 envboard-protocol = { path = "crates/protocol" }
-envboard-server = { path = "crates/server" }
-envboard-web = { path = "crates/web" }
 
 # 外部依赖：版本写在这里，成员一律 `workspace = true`。
 #
 # 两条纪律：
 #   1. `Cargo.lock` 必须入库，`cargo build --offline` 是验收项 —— 依赖要克制；
-#   2. 不引模板引擎/WASM/新的前端构建链；CLI 之外不引大框架 —— 唯一的例外是
-#      `gpui-kit`（桌面形态的 GUI 框架），且只允许出现在 `crates/desktop`。
-#      破例的理由、候选对比与代价见 docs/adr-001-gpui-desktop-form.md。
+#   2. **本仓只有一个可执行形态**：桌面 GUI。`gpui-kit` 是它唯一的界面框架，且只允许
+#      出现在 `crates/desktop`（`deps` 门禁第 11 条在 manifest 产物依赖面上判）。
+#      旧版纪律写的是「CLI 之外不引大框架」，那是 web 形态还在时的口径；web 形态
+#      （HTTP+SSE 宿主 + 内嵌 SPA）整体下线后，"另一个形态"没有了，理由随之改写 ——
+#      取舍与代价见 docs/adr-001-gpui-desktop-form.md 与 docs/adr-003-retire-web-frontend.md。
+#      曾经为它服务的传输面依赖（axum / tokio-stream / futures-util / include_dir /
+#      qrcode）一并出库，`toolchain` 门禁继续把 Node/TS 面挡在仓库之外。
 gpui-kit = "0.8"
 # 0.8 锁 gpui-pre 0.3.9 + gpui-component 0.8.0 + gpui-base 0.8.0 + kit-assets。
 # 全 workspace 只许这一份 gpui：出现两份就是两套类型系统（Entity 按 TypeId 寻址）。
 async-trait = "0.1.92"
-axum = "0.7.9"
-futures-util = "0.3.34"
-tokio-stream = "0.1.19"
 libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -50,10 +49,6 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "s
 clap = { version = "4.6.6", features = ["derive"] }
 # 只被工程门禁用来解析各 crate 的 Cargo.toml（依赖方向、发布标识）；产品代码不用它。
 toml = "1.1.4"
-# 工作台「设置 · 证书」的根证书二维码：纯 Rust、零传递依赖（default-features 关掉
-# image 只留 svg 渲染），加入前核对过 Cargo.lock 增量只有它自己。
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-include_dir = "0.7.4"
 
 # 引擎（envboard-engine）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
 # 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA

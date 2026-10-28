@@ -6,9 +6,9 @@
 //! HTTP/SSE 只是 web 形态对它们的绑定，不在这份词汇里。
 //!
 //! 分层：叶子 crate（不依赖任何内部 crate）。`envboard-engine` 与
-//! `envboard-manager` 在服务端构造这些类型，各 UI 形态 crate 消费它们；
-//! 未来的桌面形态（`envboard-desktop`）与 web 形态（`envboard-web`）平级，
-//! 共用这里的全部词汇。
+//! `envboard-manager` 在服务端构造这些类型，界面形态 crate 消费它们；
+//! 现在唯一的界面形态是桌面（`envboard-desktop`），它进程内直连，
+//! 与曾经的 web 形态共用这里的全部词汇 —— 词汇不认识传输，换界面不动它。
 //!
 //! 契约文档见包根 `spec/protocol.md`（语言中立）与 `spec/events.md`
 //! （事件信封与存储格式）。

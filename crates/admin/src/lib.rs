@@ -5,7 +5,7 @@
 //! ```text
 //! envboard-protocol（词汇） ← envboard-manager（账本与装配编排） ← envboard-admin（本 crate）
 //!                                                      ↑
-//!                                        envboard-web（HTTP/SSE 传输绑定）
+//!                                        envboard-desktop（GPUI 界面，进程内直连）
 //! ```
 //!
 //! 职责边界：
@@ -13,8 +13,9 @@
 //!   请求 DTO（`deny_unknown_fields`，未知字段响亮拒绝），再转发 manager；
 //! - **统一错误信封**：所有失败以 [`Error`](envboard_engine::Error) 返回，
 //!   错误码契约见 `spec/errors.md`；
-//! - **不认识传输**：没有 axum / HTTP 状态码 / SSE —— 那些是 web 形态的绑定；
-//! - **不认识引擎装配**：装配符号只允许 envboard-server 的组合根（deps 门禁）。
+//! - **不认识传输**：没有 axum / HTTP 状态码 / SSE —— 曾经的 web 形态靠它们把本门面
+//!   接到浏览器，现在唯一的界面进程内直连，本 crate 依旧不许出现任何一个；
+//! - **不认识引擎装配**：装配符号只住在 `envboard-host`（deps 门禁第 8 条）。
 //!
 //! 契约文档见包根 `spec/admin-api.md`。
 

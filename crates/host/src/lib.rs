@@ -20,9 +20,11 @@
 //!
 //! - **引擎装配符号只允许出现在本 crate**（`EngineBackend` / `SharedCa` /
 //!   `EngineInstance` / `EngineConfig` / `CompiledConfig`）—— 门禁判据由
-//!   `envboard-server` 的 `src/main.rs` 一处改成本 crate 全部源码；
-//! - **不认识传输**：没有 axum / HTTP / SSE，也没有任何界面类型；宿主二进制的
-//!   `main.rs` 只负责把命令行翻译成 [`HostOptions`]，再把 [`Prepared`] 交给自己的界面；
+//!   原宿主的 `src/main.rs` 一处改成本 crate 全部源码（见
+//!   docs/adr-002-composition-root-in-envboard-host.md）；
+//! - **不认识传输**：没有 axum / HTTP / SSE，也没有任何界面类型；唯一的入口
+//!   （桌面二进制的 `main.rs`）只负责把命令行翻译成 [`HostOptions`]，
+//!   再把 [`Prepared`] 交给自己的界面；
 //! - **不做领域判定**：配置合法性由 [`ManagerConfig::validate`] 与 domain 裁决，
 //!   这里只负责按既定顺序装配与编排。
 //!

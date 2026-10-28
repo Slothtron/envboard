@@ -38,7 +38,7 @@
 ### 数据面 `trajectories/<env>.jsonl` —— 窗口（读者 `parse_window`）
 
 - **无头行**；`seq` 每个实例会话从 1 重启，同一文件里多个会话首尾相接；
-  增量读的游标是**字节偏移**（SSE `cursor`），不是 seq。
+  增量读的游标是**字节偏移**（`trajectory_since` 的 `offset`），不是 seq。
 - 读者契约（窗口）：
   - 首行若是版本头 → 跳过（容忍写方将来补头）；
   - 非法 JSON 行（撕裂残片）→ **逐行跳过** —— 一行残片不得让整份轨迹不可读；
@@ -47,8 +47,8 @@
     标了 → 跳过该行；
   - `seq` **不校验**。
 - **为什么分档**：轨迹写方从写下第一行起就不满足账本契约（无头、seq 按会话
-  重启）；用账本读者读它必然整份拒绝（BadHeader / SeqGap），表现为轨迹页与
-  SSE 流永远不可用。窗口语义是这份文件的既有事实，本节把它成文。
+  重启）；用账本读者读它必然整份拒绝（BadHeader / SeqGap），表现为轨迹页
+  永远不可用。窗口语义是这份文件的既有事实，本节把它成文。
 
 ## 词汇表
 
@@ -85,7 +85,7 @@ request/end | custom`
 
 - **控制面单一发射点**：`Manager::commit` 先 save（`state.json` 权威）
   后 emit（事件）；事件写失败（磁盘满/权限）**不得**让控制面动作失败 ——
-  WARN + 丢弃计数（`/api/status` 的 `events_dropped`）。工程门禁钉住
+  WARN + 丢弃计数（门面 `events_dropped()`）。工程门禁钉住
   `repo.save` 只允许出现在 `commit` 内。
 - 事件日志按大小轮转（8 MiB，保留一份 `.1`）：写方 open-write-close、
   无长持 fd，rename 轮转安全（与实例日志必须 copytruncate 的约束不同）。
@@ -114,30 +114,30 @@ request/end | custom`
 
 ## 会话双轨：调试会话（live）与导入会话（HAR）
 
-- **调试会话是工作区级单例**：`POST /api/debug {"env": ...}` 开启/切换目标；
+- **调试会话是工作区级单例**：门面 `start_debug({"env": …})` 开启/切换目标；
   **切换即换代 —— 原目标环境的抓包停止并清空**（capture=false + 清缓冲），新环境开启。
-  `POST /api/debug/stop` 停止并清空；`GET /api/debug` 返回当前会话视图。
-  环境字段 `capture` 仍是 per-env 开关（API 用户可用），调试页经 debug 端点驱动它。
-- **调试实时流**（`GET /api/debug/stream`，SSE）：抓包记录自动上屏的推送通道。
-  连接即发 `snapshot` 帧（形状 = `GET /api/debug` 的会话视图，整幅替换；无目标时
-  `{env: null}`）；此后每 500ms 轮询内存缓冲，有增量发 `events` 帧。
-  帧语法与游标域（本流游标 = `request_id`）见 spec/protocol.md「推送流的帧」；
-  淘汰只会移除游标之前的记录，增量无缺口，断线重连只需重收一次
-  `snapshot`。会话换代（实例重启或 clear，即 `session.id`/`generation` 变化）或
-  目标消失 → 重发 `snapshot`。轨迹流里的 `capture/saved` 通知保留不变（轨迹只
-  回答"发生了什么"），**记录正文只经本流与拉取端点出口**。
-- **导入会话（HAR）**：`POST /api/har/import`（HAR 1.2）——多个并存、只读、
-  进程生命周期内易失；entries 反向映射成抓包记录形状（与调试会话同一渲染组件）。
+  `stop_debug()` 停止并清空；`debug_view()` 返回当前会话视图。
+  环境字段 `capture` 仍是 per-env 开关（门面方法可用），调试会话经 debug 那组方法驱动它。
+- **调试实时推送**（原 SSE 流，现在是界面的**取数节奏**）：`debug_view()` 给整幅
+  会话视图（无目标时 `env: null`）；此后界面每 500ms 调一次 `debug_delta(after, limit)`
+  取增量。帧语法与游标域（本路游标 = `request_id`）见 spec/protocol.md
+  「快照与增量：帧语义与游标域」；
+  淘汰只会移除游标之前的记录，增量无缺口，重来一次只需重收一次 snapshot。
+  会话换代（实例重启或 clear，即 `session.id`/`generation` 变化）或
+  目标消失 → 重发 snapshot。轨迹里的 `capture/saved` 通知保留不变（轨迹只
+  回答"发生了什么"），**记录正文只经这一路与 `captures` 出口**。
+- **导入会话（HAR）**：`har_import(name, body)`（HAR 1.2）——多个并存、只读、
+  进程生命周期内易失；entries 反向映射成抓包记录形状（与调试会话同一渲染路径）。
   有界：最多 8 个会话 / 总量 256 MiB，超限**拒收**（显式动作拒绝比静默淘汰合适）。
   畸形 HAR → `invalid_config` 响亮拒绝。
 
 ## 消费面
 
-- 控制面：`GET /api/history?name=<env>&limit=N`（拉取式只读）；
-  工作台「活动」视图。
-- 数据面：`GET /api/environments/:name/trajectory?limit=N`（拉取式）；
-  `GET /api/environments/:name/trajectory/stream`（SSE：连接即发
-  `baseline` 尾部窗口，此后 `events` 增量，断线带 `?cursor=` 续传；
-  帧形状与游标域见 spec/protocol.md「推送流的帧」）；
-  工作台环境详情「轨迹」页签。抓包实时推送见「调试实时流」
-  （`GET /api/debug/stream`），工作台「调试」视图消费它。
+- 控制面：门面 `history(name, limit)`（拉取式只读）；
+  工作台「活动」视图（属于 P2，界面待补）。
+- 数据面：`trajectory(name, limit)`（拉取式尾部窗口）；
+  `trajectory_since(name, offset)`（按**字节偏移**续取：首轮给 `baseline` 窗口，
+  此后按 offset 追增量；帧形状与游标域见 spec/protocol.md
+  「快照与增量：帧语义与游标域」）；
+  工作台环境详情「轨迹」页签（P2）。抓包实时取数见「调试实时推送」
+  （`debug_delta`），工作台的调试视图（P2）消费它。

@@ -4,11 +4,11 @@
 |---|---|
 | 状态 | 已采纳（2026-10-28） |
 | 相关 | [README.md](../README.md)（分层与依赖方向）、[spec/admin-api.md](../spec/admin-api.md)（门面契约）、[spec/capabilities.md](../spec/capabilities.md) |
-| 落点 | `crates/host`（新）、`crates/server/src/main.rs`（变薄）、`tests/policy-tests/tests/deps.rs`（第 8 条改判据） |
+| 落点 | `crates/host`（新）、`crates/server/src/main.rs`（变薄）、`tests/policy-tests/tests/deps.rs`（第 8 条改判据） <!-- doc-scope-lint: allow —— 当时的落点，宿主已随 web 形态出库（见 adr-003） --> |
 
 ## 判断层：为什么要动
 
-装配逻辑原来写在宿主二进制里：`crates/server/src/main.rs` 一处承担了引擎选择、
+装配逻辑原来写在宿主二进制里：`crates/server/src/main.rs` 一处承担了引擎选择、 <!-- doc-scope-lint: allow —— 历史路径，宿主已出库 -->
 共享 CA 物化、单实例锁、reconcile 顺序、日志体积照看。这在"只有一个二进制"的时候
 没问题，但它有三个必然的走向：
 
@@ -52,7 +52,7 @@
 
 搬移是逐条对应的，没有新增判定：
 
-| 原来在 `crates/server/src/main.rs` | 现在在 |
+| 原来在 `crates/server/src/main.rs` | 现在在 | <!-- doc-scope-lint: allow —— 历史路径，宿主已出库 -->
 |---|---|
 | `build_engine()`（引擎 + 共享 CA + CA 重生物化的两条 `eprintln!`） | `crates/host/src/assembly.rs`；警告提升为 `Prepared::warnings`，宿主打印、界面渲染都来得及 |
 | `Manager::new(...)` + 单实例锁 + `Conflict` 文案加工 | `crates/host/src/assembly.rs`（`build_prepared` / `ownership_conflict`） |

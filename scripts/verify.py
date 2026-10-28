@@ -11,18 +11,18 @@
 #   policy   仓库纪律（工具链收敛 / 命名 / 文本自包含 / 依赖方向）—— 纯 Rust，无外部语言
 #   rust     fmt / clippy / check / build / test —— 纯 Rust
 #   contract 契约 fixture 的形状与消费
-#   artifact 发布物与产物纪律
-#   frontend 前端工程（typecheck + build）—— **Rust 构建的前置**，在 all 最前；
-#            pnpm 调用圈禁在 frontend/ 边界内（本脚本对 frontend/ 之外不碰 pnpm，
-#            见 toolchain 门禁 R3）。无前端工具链但 dist 已在位时以既有产物通过
-#            （cargo 只消费 dist）。
 #   live     实机层（真网络、真进程起停；仅需 openssl/curl），默认**不在** all 里
 #
+# 曾经的 `frontend` 与 `artifact` 两层随 web 形态一起出库：前者是 SPA 的
+# typecheck+build（Rust 构建的前置），后者校验内嵌前端资产与宿主工件 —— 两者判定的
+# 对象都不存在了（见 docs/adr-003-retire-web-frontend.md）。本仓现在只有一个发布物：
+# 桌面 GUI 二进制 `envboard`，它的构建与测试由 `rust` 层覆盖。
+#
 # 用法：
-#   python scripts/verify.py            # 默认层：frontend + policy + rust + contract + artifact
-#   python scripts/verify.py rust       # 纯 Rust 子集（policy + rust；要求 dist 已在位）
-#   python scripts/verify.py frontend   # 只跑前端构建层
-#   python scripts/verify.py live       # 实机层（需要宿主）
+#   python scripts/verify.py            # 默认层：policy + rust + contract
+#   python scripts/verify.py rust       # 纯 Rust 子集（policy + rust）
+#   python scripts/verify.py policy     # 只跑仓库纪律门禁
+#   python scripts/verify.py live       # 实机层（需要引擎与宿主能力）
 """__doc__ 由上方注释承担，模块本体只做编排。"""
 
 import os
@@ -31,8 +31,6 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FRONTEND = os.path.join(ROOT, "frontend")
-DIST_INDEX = os.path.join(FRONTEND, "dist", "index.html")
 
 # 一律带 `--locked --offline`：
 #   --locked   Cargo.lock 必须与 manifest 一致（可复现构建的前提）
@@ -98,67 +96,20 @@ def step_contract() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# artifact 层：发布物内容
-# --------------------------------------------------------------------------- #
-
-def step_artifact() -> None:
-    run("artifact", [tool("cargo"), "test", "-p", "envboard-server", "--test", "artifact", *LOCKED])
-
-
-# --------------------------------------------------------------------------- #
-# frontend 层：Vite 工程（显式层；pnpm 调用圈禁在 frontend/ 边界内）。
-# --------------------------------------------------------------------------- #
-
-def step_frontend() -> None:
-    global FAILED
-    frontend_pnpm = shutil.which("pnpm")  # frontend 边界内的前端工具链
-    if frontend_pnpm is None:
-        # 无前端工具链：dist 已在位则以既有产物通过（cargo 只消费产物）；
-        # 缺 dist 才失败 —— 构建顺序是先前端后 Rust，两条出路都要响亮给出。
-        if os.path.isfile(DIST_INDEX):
-            print("frontend: SKIP —— 未找到 pnpm，使用已在位的 dist/"
-                  "（改 frontend 源码需装 pnpm 重跑本层）")
-            return
-        print("!!! frontend: 未找到 pnpm 且 dist/ 缺失 —— 构建顺序是先前端后 Rust",
-              file=sys.stderr)
-        print("    出路一：mise install（frontend 工具链 node/pnpm 版本由 mise.toml 锁定）后重跑",
-              file=sys.stderr)
-        print("    出路二：在有前端工具链的机器上构建，把 dist/ 带到本地（产物不入库）",
-              file=sys.stderr)
-        FAILED = True
-        return
-
-    run("frontend/install", [frontend_pnpm, "install", "--frozen-lockfile"], cwd=FRONTEND)
-    run("frontend/typecheck", [frontend_pnpm, "run", "typecheck"], cwd=FRONTEND)
-    run("frontend/build", [frontend_pnpm, "run", "build"], cwd=FRONTEND)
-
-    # 产物在位即达成本层职责（cargo 侧由 crates/web/build.rs 校验并消费）。
-    if not os.path.isfile(DIST_INDEX):
-        print("!!! frontend: 构建后 dist/index.html 仍缺失", file=sys.stderr)
-        FAILED = True
-        return
-    print("frontend: OK（dist 已就绪，可进入 cargo 构建）")
-
-
-# --------------------------------------------------------------------------- #
-# live 层：真宿主（真网络、真进程起停；仅需 openssl/curl）。默认**不进 all**。
+# live 层：真环境（真网络、真进程起停；仅需 openssl/curl）。默认**不进 all**。
 # --------------------------------------------------------------------------- #
 
 def step_live() -> None:
     cargo = tool("cargo")
-    run("live/workbench", [cargo, "test", *LOCKED, "-p", "envboard-server",
-                           "--test", "live_workbench", "--", "--ignored", "--nocapture"])
     run("live/manager", [cargo, "test", *LOCKED, "-p", "envboard-engine",
                          "--test", "live_manager", "--", "--ignored", "--nocapture"])
 
 
 STEPS = {
-    "all": [step_frontend, step_policy, step_rust, step_contract, step_artifact],
+    "all": [step_policy, step_rust, step_contract],
     "policy": [step_policy],
     "rust": [step_policy, step_rust],
     "contract": [step_contract],
-    "artifact": [step_artifact],
-    "frontend": [step_frontend],
     "live": [step_live],
 }
 
@@ -168,7 +119,7 @@ def main() -> int:
     steps = STEPS.get(name)
     if steps is None:
         print(f"unknown step: {name}", file=sys.stderr)
-        print("可选：all（默认）/ frontend / policy / rust / contract / artifact / live",
+        print("可选：all（默认）/ policy / rust / contract / live",
               file=sys.stderr)
         return 2
     for step in steps:
