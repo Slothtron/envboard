@@ -6,6 +6,58 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added（桌面形态四屏齐平：详情面板、配置与规则、规则/代理目录）
+
+P0.5–P0.8 四个里程碑一起补上，逐屏对账见 spec/desktop-parity.md。
+
+- **详情面板（P0.5）**：`Sheet`（可拖宽、非遮罩、Esc 关闭）+ `TabBar` 三页签，
+  概览用 `DescriptionList::horizontal()`。面板是独立实体，读同一份表数据，
+  写操作仍回到环境屏发（一处真相）。凭据永不回显与"代理命令由服务端回显"
+  两条纪律照搬。
+- **配置页签（P0.6）**：`ConfigForm` 实体，字段与 web 一一对应并逐项标注热生效/
+  停机生效；脏状态取"任一输入动过"的粗粒度，放弃修改 = 丢实体按当前环境重建。
+  保存经 `hop` 回 tokio，成没成都补一次快照。
+- **规则页签（P0.7）**：正文按行渲染（等宽），未绑定/缺失/失败三态分开说；
+  规则集与上游绑定用 `Button::dropdown_menu` + `PopupMenuItem::checked()`
+  —— 这里要的是"可清空的单选"，不是集合搜索。
+- **规则集目录屏 + 上游代理目录屏（P0.8）**：`crates/desktop/src/views/catalog.rs`。
+  引用反查与"生效条数"都从**同一份**环境快照派生（`EnvTable::referenced_by_rules` /
+  `rules_count_of`），不另算一套；代理被引用时删除钮禁用并说明原因；规则集允许删，
+  但确认文案把正在引用它的环境名列出来。侧栏三屏自此全部落地，
+  `every_screen_in_the_sidebar_is_shipped` 测试守住"点了不许是空白"。
+- **走查抓到的两个上游坑（都已修，判据写进 `crates/desktop/src/lib.rs`）**：
+  ① 普通 `Dialog` 不画按钮 —— 页脚必须自己用 `DialogFooter` + `DialogClose` +
+  `DialogAction` 组，缺页脚的弹窗只有右上角 ✕，**用户根本无法提交**（P0.4 的
+  「新建环境」弹窗带着这个缺陷入库了两轮，本轮弹窗截图才抓到）；
+  ② `Context::on_next_frame` 的闭包第一个参数就是 `&mut 本实体`，在里面再
+  `update` 同一个实体直接 panic。
+- **走查抓到的三个功能缺陷**：① 规则集缺「查看原文」（web 是指向 `/api/rules/<name>`
+  的链接，桌面没浏览器 → 改成只读弹窗走 `rules_read`）；② 代理缺「编辑」入口；
+  ③ `proxy_put` 请求体形状错 —— `port` 发成了字符串、`user`/`password` 永远发空串，
+  而服务端要求 `port` 是数字、凭据 all-or-nothing，等于新建一个不配鉴权的代理都会失败。
+  现在由 `build_proxy_body` 组装（3 条单测盯住），编辑弹窗在 `has_auth` 时把按钮
+  文案改成「保存（将清除鉴权）」，把留空的后果写在能看见的地方。
+- 密码输入改用 `InputState::masked(true)`：桌面没有浏览器的 `type=password`，
+  打码要自己声明（顺带把值挡在剪贴板选择之外）。
+- 两屏各补搜索/计数（规则屏「N 个规则集」，过滤后给「x / y · 无匹配项」），
+  与环境屏同一写法。
+- **本机验证边界（如实记）**：输入注入仍被 OS 拒，弹窗与二屏靠临时探针
+  （`ENVBOARD_PROBE_SCREEN` / `ENVBOARD_PROBE_DIALOG`）截图，**探针不入库**；
+  最终二进制只跑默认路径并复测。工作区测试：仅 `crates/engine/tests/backend.rs`
+  （2 项）与 `data_plane.rs`（11 项）因本机拒绝访问当前用户证书存储失败，HEAD 同形。
+
+### Added（桌面形态列表交互：搜索、过滤、行选中、启停/重启/删除、新建）
+
+- 工具条：搜索 `Input`（`clean_on_escape`，覆盖名称/说明/规则集/上游）+ 四枚状态
+  chips（`Button.ghost().selected()`，计数与表格同源）+ 每屏唯一的主操作放最右。
+- 行内操作列：启停（按 `desired` 翻转）/ 重启 / 删除。按钮自己拿环境名，不依赖
+  "当前选中行"；悬停色用 `ButtonCustomVariant` 的 secondary 而不是 `.ghost()`
+  —— ghost 悬停色与表格行悬停色同色，指针移上去看起来毫无反应。
+- 在途标记：写操作发出到回执落地之间该行按钮转圈并禁用（防连点），"哪一行在等回执"
+  只有一处真相（记在 delegate 里）。
+- 删除走 `open_alert_dialog().confirm()` + Danger 变体；新建走表单弹窗，
+  名字形状先拦一道、裁决仍在服务端。
+
 ### Added（桌面形态接上数据：tokio ↔ GPUI 桥与环境列表出数）
 
 - `crates/desktop/src/host.rs`：`Host`（GPUI Global，持 `Arc<AdminService>` +

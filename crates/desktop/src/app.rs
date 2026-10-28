@@ -12,8 +12,7 @@
 
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, TestSupportExt as _, Window, div,
+    MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Styled, Window, div,
 };
 
 use gpui_kit::component::{
@@ -24,7 +23,7 @@ use gpui_kit::component::{
 };
 
 use crate::host::Host;
-use crate::views::Environments;
+use crate::views::{Environments, ProxiesCatalog, RulesCatalog};
 
 /// 侧栏目的地。P0 落环境与详情面板，规则/代理在 P0.8 补，其余屏属于 P2。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +57,9 @@ impl Destination {
 
     /// 这一屏是否已经落地（未落地的屏给出诚实的占位说明，不画假界面）。
     pub fn is_implemented(self) -> bool {
-        matches!(self, Self::Environments)
+        // P0.8 之后三屏都落地了；这条判据留着是给以后的新屏用的：
+        // 新屏必须先翻成 true 才允许出现在侧栏里。
+        true
     }
 }
 
@@ -66,14 +67,23 @@ impl Destination {
 pub struct Workbench {
     destination: Destination,
     environments: Entity<Environments>,
+    rules: Entity<RulesCatalog>,
+    proxies: Entity<ProxiesCatalog>,
 }
 
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 三个屏都在启动时建好（dipswitch 的模块常驻同一手法）：切屏不重建状态，
+        // 侧栏高亮与目录的取数进度都跟着窗口活着。
         let environments = cx.new(|cx| Environments::new(window, cx));
+        let env_table = environments.read(cx).table().clone();
+        let rules = cx.new(|cx| RulesCatalog::new(env_table, window, cx));
+        let proxies = cx.new(|cx| ProxiesCatalog::new(window, cx));
         let this = Self {
             destination: Destination::Environments,
             environments,
+            rules,
+            proxies,
         };
         // 首帧之后再挂轮询器：构造期不启动后台任务（骨架阶段也避开上下文未就位）。
         let environments = this.environments.clone();
@@ -141,38 +151,17 @@ impl Workbench {
 
     /// 内容区：环境屏是真视图，其余屏在落地前只显示诚实的占位说明。
     fn render_content(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.destination.is_implemented() {
-            let heading = self.destination.label();
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .id("envboard-heading")
-                        .test_support()
-                        .aria_label(heading.clone())
-                        .text_base()
-                        .font_weight(FontWeight::BOLD)
-                        .child(heading),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("这一屏属于 P0.8，还没落地 —— 这里不画假界面。"),
-                )
-                .into_any_element();
+        match self.destination {
+            Destination::Environments => self
+                .environments
+                .update(cx, |view, cx| view.render(window, cx).into_any_element()),
+            Destination::Rules => self
+                .rules
+                .update(cx, |view, cx| view.render(window, cx).into_any_element()),
+            Destination::Proxies => self
+                .proxies
+                .update(cx, |view, cx| view.render(window, cx).into_any_element()),
         }
-
-        // 装箱必须发生在闭包里：`render` 返回的是带生命周期的 opaque 类型，
-        // 让它逃出 `update` 就撞上借用检查（与 dipswitch 外壳同一手法）。
-        self.environments
-            .update(cx, |view, cx| view.render(window, cx).into_any_element())
     }
 
     fn render_status_bar(&self, cx: &App) -> AnyElement {
@@ -238,10 +227,18 @@ mod tests {
     use super::Destination;
 
     #[test]
-    fn only_shipped_screens_claim_to_be_implemented() {
-        // 占位说明必须诚实：未落地的屏不许声称自己可用（P0.8 落地时逐个翻 true）。
-        assert!(Destination::Environments.is_implemented());
-        assert!(!Destination::Rules.is_implemented());
-        assert!(!Destination::Proxies.is_implemented());
+    fn every_screen_in_the_sidebar_is_shipped() {
+        // 侧栏里的每一屏都必须真的落地：P0.8 之后三屏齐平，加新屏时必须先让它落地
+        // （或显式承认没落地并给出占位），不许出现"点了是空白"。
+        for destination in [
+            Destination::Environments,
+            Destination::Rules,
+            Destination::Proxies,
+        ] {
+            assert!(
+                destination.is_implemented(),
+                "{destination:?} 还没落地却进了侧栏"
+            );
+        }
     }
 }

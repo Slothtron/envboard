@@ -16,6 +16,16 @@
 //! 框架只用一个 crate：`gpui-kit`（GPUI + gpui-component + gpui-base + 默认图标）。
 //! 组件一律取现成的，不另造视觉语汇；本 crate 只写「取数 + 组装」那一层。
 //!
+//! 两条上游文档里不显眼、但踩中就是功能性缺陷的坑（都在这台机器的截图走查里抓到）：
+//!
+//! * **普通 `Dialog` 不画按钮**：`button_props`/`on_ok` 只装回调，页脚要自己给
+//!   `DialogFooter::new().child(DialogClose…) .child(DialogAction…)` —— 不给就只有右上角
+//!   一个 ✕，用户根本提交不了（`AlertDialog` 才有默认页脚）。
+//! * **`Context::on_next_frame` 的闭包收到的第一个参数就是 `&mut 本实体`**：在里面再
+//!   `weak_entity.update(同一个实体)` 会 panic（`cannot update X while it is already
+//!   being updated`）。要动自己就用那个接收者；`app.rs` 里挂轮询器之所以能 update，
+//!   是因为它动的是另一个实体。
+//!
 //! 分层：
 //!
 //! ```text

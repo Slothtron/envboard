@@ -19,6 +19,7 @@ use std::time::Duration;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariant, ButtonVariants};
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::{
     Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
@@ -253,6 +254,25 @@ impl EnvTable {
     /// 按名字取当前快照里的环境（详情面板读同一份数据，不另存一份）。
     pub fn find_by_name(&self, name: &str) -> Option<EnvView> {
         self.rows.iter().find(|env| env.name == name).cloned()
+    }
+
+    /// 哪些环境绑了这份规则集（规则目录的「被引用」列；与 web 形态同一算法：
+    /// 引用关系从环境视图派生，服务端不单独给一份）。
+    pub fn referenced_by_rules(&self, name: &str) -> Vec<SharedString> {
+        self.rows
+            .iter()
+            .filter(|env| env.rules.as_deref() == Some(name))
+            .map(|env| SharedString::from(env.name.clone()))
+            .collect()
+    }
+
+    /// 某份规则集当前生效的条数（从引用它的环境取；没有环境引用就取不到，
+    /// 界面显示「—」而不是猜一个 0）。
+    pub fn rules_count_of(&self, name: &str) -> Option<usize> {
+        self.rows
+            .iter()
+            .find(|env| env.rules.as_deref() == Some(name))
+            .map(|env| env.rules_count)
     }
 
     pub fn generation(&self) -> u64 {
@@ -627,6 +647,11 @@ impl Environments {
         });
     }
 
+    /// 环境表实体：规则目录要从**同一份**快照派生"被哪些环境引用"，不另拉一次。
+    pub fn table(&self) -> &Entity<TableState<EnvTable>> {
+        &self.table
+    }
+
     /// 立刻补一次快照：写操作回执后不让用户等下一拍（详情面板保存后也走这里）。
     pub(crate) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
@@ -791,6 +816,15 @@ impl Environments {
                                 .text_xs()
                                 .text_color(hint_color)
                                 .child("小写字母开头，可含数字、下划线与短横线；端口随机分配。"),
+                        ),
+                )
+                // 普通 Dialog 不画按钮：页脚不给，弹窗就只有「关闭」，谁都提交不了。
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(|button| button.label("取消")))
+                        .child(
+                            DialogAction::new()
+                                .child(Button::new("create-env-ok").primary().label("新建")),
                         ),
                 )
                 .on_ok(move |_, window, cx| {
