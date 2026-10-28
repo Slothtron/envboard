@@ -37,6 +37,7 @@ use envboard_protocol::{Desired, EnvView};
 
 use crate::display::{Tone, health_label, health_tone, listen_address, needs_attention};
 use crate::host::{Host, hop};
+use crate::views::detail::Detail;
 
 /// 一帧快照：`(账本代次, 全量环境视图)` —— 与 `AdminService::snapshot()` 同形。
 pub type Snapshot = Result<(u64, Vec<EnvView>), String>;
@@ -247,6 +248,11 @@ impl EnvTable {
 
     pub fn error(&self) -> Option<SharedString> {
         self.error.clone()
+    }
+
+    /// 按名字取当前快照里的环境（详情面板读同一份数据，不另存一份）。
+    pub fn find_by_name(&self, name: &str) -> Option<EnvView> {
+        self.rows.iter().find(|env| env.name == name).cloned()
     }
 
     pub fn generation(&self) -> u64 {
@@ -510,8 +516,10 @@ pub struct Environments {
     table: Entity<TableState<EnvTable>>,
     search: Entity<InputState>,
     filter: Filter,
-    /// 选中的环境名（P0.5 的详情面板挂它）。
+    /// 选中的环境名（详情面板挂它）。
     selected: Option<SharedString>,
+    /// 停靠的详情面板（`Sheet` 里渲染的实体；同一环境复用，换行只改名字）。
+    detail: Option<Entity<Detail>>,
     poll: Task<()>,
     /// 在途写操作：Task 必须被持有，就地丢弃等于取消。
     inflight: Vec<Task<()>>,
@@ -555,14 +563,17 @@ impl Environments {
         // 行选中：表只给下标，视图记名字 —— 名字才扛得住快照换代与排序变化。
         let table_sub = cx.subscribe_in(&table, window, {
             let table = table.clone();
-            move |this, _, event, _, cx| {
+            move |this, _, event, window, cx| {
                 let TableEvent::SelectRow(row_ix) = event else {
                     return;
                 };
                 let name = table.read(cx).delegate().name_at(*row_ix);
                 if this.selected != name {
-                    this.selected = name;
+                    this.selected = name.clone();
                     cx.notify();
+                }
+                if let Some(name) = name {
+                    this.open_detail(name, window, cx);
                 }
             }
         });
@@ -572,6 +583,7 @@ impl Environments {
             search,
             filter: Filter::All,
             selected: None,
+            detail: None,
             poll: Task::ready(()),
             inflight: Vec::new(),
             _subscriptions: vec![search_sub, table_sub],
@@ -607,7 +619,10 @@ impl Environments {
                 });
                 // 计数、chips 与错误条都挂在视图这一层，表刷新不等于视图刷新。
                 // `this` 是 WeakEntity：视图可能已随窗口销毁，这里就是要忽略那个 Err。
-                let _ = this.update_in(cx, |_, _, cx| cx.notify());
+                let _ = this.update_in(cx, |this, _, cx| {
+                    this.touch_detail(cx);
+                    cx.notify();
+                });
             }
         });
     }
@@ -620,12 +635,13 @@ impl Environments {
             window,
             cx,
             async move { admin.snapshot().map_err(|error| error.message) },
-            move |_, frame, _, cx| {
+            move |this, frame, _, cx| {
                 table.update(cx, |state, cx| {
                     if state.delegate_mut().apply(frame) {
                         state.refresh(cx);
                     }
                 });
+                this.touch_detail(cx);
                 cx.notify();
             },
         );
@@ -830,6 +846,40 @@ impl Environments {
             state.refresh(cx);
         });
         cx.notify();
+    }
+
+    /// 打开（或换到）某个环境的详情面板。
+    ///
+    /// 面板实体只建一次：`overlay(false)` 让主列表照常可点，换行时改名字而不是
+    /// 重开一个面板 —— 与 web 形态"单击切换不关面板"的行为一致。
+    pub fn open_detail(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        let table = self.table.clone();
+        let detail = match &self.detail {
+            Some(detail) => {
+                detail.update(cx, |detail, cx| detail.rename(name.clone(), window, cx));
+                detail.clone()
+            }
+            None => {
+                let created = cx.new(|cx| Detail::new(name.clone(), table, window, cx));
+                self.detail = Some(created.clone());
+                created
+            }
+        };
+        window.open_sheet(cx, move |sheet, _, _| {
+            sheet
+                .title(format!("环境 {name}"))
+                .size(px(520.))
+                .overlay(false)
+                .resizable(true)
+                .child(detail.clone())
+        });
+    }
+
+    /// 快照到了：让面板重绘（它读的是同一份表数据，只是需要一次 notify）。
+    fn touch_detail(&self, cx: &mut Context<Self>) {
+        if let Some(detail) = &self.detail {
+            detail.update(cx, |_, cx| cx.notify());
+        }
     }
 
     fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
