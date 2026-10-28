@@ -627,8 +627,8 @@ impl Environments {
         });
     }
 
-    /// 立刻补一次快照：写操作回执后不让用户等下一拍。
-    fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 立刻补一次快照：写操作回执后不让用户等下一拍（详情面板保存后也走这里）。
+    pub(crate) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
         let task = hop(
@@ -860,7 +860,8 @@ impl Environments {
                 detail.clone()
             }
             None => {
-                let created = cx.new(|cx| Detail::new(name.clone(), table, window, cx));
+                let view = cx.weak_entity();
+                let created = cx.new(|cx| Detail::new(name.clone(), table, view, window, cx));
                 self.detail = Some(created.clone());
                 created
             }
