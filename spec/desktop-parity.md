@@ -4,8 +4,8 @@
 差的那部分怎么处置"。判定口径是**行为等价**，不是像素一致 —— 桌面用 GPUI 现成组件，
 web 用 HeroUI，视觉语汇本就不同（决策见 docs/adr-001-gpui-desktop-form.md）。
 
-范围只到 P0 已落地的四屏。P2 的屏（抓包/调试、活动、设置、跨环境对比）在最后一节
-单独列出，它们与 P1 的删除清单一起决定"下线时哪些能力会暂时没有界面"。
+范围只到已落地的六屏（环境列表、环境详情、规则集目录、上游代理目录、调试、设置）。
+P2 还欠的屏（活动审计、跨环境对比、HAR 导入会话）在最后一节单独列出。
 
 ## 怎么验的（以及为什么不是全自动）
 
@@ -75,8 +75,29 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
 | 凭据 | 只进不出；提交时缺项就不发字段 | 同（`build_proxy_body`：`port` 发数字，`user`/`password` 成对或不出现） | 等价 |
 | 密码输入 | `<Input type="password">` | `InputState::masked(true)` | 等价（打码同时把值挡在剪贴板选择之外） |
 
-## 已知不等价（下线前必须知道的事）
+### 调试（`DebugView.tsx` ↔ `crates/desktop/src/views/debug.rs`）
 
+| 能力 | web | 桌面 | 判定 |
+|---|---|---|---|
+| 目标选择 | 调试视图里选环境 | 侧栏「调试」→「选择环境」：运行中的可选，未运行的列出但禁用（写明"未运行"） | 等价 |
+| 会话单例 | 切换即停旧 + 清旧 + 开新 | 同（门面保证，界面不假装能同时看两个） | 等价 |
+| 实时列表 | `/api/debug/stream` SSE 500ms | 500ms `debug_delta` 增量，按 `request_id` 续游标（清空时归零） | 等价 |
+| 记录列 | 时间 / 方法 / 主机 / 路径 / 状态 / 大小 | 同六列；**时间标 UTC** | 等价偏弱（web 用本机时区，桌面没引时区库） |
+| 详情 | 请求 / 响应两栏（起始行 + 头 + 正文） | `Sheet` + 请求/响应两页签 | 等价（形态不同） |
+| 二进制正文 | 展示 base64 | 只标"二进制 + 大小"，暂不还原 | **弱于 web** |
+| 导出 HAR / JSONL | 抓包会话导出两条端点 | 未做（随 HAR 导入会话一起属于后续） | **缺** |
+| 清空 / 停止 | 有 | 有（停止 = 停记录 + 清记录，与门面一致） | 等价 |
+
+### 设置（`SettingsView.tsx` ↔ `crates/desktop/src/views/settings.rs`）
+
+| 能力 | web | 桌面 | 判定 |
+|---|---|---|---|
+| CA 摘要 | `GET /api/ca` | 读组合根交付的 `CaBundle.info`，`DescriptionList` 展示（类型/主体/组织/版本/序列号/生效/到期/签名算法/公钥/SAN/指纹） | 等价 |
+| 证书取用 | 下载 pem + 二维码（手机扫码安装） | 「复制路径」「复制 PEM」两个剪贴板动作 | **弱**：没有二维码（`qrcode` 随 web 出库），手机装证书要自己把文件带过去 |
+| 主题 | 全局一个明暗开关 | **明亮 / 暗色 / 跟随系统** 三档单选，写入 `<state_dir>/ui.json`，系统切明暗时"跟随系统"实时生效 | 等价偏强（多一档、能持久化） |
+| 关于 | 版本 + 能力矩阵 | 版本 / 引擎 / 状态目录 / 端口区间 / 界面偏好路径 / 装配警告 | 等价 |
+
+## 已知不等价（下线前必须知道的事）
 1. **反馈通道不同**：web 每个写操作有 toast（`onFeedback`），桌面把失败写进表上方的
    错误条、成功靠下一次取数自己画出来。行为不缺，**即时感**弱一档。
 2. **列宽不会拉伸填满**：`DataTable` 的 `Column` 只有 `width`/`min_width`，没有
@@ -85,9 +106,13 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
    CA 下载）在桌面形态没有对应物，`scripts/systemd/envboard.service` 那种"没有交互
    会话也在跑"的用法一并退场。这是方案里明确接受的损失，不是遗漏
    （docs/adr-003-retire-web-frontend.md「接受的损失」）。
-4. **P2 屏还没有界面**：抓包/调试、活动流、设置（CA 与二维码）、跨环境对比。
-   它们在 web 形态都有界面，所以**在 P1 删除清单执行前**必须逐条决定：
-   要么先补到桌面，要么承认一段无界面窗口期。
+4. **还有三块没界面**：活动审计、跨环境对比、HAR 导入会话 —— 引擎与管理器侧能力
+   都在，界面还没补（P2 剩余）。调试屏的"导出 HAR / JSONL"也一并欠着。
+5. **调试屏的本机验证边界**：这台机器上引擎起不了实例 —— 共享 CA 物化要读系统信任库，
+   而当前用户证书存储被拒（`拒绝访问 (os error 5)`，与 `crates/engine/tests/` 里
+   那 13 条失败同源，`reconcile: cannot start beta` 就是它）。所以调试屏的列表与详情
+   是用**合成记录**（一次性探针，提交前已删）验证渲染的，真实抓包链路未在本机跑通。
+   设置屏不受影响：CA 摘要是真实数据（演示状态目录里那张 mitmproxy 形态的共享 CA）。
 
 ## 走查抓到的缺陷（都已修，记在这里防复发）
 
@@ -109,8 +134,11 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
 `target/tmp/p03-demo/shots/` 下 `p08-environments-final.png`（最终入库二进制）、
 `p08-rules.png`、`p08-proxies.png`、`p08-create.png`、`p08-import.png`、
 `p08-text.png`、`p08-put.png`、`p08-edit.png`（后四张与两张目录屏来自含探针的
-同源码构建）。种子数据：三个环境（`beta` 绑 `corp` + `up-lab`）、规则集 `corp`
-2 条、上游代理 `up-lab`。
+同源码构建）；P2 新增 `p2-debug.png`（记录表）、`p2-debug-sheet.png`（请求详情
+Sheet + 页签 + 正文）、`p2-settings-light.png`、`p2-settings-dark.png`、
+`p2-settings-system.png`（主题三档）与 `p2-env-light.png`（标题栏已无主题开关）。
+种子数据：三个环境（`beta` 绑 `corp` + `up-lab`）、规则集 `corp` 2 条、
+上游代理 `up-lab`、共享 CA 一张 mitmproxy 形态的根证书。
 
 门禁：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
 `cargo test --workspace --no-fail-fast`（仅 `crates/engine/tests/backend.rs` 2 项与

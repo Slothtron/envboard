@@ -48,7 +48,11 @@ fn key_path(confdir: &Path) -> PathBuf {
     confdir.join(format!("{CA_BASENAME}-ca.pem"))
 }
 
-fn cert_path(confdir: &Path) -> PathBuf {
+/// 客户端要安装的那张证书的路径（只含证书，不含私钥）。
+///
+/// 公开出来是为了让界面能如实告诉用户"文件在哪"：路径规则只有这一份实现，
+/// 界面不许自己拼文件名。
+pub fn cert_path(confdir: &Path) -> PathBuf {
     confdir.join(format!("{CA_BASENAME}-ca-cert.pem"))
 }
 

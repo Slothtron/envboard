@@ -275,6 +275,21 @@ impl EnvTable {
             .map(|env| env.rules_count)
     }
 
+    /// 调试目标候选：**全量**环境 + 是否在跑。调试图只用这一份（不另调门面）——
+    /// 调试会话只能开在活着的实例上，界面把没在跑的也列出来但标记为不可选，
+    /// 让人看得见"为什么它不在候选里"。
+    pub fn debug_targets(&self) -> Vec<(SharedString, bool)> {
+        self.rows
+            .iter()
+            .map(|env| {
+                (
+                    SharedString::from(env.name.clone()),
+                    env.health == "running",
+                )
+            })
+            .collect()
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

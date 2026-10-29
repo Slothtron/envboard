@@ -38,7 +38,9 @@
 pub mod app;
 pub mod display;
 pub mod host;
+pub mod ui_prefs;
 pub mod views;
 
 pub use app::{Destination, Workbench};
 pub use host::Host;
+pub use ui_prefs::{ThemePreference, UiPrefs};

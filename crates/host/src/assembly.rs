@@ -40,6 +40,11 @@ pub struct Prepared {
     pub warnings: Vec<String>,
     /// 状态目录（宿主参数与界面展示都要用）。
     pub state_dir: PathBuf,
+    /// CA 材料所在目录（设置屏据此指出"证书文件在哪"）。
+    ///
+    /// 只给目录不给路径：文件名规则属于引擎（`envboard_engine::ca::cert_path`），
+    /// 这里复制一遍就等于埋了一次静默漂移。
+    pub ca_dir: PathBuf,
     /// 随机分配端口的区间（生效值）。
     pub port_range: (u16, u16),
 }
@@ -108,6 +113,7 @@ fn build_prepared(
     warnings: Vec<String>,
 ) -> Result<Prepared, Error> {
     let state_dir = config.state_dir.clone();
+    let ca_dir = config.confdir.clone();
     let port_range = config.port_range;
     let state_file = config.state_file();
     let manager = Manager::new(
@@ -125,6 +131,7 @@ fn build_prepared(
     let manager = Arc::new(manager);
     Ok(Prepared {
         state_dir,
+        ca_dir,
         port_range,
         manager: Arc::clone(&manager),
         admin: Arc::new(AdminService::new(manager)),

@@ -6,6 +6,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added（P2 部分落地：调试/抓包屏、设置屏（证书与主题））
+
+- **调试屏**（`crates/desktop/src/views/debug.rs`，侧栏「调试」）：目标环境从环境快照里
+  选（没在跑的环境列出但不可选），开始即开工作区级抓包单例；记录表给
+  时间（**UTC**）/ 方法 / 主机 / 路径 / 状态 / 大小；500ms 增量取数按 `request_id`
+  续游标（清空时一起归零）；选中一行开 `Sheet`，请求 / 响应两页签各给起始行、头与
+  正文（二进制标 base64、超限标 omitted、超长正文截断并注明行数）；「清空」「停止」
+  都与门面语义一致（停止 = 停记录 + 清记录）。
+- **设置屏**（`views/settings.rs`，侧栏「设置」）：外观、共享证书、关于三段。
+  证书段读组合根交付的 `CaBundle`（摘要 + 证书 PEM），证书路径由
+  `envboard_engine::ca::cert_path` 单点给出（新增 `Prepared::ca_dir`，界面不自己拼
+  文件名）；「复制路径」「复制 PEM」走剪贴板；私钥仍然不在任何交付给界面的结构里。
+- **主题三档：明亮 / 暗色 / 跟随系统**（`crates/desktop/src/ui_prefs.rs`）：
+  偏好写入 `<state_dir>/ui.json`（坏文件回落到"跟随系统"，**永不拦启动**；写失败在
+  设置屏显示原因）；启动时在开窗之前落实，窗口外观变化时只有"跟随系统"这一档
+  重新落实。`gpui-component` 的 `ThemeMode` 只有两档，"跟随系统"由
+  `Theme::sync_system_appearance` 承担。
+- **标题栏的深色开关已移除**：一个两态开关表达不了"跟随系统"，两处都能改主题还会
+  互相打架。标题栏现在只有标题（仍是拖拽区），主题的唯一入口在「设置」。
+- 状态栏右侧增加当前主题，切换后立刻可见。
+
+### Changed（P2 顺带）
+
+- `Host` 增加 `ca()` / `ca_cert_path()`（只给目录与按引擎规则算出的路径，不给私钥）。
+
 ### Removed（web 形态整体下线：只留桌面形态）
 
 P1 执行，判据与代价见 docs/adr-003-retire-web-frontend.md，行为对账前置证据见

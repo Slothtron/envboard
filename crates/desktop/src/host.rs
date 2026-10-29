@@ -30,13 +30,16 @@ use gpui_kit::{Context, Global, Task, Window};
 use tokio::runtime::Handle;
 
 use envboard_admin::AdminService;
-use envboard_host::Prepared;
+use envboard_host::{CaBundle, Prepared};
 
 /// 宿主：装配好的后端 + 它所属的 tokio 运行时句柄。
 pub struct Host {
     admin: Arc<AdminService>,
     handle: Handle,
     state_dir: PathBuf,
+    /// CA 材料的公开面（设置屏展示摘要与"证书在哪"）。
+    ca: CaBundle,
+    ca_dir: PathBuf,
     port_range: (u16, u16),
     warnings: Vec<String>,
 }
@@ -53,6 +56,8 @@ impl Host {
             admin: Arc::clone(&prepared.admin),
             handle,
             state_dir: prepared.state_dir.clone(),
+            ca: prepared.ca.clone(),
+            ca_dir: prepared.ca_dir.clone(),
             port_range: prepared.port_range,
             warnings: prepared.warnings.clone(),
         }
@@ -69,6 +74,18 @@ impl Host {
 
     pub fn state_dir(&self) -> &PathBuf {
         &self.state_dir
+    }
+
+    /// 共享 CA 公开面：摘要（可能为 `None`，测试注入时未物化）+ 证书 PEM。
+    ///
+    /// **没有私钥** —— 组合根就没把它放进来，界面也就无从泄漏。
+    pub fn ca(&self) -> &CaBundle {
+        &self.ca
+    }
+
+    /// 客户端要安装的那张证书的路径（文件名规则只有引擎那一份）。
+    pub fn ca_cert_path(&self) -> PathBuf {
+        envboard_engine::ca::cert_path(&self.ca_dir)
     }
 
     pub fn port_range(&self) -> (u16, u16) {

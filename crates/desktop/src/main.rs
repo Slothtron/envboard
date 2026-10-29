@@ -18,7 +18,7 @@ use std::time::Duration;
 use clap::Parser;
 use gpui_kit::{AppContext as _, WindowBounds, px, size};
 
-use envboard_desktop::{Host, Workbench};
+use envboard_desktop::{Host, UiPrefs, Workbench};
 use envboard_engine::Error;
 use envboard_host::{HostOptions, parse_port_range, prepare};
 
@@ -107,6 +107,8 @@ fn run(cli: Cli) -> Result<(), Error> {
         eprintln!("warning: {warning}");
     }
     let host = Host::new(&prepared, runtime.handle().clone());
+    // 界面偏好（主题）：读不到就用默认（跟随系统），**永不拦启动**。
+    let prefs = UiPrefs::load(&prepared.state_dir);
 
     // 宿主编排（reconcile + 日志照看）**不等它完成**：端口定态可能要几秒，
     // 界面先出来显示"取数中"才是对的顺序（也才是 Loading 态的真实用途）。
@@ -131,6 +133,9 @@ fn run(cli: Cli) -> Result<(), Error> {
             gpui_kit::init(cx);
             // 后端进 Global：视图经 cx.global::<Host>() 取门面，不各存一份。
             cx.set_global(host);
+            cx.set_global(prefs);
+            // 主题在开窗之前落实：第一帧就是用户选的那一档，不先闪一下亮色。
+            envboard_desktop::ui_prefs::apply(prefs.theme, None, cx);
 
             // 自绘标题栏：隐藏系统标题栏，拖拽区与窗口按钮由 TitleBar 绘制。
             let mut options = gpui_kit::WindowOptions {
