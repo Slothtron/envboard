@@ -35,5 +35,10 @@ clap.workspace = true
 
 [dev-dependencies]
 envboard-engine-fake.workspace = true
-# 注：`gpui-kit/test-support`（无头 UI 集成测试）**在本版本不可解析**，理由与
-# 接替验证方案见 docs/adr-001-gpui-desktop-form.md 的「本机验证边界」。
+# 无头 UI 集成测试：只给 gpui-pre 与 gpui-pre-platform 开 test-support，
+# 不经过 gpui-kit 的同名开关（后者的 feature 会牵出 gpui-fast-platform，
+# 它钉死 cocoa =0.26.0，与 gpui-pre-macos 已锁的 0.26.1 冲突，整棵依赖图解析不出来）。
+gpui-pre = { version = "0.3.9", features = ["test-support"] }
+# 单独加这一条是必须的：gpui-pre 的 test-support 不转发给平台层，
+# 而 WindowsWindow::render_to_image 挂在 gpui_windows 自己的 test-support 后面。
+gpui-pre-platform = { version = "0.3.9", features = ["test-support"] }

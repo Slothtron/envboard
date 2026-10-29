@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added（CA 独立成屏 + 界面验收三层落地）
+
+- **CA 屏**（`crates/desktop/src/views/ca.rs`，侧栏「CA」，图标 `CircleCheck`）：
+  共享根证书从设置页里搬出来单独成屏 —— 摘要（`DescriptionList`，标签列 120 px 以免
+  「指纹 (SHA-256)」折行）、证书文件（路径 + 复制路径 / 复制 PEM + "所有环境共用这一张"
+  脚注）、如何使用（三步）。私钥纪律不变：`CaBundle` 只有证书 PEM 与摘要。
+- **L0 无头界面测试扩到两条新链路**（`crates/desktop/tests/ui_l0.rs`）：
+  点侧栏「CA」真的切屏；进设置屏 → 按 `debug_selector` 锚点找到主题下拉 → 真点开 →
+  真点「深色」→ 断言**偏好全局、组件皮肤、`ui.json` 落盘**三处同时变。
+  侧栏项由组件绘制、不注册 selector，坐标只能按位置点，故集中在常量里并写明"改侧栏必须重探"。
+
+### Changed（设置页规范化）
+
+- 设置页版面换成组件库的设置几何：每组一个 `GroupBox` **描边**表面，组内一行一项
+  （标题与说明在左、控件在右，`SettingItem` 同一横向布局），"共享证书"段整段搬去 CA 屏。
+  为什么是描边而不是填充：暗色主题下 `group_box` 填充色与窗口底色几乎同色，
+  分组边界直接消失（浅色看不出问题）—— 判据与截图见 spec/desktop-parity.md。
+- 主题档位文案统一为**浅色 / 深色 / 系统**（原「明亮 / 暗色 / 跟随系统」）。
+  只改显示文案：`ui.json` 里仍是 `light` / `dark` / `system`，旧文件照读不误。
+- 侧栏目的地从 5 个变成 6 个；`every_screen_in_the_sidebar_is_shipped` 改为遍历
+  `Destination::ALL`，加屏不再需要两处各列一遍清单。
+
 ### Added（P2 部分落地：调试/抓包屏、设置屏（证书与主题））
 
 - **调试屏**（`crates/desktop/src/views/debug.rs`，侧栏「调试」）：目标环境从环境快照里
