@@ -1,4 +1,4 @@
-//! 设置屏：**外观**（主题三档）+ **共享证书** + **关于**。
+//! 设置屏：**外观**（主题下拉框）+ **共享证书** + **关于**。
 //!
 //! 三件事都"看一眼就够"，所以不设页签、不设保存按钮：主题选中即生效并落盘，
 //! 证书只读（私钥根本不在这里），关于段展示运行参数。
@@ -12,41 +12,71 @@
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Disableable;
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::description_list::DescriptionList;
-use gpui_kit::component::radio::RadioGroup;
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{Icon, IconName};
 use gpui_kit::{
-    AnyElement, ClipboardItem, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, px,
 };
 
 use crate::host::Host;
 use crate::ui_prefs::{ThemePreference, UiPrefs};
 
+/// 外观段下拉框的宽度（够放"跟随系统"+ 箭头，又不至于横到像输入框）。
+const THEME_SELECT_W: f32 = 160.;
+
 /// 设置屏。
 pub struct Settings {
     theme: ThemePreference,
+    /// 主题下拉框（选中即生效；状态由组件自己持有，这里只负责响应确认事件）。
+    theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     /// 写偏好失败的说明（`None` = 正常）。
     save_error: Option<SharedString>,
     /// 复制动作的轻提示（"已复制证书路径" 这类；2 秒后自己消失太麻烦，切屏即清）。
     copied: Option<SharedString>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Settings {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let theme = UiPrefs::current(cx).theme;
+        let items =
+            SearchableVec::new(ThemePreference::ALL.map(|pref| SharedString::from(pref.label())));
+        let theme_select =
+            cx.new(|cx| SelectState::new(items, Some(IndexPath::new(theme.index())), window, cx));
+        let subscriptions = vec![cx.subscribe_in(
+            &theme_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
+                // 只有"确认"才是改主题；关闭菜单 / 清空不算（这个框也不开 cleanable）。
+                if let SelectEvent::Confirm(Some(label)) = event
+                    && let Some(theme) = ThemePreference::from_label(label)
+                {
+                    this.select_theme(theme, window, cx);
+                }
+            },
+        )];
         Self {
-            theme: UiPrefs::current(cx).theme,
+            theme,
+            theme_select,
             save_error: None,
             copied: None,
+            _subscriptions: subscriptions,
         }
     }
 
-    fn select_theme(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(theme) = ThemePreference::from_index(index) else {
-            return;
-        };
+    fn select_theme(
+        &mut self,
+        theme: ThemePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if theme == self.theme {
             return;
         }
@@ -73,10 +103,9 @@ impl Settings {
         cx.notify();
     }
 
-    /// 外观段：主题三档 + 说明（+ 写失败）。
+    /// 外观段：主题下拉框 + 说明（+ 写失败）。
     fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let this = cx.weak_entity();
         let hint = match self.theme {
             ThemePreference::System => "跟随 Windows 的外观设置；系统切换明暗时界面即时跟随。",
             ThemePreference::Light => "始终使用明亮主题。",
@@ -88,15 +117,14 @@ impl Settings {
             "外观",
             "主题",
             vec![
+                // 下拉框用现成的 `Select`：触发器显示当前档位，展开是带勾选的双行高列表。
                 div()
+                    .w(px(THEME_SELECT_W))
                     .child(
-                        RadioGroup::horizontal("theme-pref")
-                            .selected_index(Some(self.theme.index()))
-                            .children(ThemePreference::ALL.map(|pref| pref.label()))
-                            .on_change(move |index, window, cx| {
-                                let _ = this
-                                    .update(cx, |view, cx| view.select_theme(*index, window, cx));
-                            }),
+                        Select::new(&self.theme_select)
+                            .id("theme-pref")
+                            .accessibility_label("主题")
+                            .placeholder("选择主题"),
                     )
                     .into_any_element(),
                 muted_line(hint, muted),

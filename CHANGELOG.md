@@ -18,7 +18,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   证书段读组合根交付的 `CaBundle`（摘要 + 证书 PEM），证书路径由
   `envboard_engine::ca::cert_path` 单点给出（新增 `Prepared::ca_dir`，界面不自己拼
   文件名）；「复制路径」「复制 PEM」走剪贴板；私钥仍然不在任何交付给界面的结构里。
-- **主题三档：明亮 / 暗色 / 跟随系统**（`crates/desktop/src/ui_prefs.rs`）：
+- **主题三档：明亮 / 暗色 / 跟随系统**（下拉框，`Select`；`crates/desktop/src/ui_prefs.rs`）：
   偏好写入 `<state_dir>/ui.json`（坏文件回落到"跟随系统"，**永不拦启动**；写失败在
   设置屏显示原因）；启动时在开窗之前落实，窗口外观变化时只有"跟随系统"这一档
   重新落实。`gpui-component` 的 `ThemeMode` 只有两档，"跟随系统"由
@@ -29,6 +29,9 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed（P2 顺带）
 
+- 外观段的主题控件从三档单选（`RadioGroup`）换成**下拉框**（`Select`）：触发器显示
+  当前档位，展开后三档带勾选；`ThemePreference::from_index` 随之换成 `from_label`
+  （下拉项的值就是显示文案）。
 - `Host` 增加 `ca()` / `ca_cert_path()`（只给目录与按引擎规则算出的路径，不给私钥）。
 
 ### Removed（web 形态整体下线：只留桌面形态）

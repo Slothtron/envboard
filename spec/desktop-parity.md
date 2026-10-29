@@ -94,7 +94,7 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
 |---|---|---|---|
 | CA 摘要 | `GET /api/ca` | 读组合根交付的 `CaBundle.info`，`DescriptionList` 展示（类型/主体/组织/版本/序列号/生效/到期/签名算法/公钥/SAN/指纹） | 等价 |
 | 证书取用 | 下载 pem + 二维码（手机扫码安装） | 「复制路径」「复制 PEM」两个剪贴板动作 | **弱**：没有二维码（`qrcode` 随 web 出库），手机装证书要自己把文件带过去 |
-| 主题 | 全局一个明暗开关 | **明亮 / 暗色 / 跟随系统** 三档单选，写入 `<state_dir>/ui.json`，系统切明暗时"跟随系统"实时生效 | 等价偏强（多一档、能持久化） |
+| 主题 | 全局一个明暗开关 | **明亮 / 暗色 / 跟随系统** 三档下拉框（`Select`），写入 `<state_dir>/ui.json`，系统切明暗时"跟随系统"实时生效 | 等价偏强（多一档、能持久化） |
 | 关于 | 版本 + 能力矩阵 | 版本 / 引擎 / 状态目录 / 端口区间 / 界面偏好路径 / 装配警告 | 等价 |
 
 ## 已知不等价（下线前必须知道的事）
@@ -135,8 +135,11 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
 `p08-rules.png`、`p08-proxies.png`、`p08-create.png`、`p08-import.png`、
 `p08-text.png`、`p08-put.png`、`p08-edit.png`（后四张与两张目录屏来自含探针的
 同源码构建）；P2 新增 `p2-debug.png`（记录表）、`p2-debug-sheet.png`（请求详情
-Sheet + 页签 + 正文）、`p2-settings-light.png`、`p2-settings-dark.png`、
-`p2-settings-system.png`（主题三档）与 `p2-env-light.png`（标题栏已无主题开关）。
+Sheet + 页签 + 正文）、`p2-env-light.png`（标题栏已无主题开关）与设置屏三张：
+`p2-theme-select.png`（主题下拉框收起态）、`p2-theme-select-open.png`（展开、勾选
+当前档）、`p2-theme-select-dark.png`（选「暗色」后即时生效并写入 `ui.json`）。
+后两张是靠「向窗口 PostMessage 点击」真正操作出来的，不是摆拍。改控件之前的
+单选框旧图（`p2-settings-*.png`）已作废。
 种子数据：三个环境（`beta` 绑 `corp` + `up-lab`）、规则集 `corp` 2 条、
 上游代理 `up-lab`、共享 CA 一张 mitmproxy 形态的根证书。
 

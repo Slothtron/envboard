@@ -34,7 +34,7 @@ pub enum ThemePreference {
 }
 
 impl ThemePreference {
-    /// 选项顺序就是设置屏里的显示顺序（明亮 → 暗色 → 跟随系统）。
+    /// 选项顺序就是设置屏下拉框的显示顺序（明亮 → 暗色 → 跟随系统）。
     pub const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::System];
 
     pub fn label(self) -> &'static str {
@@ -58,7 +58,7 @@ impl ThemePreference {
         Self::ALL.into_iter().find(|pref| pref.as_str() == raw)
     }
 
-    /// 设置屏里 `RadioGroup` 的下标 ↔ 偏好（顺序由 [`Self::ALL`] 固定）。
+    /// 设置屏下拉框的下标 ↔ 偏好（顺序由 [`Self::ALL`] 固定）。
     pub fn index(self) -> usize {
         Self::ALL
             .iter()
@@ -66,8 +66,9 @@ impl ThemePreference {
             .unwrap_or(Self::ALL.len() - 1)
     }
 
-    pub fn from_index(index: usize) -> Option<Self> {
-        Self::ALL.get(index).copied()
+    /// 从下拉框的显示文案找回档位：选项的值就是 [`Self::label`]。
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|pref| pref.label() == label)
     }
 }
 
@@ -198,12 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn the_radio_index_matches_the_declared_order() {
-        // 设置屏的 RadioGroup 用下标选中；这里钉住"下标 ↔ 档位"唯一映射。
+    fn the_select_index_matches_the_declared_order() {
+        // 设置屏的下拉框用下标定位当前项、用文案认领选中值；这里钉住两条映射。
         for (index, pref) in ThemePreference::ALL.into_iter().enumerate() {
             assert_eq!(pref.index(), index);
-            assert_eq!(ThemePreference::from_index(index), Some(pref));
+            assert_eq!(ThemePreference::from_label(pref.label()), Some(pref));
         }
-        assert_eq!(ThemePreference::from_index(3), None);
     }
 }
