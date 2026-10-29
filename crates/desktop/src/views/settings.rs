@@ -1,26 +1,27 @@
-//! 设置屏：**外观**（主题下拉框）+ **共享证书** + **关于**。
+//! 设置屏：**外观**（主题）+ **关于**（运行参数）。
 //!
-//! 三件事都"看一眼就够"，所以不设页签、不设保存按钮：主题选中即生效并落盘，
-//! 证书只读（私钥根本不在这里），关于段展示运行参数。
+//! 共享证书不在这里 —— 它是独立的一屏（`views/ca.rs`，侧栏「CA」）：那里有它自己的
+//! 任务（把证书交到客户端手里），塞进设置页只会让两边都看不清。
+//!
+//! 版面走组件库的设置几何：每组一个 `GroupBox` 填充表面，组内一行一项
+//! （**标题与说明在左、控件在右**，与 `SettingItem` 同一横向布局），选中即生效，
+//! 不设保存按钮。
 //!
 //! 两条纪律：
 //!
 //! * **主题的唯一入口在这里**。标题栏曾经有个深色开关，已移除 —— 一个只有两态的
-//!   开关表达不了"跟随系统"，而两处都能改主题就会出现"谁赢"的问题。
-//! * **写失败要能看见**：偏好写入 `ui.json` 失败时，错误显示在选项下面，
+//!   开关表达不了"系统"这一档，而两处都能改主题就会出现"谁赢"的问题。
+//! * **写失败要能看见**：偏好写入 `ui.json` 失败时，错误显示在这一行下面，
 //!   而不是静默变成"下次启动又回去了"。
 
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::Disableable;
 use gpui_kit::component::IndexPath;
-use gpui_kit::component::Sizable;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::description_list::DescriptionList;
+use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants};
+use gpui_kit::component::label::Label;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{Icon, IconName};
 use gpui_kit::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, FontWeight, InteractiveElement,
+    AnyElement, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement,
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Window, div, px,
 };
@@ -28,7 +29,7 @@ use gpui_kit::{
 use crate::host::Host;
 use crate::ui_prefs::{ThemePreference, UiPrefs};
 
-/// 外观段下拉框的宽度（够放"跟随系统"+ 箭头，又不至于横到像输入框）。
+/// 主题下拉框的宽度（够放最长的那档文案 + 箭头，又不至于横到像输入框）。
 const THEME_SELECT_W: f32 = 160.;
 
 /// 设置屏。
@@ -38,8 +39,6 @@ pub struct Settings {
     theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     /// 写偏好失败的说明（`None` = 正常）。
     save_error: Option<SharedString>,
-    /// 复制动作的轻提示（"已复制证书路径" 这类；2 秒后自己消失太麻烦，切屏即清）。
-    copied: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -66,9 +65,13 @@ impl Settings {
             theme,
             theme_select,
             save_error: None,
-            copied: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// 当前档位（只读）。给无头 UI 测试断言用 —— 视图层的状态本来就该可观察。
+    pub fn theme(&self) -> ThemePreference {
+        self.theme
     }
 
     fn select_theme(
@@ -97,39 +100,37 @@ impl Settings {
         cx.notify();
     }
 
-    fn copy(&mut self, text: String, note: &'static str, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.copied = Some(note.into());
-        cx.notify();
-    }
-
-    /// 外观段：主题下拉框 + 说明（+ 写失败）。
+    /// 外观组：一行「主题」，说明随当前档位变化。
     fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let theme_colors = cx.theme();
+        let muted = theme_colors.muted_foreground;
         let hint = match self.theme {
             ThemePreference::System => "跟随 Windows 的外观设置；系统切换明暗时界面即时跟随。",
-            ThemePreference::Light => "始终使用明亮主题。",
-            ThemePreference::Dark => "始终使用暗色主题。",
+            ThemePreference::Light => "始终使用浅色主题。",
+            ThemePreference::Dark => "始终使用深色主题。",
         };
         let save_error = self.save_error.clone();
 
-        section(
+        group(
             "外观",
-            "主题",
+            "界面在本机上的样子。",
             vec![
-                // 下拉框用现成的 `Select`：触发器显示当前档位，展开是带勾选的双行高列表。
-                div()
-                    .w(px(THEME_SELECT_W))
-                    .child(
-                        Select::new(&self.theme_select)
-                            .id("theme-pref")
-                            .accessibility_label("主题")
-                            .placeholder("选择主题"),
-                    )
-                    .into_any_element(),
-                muted_line(hint, muted),
-                muted_line(
-                    "选择会写入状态目录的 ui.json，下次启动沿用；它与环境账本无关。",
+                row(
+                    "主题",
+                    Some(hint.into()),
+                    div()
+                        .w(px(THEME_SELECT_W))
+                        // 给无头 UI 测试留的定位锚点（`debug_selector` 只在
+                        // debug + test-support 下记录，release 是空操作）。
+                        // 组件库的下拉本身不注册 selector，没有这个锚点就只能硬编码坐标。
+                        .debug_selector(|| "theme-select".to_string())
+                        .child(
+                            Select::new(&self.theme_select)
+                                .id("theme-pref")
+                                .accessibility_label("主题")
+                                .placeholder("选择主题"),
+                        )
+                        .into_any_element(),
                     muted,
                 ),
                 save_error
@@ -137,7 +138,7 @@ impl Settings {
                         div()
                             .id("settings-theme-error")
                             .text_xs()
-                            .text_color(cx.theme().danger)
+                            .text_color(theme_colors.danger)
                             .child(message)
                             .into_any_element()
                     })
@@ -146,175 +147,7 @@ impl Settings {
         )
     }
 
-    /// 证书段：摘要（只读）+ 文件位置 + 复制入口。
-    fn render_ca(&self, cx: &mut Context<Self>) -> AnyElement {
-        let host = cx.global::<Host>();
-        let info = host.ca().info.clone();
-        let path = host.ca_cert_path();
-        let pem = String::from_utf8_lossy(host.ca().pem.as_slice()).into_owned();
-        let muted = cx.theme().muted_foreground;
-        let mono_family = cx.theme().mono_font_family.clone();
-        let mono = |text: SharedString| {
-            div()
-                .font(gpui_kit::Font {
-                    family: mono_family.clone(),
-                    ..Default::default()
-                })
-                .child(text)
-                .into_any_element()
-        };
-        let this = cx.weak_entity();
-        let path_text = path.display().to_string();
-        let pem_available = !pem.trim().is_empty();
-
-        let summary: AnyElement = match info.as_ref().and_then(|value| value.as_object()) {
-            Some(cert) => {
-                let text = |key: &str| shared(cert.get(key).and_then(|v| v.as_str()));
-                let san = cert
-                    .get("san")
-                    .and_then(|v| v.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str())
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    })
-                    .filter(|joined| !joined.is_empty())
-                    .unwrap_or_else(|| "（无）".to_string());
-                let public_key = match (
-                    text("pubkey_alg"),
-                    cert.get("pubkey_curve").and_then(|v| v.as_str()),
-                    cert.get("pubkey_bits").and_then(|v| v.as_u64()),
-                ) {
-                    (Some(alg), Some(curve), _) => format!("{alg} · {curve}"),
-                    (Some(alg), None, Some(bits)) => format!("{alg} · {bits} 位"),
-                    (Some(alg), None, None) => alg.to_string(),
-                    _ => "—".to_string(),
-                };
-                DescriptionList::horizontal()
-                    .columns(1)
-                    .bordered(true)
-                    .label_width(px(96.))
-                    .item("类型", "自签根证书（CA）", 1)
-                    .item("主体", text("common_name").unwrap_or_else(|| "—".into()), 1)
-                    .item(
-                        "组织",
-                        text("organization").unwrap_or_else(|| "—".into()),
-                        1,
-                    )
-                    .item(
-                        "版本",
-                        // CertInfo 的 version 是数字（DER 里 0 基，序列化时已 +1 成人读值）。
-                        match cert.get("version").and_then(|v| v.as_u64()) {
-                            Some(version) => format!("X.509 v{version}"),
-                            None => "X.509".to_string(),
-                        },
-                        1,
-                    )
-                    .item(
-                        "序列号",
-                        mono(text("serial_hex").unwrap_or_else(|| "—".into())),
-                        1,
-                    )
-                    .item("生效", text("not_before").unwrap_or_else(|| "—".into()), 1)
-                    .item("到期", text("not_after").unwrap_or_else(|| "—".into()), 1)
-                    .item("签名算法", text("sig_alg").unwrap_or_else(|| "—".into()), 1)
-                    .item("公钥", public_key, 1)
-                    .item("SAN", san, 1)
-                    .item(
-                        "指纹 (SHA-256)",
-                        mono(text("fingerprint").unwrap_or_else(|| "—".into())),
-                        1,
-                    )
-                    .into_any_element()
-            }
-            None => div()
-                .id("settings-ca-absent")
-                .text_sm()
-                .text_color(muted)
-                .child("这份宿主没有物化共享 CA（测试注入），所以没有摘要可看。")
-                .into_any_element(),
-        };
-
-        section(
-            "共享证书",
-            "客户端要信任的根证书",
-            vec![
-                summary,
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_xs().text_color(muted).child("证书文件"))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(mono(path_text.clone().into())),
-                            )
-                            .child(
-                                Button::new("copy-ca-path")
-                                    .xsmall()
-                                    .ghost()
-                                    .icon(Icon::new(IconName::Copy))
-                                    .label("复制路径")
-                                    .tooltip("复制证书文件路径")
-                                    .on_click({
-                                        let this = this.clone();
-                                        let path = path_text.clone();
-                                        move |_, _, cx| {
-                                            let _ = this.update(cx, |view, cx| {
-                                                view.copy(path.clone(), "已复制证书路径", cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new("copy-ca-pem")
-                                    .xsmall()
-                                    .ghost()
-                                    .icon(Icon::new(IconName::File))
-                                    .label("复制 PEM")
-                                    .tooltip("把证书正文复制到剪贴板（只含证书，不含私钥）")
-                                    .disabled(!pem_available)
-                                    .on_click({
-                                        let this = this.clone();
-                                        let pem = pem.clone();
-                                        move |_, _, cx| {
-                                            let _ = this.update(cx, |view, cx| {
-                                                view.copy(pem.clone(), "已复制证书 PEM", cx)
-                                            });
-                                        }
-                                    }),
-                            ),
-                    )
-                    .into_any_element(),
-                muted_line(
-                    "客户端装这张证书后，所有环境共用同一张 CA；重建环境不用重装。私钥不在本界面里。",
-                    muted,
-                ),
-                self.copied
-                    .clone()
-                    .map(|note| {
-                        div()
-                            .id("settings-copied")
-                            .text_xs()
-                            .text_color(cx.theme().success)
-                            .child(note)
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().into_any_element()),
-            ],
-        )
-    }
-
-    /// 关于段：版本、状态目录、端口区间、装配期警告。
+    /// 关于组：版本与本机路径，全部只读。
     fn render_about(&self, cx: &mut Context<Self>) -> AnyElement {
         let host = cx.global::<Host>();
         let core = host.admin().core_info();
@@ -330,56 +163,62 @@ impl Settings {
                 .child(SharedString::from(text))
                 .into_any_element()
         };
-        let warnings: Vec<AnyElement> = host
-            .warnings()
-            .iter()
-            .map(|warning| {
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().warning)
-                    .child(SharedString::from(warning.clone()))
-                    .into_any_element()
-            })
-            .collect();
+        let value = |text: String| div().text_sm().child(text).into_any_element();
 
-        section(
-            "关于",
-            "运行参数",
-            vec![
-                DescriptionList::horizontal()
-                    .columns(1)
-                    .bordered(true)
-                    .label_width(px(96.))
-                    .item("引擎", format!("{} {}", core.name, core.version), 1)
-                    .item("版本", env!("CARGO_PKG_VERSION"), 1)
-                    .item("状态目录", mono(host.state_dir().display().to_string()), 1)
-                    .item("端口区间", format!("{min}-{max}"), 1)
-                    .item(
-                        "界面偏好",
-                        format!("{}/ui.json", host.state_dir().display()),
-                        1,
-                    )
+        let mut items = vec![
+            row(
+                "引擎",
+                None,
+                value(format!("{} {}", core.name, core.version)),
+                muted,
+            ),
+            row(
+                "版本",
+                None,
+                value(env!("CARGO_PKG_VERSION").to_string()),
+                muted,
+            ),
+            row(
+                "状态目录",
+                Some("环境账本、规则库、日志与共享 CA 都在它下面。".into()),
+                mono(host.state_dir().display().to_string()),
+                muted,
+            ),
+            row("端口区间", None, value(format!("{min}-{max}")), muted),
+            row(
+                "界面偏好",
+                Some("主题只改这台机器上的界面，不动环境账本。".into()),
+                mono(format!("{}/ui.json", host.state_dir().display())),
+                muted,
+            ),
+        ];
+        // 装配警告是"这一份宿主跑得不对"的信息，归在运行参数这一组，不单独开组。
+        let warnings: Vec<String> = host.warnings().to_vec();
+        if !warnings.is_empty() {
+            items.push(
+                div()
+                    .id("settings-warnings")
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xs().text_color(muted).child("装配警告"))
+                    .children(warnings.into_iter().map(|warning| {
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().warning)
+                            .child(SharedString::from(warning))
+                    }))
                     .into_any_element(),
-                if warnings.is_empty() {
-                    muted_line("启动时没有装配警告。", muted)
-                } else {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(div().text_xs().text_color(muted).child("装配警告"))
-                        .children(warnings)
-                        .into_any_element()
-                },
-            ],
-        )
+            );
+        }
+
+        group("关于", "运行参数与本机路径。", items)
     }
 }
 
 impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = self.render_appearance(cx);
-        let ca = self.render_ca(cx);
         let about = self.render_about(cx);
         let muted = cx.theme().muted_foreground;
 
@@ -390,60 +229,68 @@ impl Render for Settings {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .gap_4()
             .overflow_y_scroll()
+            .p_4()
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_8()
-                    .p_6()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child("本机的界面偏好与共享证书。"),
-                    )
-                    .child(appearance)
-                    .child(ca)
-                    .child(about),
+                    .text_sm()
+                    .text_color(muted)
+                    .child("本机的界面偏好与运行参数。"),
             )
+            .child(appearance)
+            .child(about)
     }
 }
 
-/// 一段设置：小标题 + 内容。段与段之间用大间距，段内用固定的两档间距。
+/// 一组设置：`GroupBox` 的描边表面。
 ///
-/// 不套卡片：设置页的边界靠标题与间距就够了（设计守则：避免卡内套卡）。
-fn section(title: &'static str, caption: &'static str, children: Vec<AnyElement>) -> AnyElement {
-    div()
-        .id(SharedString::from(format!("settings-section-{title}")))
-        .flex()
-        .flex_col()
-        .gap_3()
-        .child(
+/// 为什么是 `outline` 而不是 `fill`：暗色主题下 `group_box` 填充色与窗口底色几乎同色，
+/// 组边界直接消失（实测截图确认），分组的意义就没了；描边在两个主题里都成立。
+/// 组标题也自己上色：`GroupBox` 那层把标题区染成 `muted_foreground`，而设置页只有两组，
+/// 标题必须与说明一眼分得开。
+fn group(title: &'static str, description: &'static str, items: Vec<AnyElement>) -> AnyElement {
+    GroupBox::new()
+        .id(SharedString::from(format!("settings-group-{title}")))
+        .outline()
+        .title(
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(
-                    div()
+                    Label::new(title)
                         .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
+                        .font_weight(FontWeight::SEMIBOLD),
                 )
-                .child(div().text_xs().child(caption)),
+                .child(div().text_xs().child(description)),
         )
-        .children(children)
+        .children(items)
         .into_any_element()
 }
 
-fn muted_line(text: &'static str, color: gpui_kit::Hsla) -> AnyElement {
+/// 一行设置：**标题与说明在左，控件在右**（`SettingItem` 的横向几何）。
+fn row(
+    title: &'static str,
+    description: Option<SharedString>,
+    field: AnyElement,
+    muted: Hsla,
+) -> AnyElement {
     div()
-        .text_xs()
-        .text_color(color)
-        .child(text)
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .max_w_3_5()
+                .child(div().text_sm().child(title))
+                .children(description.map(|text| div().text_xs().text_color(muted).child(text))),
+        )
+        .child(field)
         .into_any_element()
-}
-
-fn shared(value: Option<&str>) -> Option<SharedString> {
-    value.map(|text| text.to_string().into())
 }

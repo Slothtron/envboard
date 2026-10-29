@@ -109,30 +109,91 @@ SQLite 偏好库（主题持久化推到设置屏一起做）。
 无法用真鼠标证明它生效**。
 
 **接替方案本来打算用 `#[gpui_kit::test]` 的框架内事件注入，但它在 gpui-kit 0.8.0
-上不可解析**（实测，2026-10-28）：开 `test-support` 会引入
+上不可解析**（实测，2026-10-28；2026-10-29 联网复验，错误原文一致）：开 `test-support` 会引入
 
 ```text
 gpui-kit 0.8.0 → gpui-fast-platform 0.1.10 → gpui-fast-macos 0.1.10 → cocoa =0.26.0
 gpui-kit 0.8.0 → gpui-pre-platform 0.3.9  → gpui-pre-macos 0.3.9    → cocoa ^0.26.0 (锁到 0.26.1)
 ```
 
-两条要求互斥；把 `cocoa` 强钉到 0.26.0 后立刻撞上第二处冲突
+两条要求互斥，把 `cocoa` 强钉到 0.26.0 后立刻撞上第二处冲突
 （`gpui-pre-web 0.3.9 → unicode-properties ^0.1.3`，锁里是 0.1.4）。继续解下去要
 **整体重解析 `Cargo.lock`**，那会把 rustls / tokio 一起抬版本 —— 为了测试便利去动
-MITM 数据面的依赖版本不划算，故本仓**不开** `test-support`，并在
-`crates/desktop/Cargo.toml` 的 dev 依赖处留了这条指路注释。
+MITM 数据面的依赖版本不划算。
 
-于是自动证据只剩这三层，交互验收按它们分工：
+**这条约束后来找到了绕法（2026-10-29 落地）**：不碰 kit 的 feature 转发，
+**直接给底层 crate 开同名 feature**即可，两条 cocoa 约束就都不在依赖图里了：
+
+```toml
+[dev-dependencies]
+gpui-pre = { version = "0.3.9", features = ["test-support"] }
+# 单独加这一条是必须的：gpui-pre 的 test-support 不转发给平台层，
+# 而 WindowsWindow::render_to_image 挂在 gpui_windows 自己的 test-support 后面。
+gpui-pre-platform = { version = "0.3.9", features = ["test-support"] }
+```
+
+（`gpui-base/test-support` 看着更干净，但它会把 `gpui-fast` 拉进依赖图 —— 那是第二套
+gpui 类型系统，撞本仓第 11 条依赖门禁，不采用。）
+
+于是无头 UI 集成测试落地为 `crates/desktop/tests/ui_l0.rs`：真的建工作台视图、
+真的派发鼠标事件、真的断言切屏。**锁屏下也能跑**（实测 0.04s）。
+
+自动证据现在分四层，交互验收按它们分工：
 
 1. **纯逻辑单测**：过滤/排序/健康着色/`envNeedsAttention` 判定等全部留在可单测的
    纯函数与实体方法里（视图不许自算）；
 2. **实体级测试**：`TestAppContext` 不需要 `test-support` 即可用，状态迁移
    （选中、脏态、面板开合）在实体上调真方法断言；
-3. **人工点击 + `PrintWindow` 截图**：凡依赖真实事件派发路径的（标题栏控件、
+3. **无头 UI 集成测试（L0）**：`crates/desktop/tests/ui_l0.rs`，走真实事件路径
+   （`simulate_mouse_down` / `simulate_mouse_up`），断言界面状态迁移；
+4. **人工点击 + `PrintWindow` 截图**：凡依赖真实事件派发路径的（标题栏控件、
    拖拽宽度、IME、焦点路由）由人验收，截图留档。
 
-**复核触发条件**（补）：gpui-kit 修好 `test-support` 的依赖冲突（或本仓愿意接受一次
-全量 lock 重解析）时，把第 2、3 层里能自动化的部分搬回无头 UI 集成测试。
+L0 的已知短板：组件库的 `SidebarMenuItem` 没注册 `debug_selector`，坐标得靠探针
+硬编码，布局一改就要重探。通用方法与跨项目对比见工作区调研线
+`gpui-headless-acceptance-2026-10`（不入本仓）。
+
+**复核触发条件**（补）：gpui-kit 修好 `test-support` 的依赖冲突时，把第 4 层里
+能自动化的部分也搬进无头 UI 集成测试。
+
+### 锁屏不是障碍（2026-10-29 实测补充）
+
+上面那张表容易让人以为「验收必须在有交互式桌面的会话里跑」。**实测否定了这一点**：
+在**锁屏**（`LockApp.exe` + `LogonUI.exe` 都在跑）状态下，envboard 的桌面验收
+**照样能做**，而且能跑到端到端写库。
+
+| 能力 | 锁屏下 | 判据 |
+|---|---|---|
+| 启动应用、拿到窗口 | ✅ | `Start-Process` 正常，`MainWindowHandle` 有效 |
+| `PrintWindow` + `PW_RENDERFULLCONTENT` | ✅ | 176~203 个不同颜色，**是真实画面，不是锁屏壁纸** |
+| UIA 读元素树 | ✅ | `TreeWalker` 能列出 `TreeItem` / `Button` / `Edit` |
+| `SelectionItemPattern.Select` | ✅ | 真的驱动 GPUI 切屏（截图比对确认） |
+| `ValuePattern.SetValue` | ✅ | 真的写入并触发过滤 |
+| `InvokePattern.Invoke` | ✅ | 常规按钮可点 |
+| `PostMessage` 合成鼠标点击 | ✅ | 可点**不暴露** `InvokePattern` 的弹窗主按钮 |
+| 端到端写操作 | ✅ | 导入规则集 → `state.json` 里落库 |
+| `CopyFromScreen` | ❌ | **不报错，但抓到的是锁屏壁纸**（实测纯蓝壁纸，600×400 只有一种颜色） |
+| `SetCursorPos` / `mouse_event` | ⚠️ | 行为不稳定（实测时灵时不灵），别依赖 |
+| 剪贴板 | ⚠️ | 锁屏时 `OpenClipboard` 可能 `ACCESS_DENIED` |
+
+三条容易踩的坑（每条都真实踩过）：
+
+1. **必须 DPI-aware**。本机 DPI=120（1.25×），`GetWindowRect` 返回**虚拟化**坐标而
+   UIA `BoundingRectangle` 返回**物理**坐标。混用会让点击偏移 1.25 倍，表现为
+   「点了没反应」或「点错控件」——而且界面看起来一切正常，最难自查。
+   修法：脚本开头 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2 = -4)`。
+2. **UIA 树用 `TreeWalker` 走，不要用 `FindAll(Descendants)`**。后者在 GPUI 窗口上
+   返回 **0** 个子元素，会让人误判「UIA 不可用」而放弃这条路。
+3. **别拿屏幕抓取当锁屏判据**。`CopyFromScreen` 在锁屏下有时抛
+   "The handle is invalid"、有时成功返回壁纸，同一台机器上前后判据相反。
+   正确判据是探**验收真正依赖的能力**：能不能 `PrintWindow` 拿到 ≥10 色画面、
+   能不能读出 UIA 子节点。锁没锁与这个判据无关。
+
+可复用脚本落在工作区级目录 `tools/gpui-ui-accept/uia-drive.ps1`（不进本仓）：它把上面
+这些姿势固化了，`-Mode dump|click|select|setvalue|shot|lockprobe` 六个模式都已在锁屏下
+实测通过；通用方法、机制解释与跨项目交叉验证见工作区同名调研文档
+（`gpui-locked-screen-ui-acceptance.md` 与 `gpui-headless-acceptance-2026-10` 调研线）。
+本仓读者按上面三条坑自己写脚本即可，不必依赖工作区。
 
 ## 复核触发条件
 

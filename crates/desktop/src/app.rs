@@ -7,8 +7,8 @@
 //!
 //! * 标题栏整体是系统拖拽区，里面的控件必须自己吞掉"按下"事件（坑 #1）。
 //!   现在栏里只有标题，所以这条只在将来往里放按钮时生效；
-//! * **主题的唯一入口在「设置」里**（明亮 / 暗色 / 跟随系统）。标题栏曾经有个
-//!   深色开关，已移除：一个两态开关表达不了"跟随系统"，两处都能改主题还会互相打架；
+//! * **主题的唯一入口在「设置」里**（浅色 / 深色 / 系统）。标题栏曾经有个
+//!   深色开关，已移除：一个两态开关表达不了"系统"这一档，两处都能改主题还会互相打架；
 //! * 必须先 `gpui_kit::init` 再创建组件视图（见 `main`）；
 //! * 各段渲染先装箱成 `AnyElement` 再拼树，否则 `&mut self` / `&mut cx` 的借用
 //!   会一路拖到整棵树拼完而撞上借用检查。
@@ -30,7 +30,7 @@ use gpui_kit::component::{
 
 use crate::host::Host;
 use crate::ui_prefs::{ThemePreference, UiPrefs};
-use crate::views::{DebugScreen, Environments, ProxiesCatalog, RulesCatalog, Settings};
+use crate::views::{CaScreen, DebugScreen, Environments, ProxiesCatalog, RulesCatalog, Settings};
 
 /// 侧栏目的地。顺序即显示顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,16 +39,18 @@ pub enum Destination {
     Rules,
     Proxies,
     Debug,
+    Ca,
     Settings,
 }
 
 impl Destination {
     /// 全部目的地（侧栏按这个顺序画，状态栏的"当前屏"也从这里取标签）。
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Environments,
         Self::Rules,
         Self::Proxies,
         Self::Debug,
+        Self::Ca,
         Self::Settings,
     ];
 
@@ -58,17 +60,19 @@ impl Destination {
             Self::Rules => "规则".into(),
             Self::Proxies => "代理".into(),
             Self::Debug => "调试".into(),
+            Self::Ca => "CA".into(),
             Self::Settings => "设置".into(),
         }
     }
 
     fn icon(self) -> Icon {
         let name = match self {
-            // 五个图形都在组件默认图标集里（不在集合内的名字会静默画空白）。
+            // 六个图形都在组件默认图标集里（不在集合内的名字会静默画空白）。
             Self::Environments => IconName::LayoutDashboard,
             Self::Rules => IconName::FileText,
             Self::Proxies => IconName::Network,
             Self::Debug => IconName::SquareTerminal,
+            Self::Ca => IconName::CircleCheck,
             Self::Settings => IconName::Settings,
         };
         Icon::new(name)
@@ -76,7 +80,7 @@ impl Destination {
 
     /// 这一屏是否已经落地（未落地的屏给出诚实的占位说明，不画假界面）。
     pub fn is_implemented(self) -> bool {
-        // 五屏都落地了；这条判据留着是给以后的新屏用的：
+        // 六屏都落地了；这条判据留着是给以后的新屏用的：
         // 新屏必须先翻成 true 才允许出现在侧栏里。
         true
     }
@@ -89,6 +93,7 @@ pub struct Workbench {
     rules: Entity<RulesCatalog>,
     proxies: Entity<ProxiesCatalog>,
     debug: Entity<DebugScreen>,
+    ca: Entity<CaScreen>,
     settings: Entity<Settings>,
     _subscriptions: Vec<Subscription>,
 }
@@ -102,6 +107,7 @@ impl Workbench {
         let rules = cx.new(|cx| RulesCatalog::new(env_table.clone(), window, cx));
         let proxies = cx.new(|cx| ProxiesCatalog::new(window, cx));
         let debug = cx.new(|cx| DebugScreen::new(env_table, window, cx));
+        let ca = cx.new(|cx| CaScreen::new(window, cx));
         let settings = cx.new(|cx| Settings::new(window, cx));
         // 系统外观变化：只有"跟随系统"这一档重新落实主题。
         let appearance_sub = cx.observe_window_appearance(window, |_, window, cx| {
@@ -115,6 +121,7 @@ impl Workbench {
             rules,
             proxies,
             debug,
+            ca,
             settings,
             _subscriptions: vec![appearance_sub],
         };
@@ -124,6 +131,11 @@ impl Workbench {
             environments.update(cx, |view, cx| view.attach(window, cx));
         });
         this
+    }
+
+    /// 当前目的地（只读）。给无头 UI 测试断言用 —— 视图层的状态迁移本来就该可观察。
+    pub fn destination(&self) -> Destination {
+        self.destination
     }
 
     /// 标题栏：整条是拖拽区，里面只放标题 —— 主题开关在「设置」里。
@@ -173,6 +185,9 @@ impl Workbench {
                 .update(cx, |view, cx| view.render(window, cx).into_any_element()),
             Destination::Debug => self
                 .debug
+                .update(cx, |view, cx| view.render(window, cx).into_any_element()),
+            Destination::Ca => self
+                .ca
                 .update(cx, |view, cx| view.render(window, cx).into_any_element()),
             Destination::Settings => self
                 .settings
@@ -247,18 +262,12 @@ mod tests {
     fn every_screen_in_the_sidebar_is_shipped() {
         // 侧栏里的每一屏都必须真的落地：加新屏时必须先让它落地（或显式承认没落地
         // 并给出占位），不许出现"点了是空白"。
-        for destination in [
-            Destination::Environments,
-            Destination::Rules,
-            Destination::Proxies,
-            Destination::Debug,
-            Destination::Settings,
-        ] {
+        for destination in Destination::ALL {
             assert!(
                 destination.is_implemented(),
                 "{destination:?} 还没落地却进了侧栏"
             );
         }
-        assert_eq!(Destination::ALL.len(), 5);
+        assert_eq!(Destination::ALL.len(), 6);
     }
 }

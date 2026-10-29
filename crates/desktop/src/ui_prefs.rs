@@ -12,8 +12,8 @@
 //! * **坏文件不拦启动**：读不出来、字段不认识 → 回落到默认（跟随系统），
 //!   而不是让界面起不来；
 //! * **写失败要能看见**：设置屏把 `save` 的错误显示在选项下面（不静默丢偏好）；
-//! * **只认三档**：明亮 / 暗色 / 跟随系统。`gpui-component` 的 `ThemeMode` 只有
-//!   Light/Dark 两档，"跟随系统"是界面的偏好语义 —— 它由
+//! * **只认三档**：浅色 / 深色 / 系统。`gpui-component` 的 `ThemeMode` 只有
+//!   Light/Dark 两档，"系统"（跟随 Windows 外观）是界面的偏好语义 —— 它由
 //!   [`Theme::sync_system_appearance`] 落实，并在窗口外观变化时重新解析。
 
 use std::path::{Path, PathBuf};
@@ -39,9 +39,9 @@ impl ThemePreference {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Light => "明亮",
-            Self::Dark => "暗色",
-            Self::System => "跟随系统",
+            Self::Light => "浅色",
+            Self::Dark => "深色",
+            Self::System => "系统",
         }
     }
 

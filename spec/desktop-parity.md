@@ -4,24 +4,32 @@
 差的那部分怎么处置"。判定口径是**行为等价**，不是像素一致 —— 桌面用 GPUI 现成组件，
 web 用 HeroUI，视觉语汇本就不同（决策见 docs/adr-001-gpui-desktop-form.md）。
 
-范围只到已落地的六屏（环境列表、环境详情、规则集目录、上游代理目录、调试、设置）。
-P2 还欠的屏（活动审计、跨环境对比、HAR 导入会话）在最后一节单独列出。
+范围只到已落地的七屏（环境列表、环境详情、规则集目录、上游代理目录、调试、CA、设置）。
+还欠的屏（活动审计、跨环境对比、HAR 导入会话）在最后一节单独列出。
 
-## 怎么验的（以及为什么不是全自动）
+## 怎么验的：三层，缺一层都不算过
 
-本机 agent 会话被 OS 拒了鼠标注入（`SetCursorPos 拒绝访问 0x80070005`），框架的无头
-UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不可解析。所以证据是
-三件拼起来的，缺一件都不算过：
+| 层 | 手段 | 覆盖什么 | 在哪 |
+|---|---|---|---|
+| **L0** | 无窗口、无 GPU 的界面集成测试（给 `gpui-pre` 与 `gpui-pre-platform` 开 `test-support`；**不走** `gpui-kit/test-support` —— 它的 feature 转发会牵出 cocoa 版本冲突，解析不出来） | 事件路由与状态迁移：真派发鼠标 down/up 点侧栏切屏、真点开主题下拉选档位并断言偏好 + 皮肤 + 落盘三处都变 | `crates/desktop/tests/ui_l0.rs` |
+| **L1** | 屏幕外真窗口 + `Window::render_to_image()`（D3D11 staging 回读，不经屏幕） | 整帧像素（锁屏也可跑；抓早了是加载态，本表以此只做留档） | `crates/desktop/examples/screenshot.rs` |
+| **L2** | 进程外黑盒：UIA 元素树 + 合成点击 + `PrintWindow` 抓图 | 真实进程、真实后端的交互链路与逐屏截图留档 | 工作区脚本 `tools/gpui-ui-accept/uia-drive.ps1`（不入库） |
 
-1. **纯逻辑单测**：展示层派生（`crates/desktop/src/display.rs`，逐字移植自
-   `frontend/src/data.ts`）、请求体组装、名字形状规则；
-2. **实体级测试**：视图构造与"侧栏每一屏都真的落地"这类不变量；
-3. **`PrintWindow(PW_RENDERFULLCONTENT)` 截图**：真实渲染出的画面，人眼对账。
-   颜色数与均值亮度做黑帧/空白自检（一次成功抓取 90+ 色）。
+两条实测出来的定位纪律：
 
-弹窗与二屏列表的截图靠一个**临时探针**（`ENVBOARD_PROBE_SCREEN` /
-`ENVBOARD_PROBE_DIALOG` 环境变量决定首屏与自动开哪个弹窗）拍到 —— 探针**不入库**，
-最终提交的二进制只跑默认路径。走查正是靠它抓到两个"不点就看不见"的缺陷（见下）。
+* 视图里给关键控件注册 `debug_selector`（设置屏的 `theme-select`），L0 用
+  `debug_bounds` 取矩形 —— 不硬编码坐标。侧栏项由组件库绘制、不注册 selector，
+  只能按位置点，坐标集中在 `ui_l0.rs` 的常量里，**改侧栏必须重探**。
+* L2 优先用合成点击而不是 UIA 的 `SelectionItemPattern.Select`：实测 `Select` 作用在
+  侧栏项上会连带影响别的控件（一次 `select "设置"` 把主题偏好改成了浅色），
+  而按 `BoundingRectangle` 换算客户区后 `PostMessage` 的点击与真鼠标等价。
+
+早期版本靠一个**临时探针**（`ENVBOARD_PROBE_SCREEN` / `ENVBOARD_PROBE_DIALOG`
+决定首屏与自动开哪个弹窗）拍图，探针不入库。L0/L2 能真的点之后这条路已经废弃：
+不再需要"为了能看见而改代码"。走查正是靠截图抓到过两个"不点就看不见"的缺陷（见下）。
+
+这三层的地基仍是**纯逻辑单测**：展示层派生（`crates/desktop/src/display.rs`）、
+请求体组装、名字形状规则 —— 它们不碰界面，出问题最快。
 
 ## 逐屏对账
 
@@ -88,14 +96,25 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
 | 导出 HAR / JSONL | 抓包会话导出两条端点 | 未做（随 HAR 导入会话一起属于后续） | **缺** |
 | 清空 / 停止 | 有 | 有（停止 = 停记录 + 清记录，与门面一致） | 等价 |
 
-### 设置（`SettingsView.tsx` ↔ `crates/desktop/src/views/settings.rs`）
+### CA（web 的证书区在 `SettingsView.tsx` 里 ↔ `crates/desktop/src/views/ca.rs`）
+
+桌面把证书**独立成一屏**（侧栏「CA」）：web 里它和主题挤在同一页，而两件事的任务
+完全不同 —— 一个是"确认这是哪张证书并把它交到客户端"，一个是"改本机界面偏好"。
 
 | 能力 | web | 桌面 | 判定 |
 |---|---|---|---|
 | CA 摘要 | `GET /api/ca` | 读组合根交付的 `CaBundle.info`，`DescriptionList` 展示（类型/主体/组织/版本/序列号/生效/到期/签名算法/公钥/SAN/指纹） | 等价 |
-| 证书取用 | 下载 pem + 二维码（手机扫码安装） | 「复制路径」「复制 PEM」两个剪贴板动作 | **弱**：没有二维码（`qrcode` 随 web 出库），手机装证书要自己把文件带过去 |
-| 主题 | 全局一个明暗开关 | **明亮 / 暗色 / 跟随系统** 三档下拉框（`Select`），写入 `<state_dir>/ui.json`，系统切明暗时"跟随系统"实时生效 | 等价偏强（多一档、能持久化） |
+| 证书取用 | 下载 pem + 二维码（手机扫码安装） | 「复制路径」「复制 PEM」两个剪贴板动作 + 三步装证书说明 | **弱**：没有二维码（`qrcode` 随 web 出库），手机装证书要自己把文件带过去 |
+| 有效期 | 展示起止 | 同（起止都列出，**不**自己算剩余天数） | 等价 |
+| 私钥 | 不下发 | 不在任何交付给界面的结构里（`CaBundle` 只有证书 PEM 与摘要） | 等价 |
+
+### 设置（`SettingsView.tsx` ↔ `crates/desktop/src/views/settings.rs`）
+
+| 能力 | web | 桌面 | 判定 |
+|---|---|---|---|
+| 主题 | 全局一个明暗开关 | **浅色 / 深色 / 系统** 三档下拉框（`Select`，在「外观」分组里），写入 `<state_dir>/ui.json`，系统切明暗时"系统"档实时生效 | 等价偏强（多一档、能持久化） |
 | 关于 | 版本 + 能力矩阵 | 版本 / 引擎 / 状态目录 / 端口区间 / 界面偏好路径 / 装配警告 | 等价 |
+| 版面 | 单页卡片 | 两组 `GroupBox` 描边表面 + 「标题与说明在左、控件在右」的设置行（`SettingItem` 几何） | 形态不同 |
 
 ## 已知不等价（下线前必须知道的事）
 1. **反馈通道不同**：web 每个写操作有 toast（`onFeedback`），桌面把失败写进表上方的
@@ -112,7 +131,8 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
    而当前用户证书存储被拒（`拒绝访问 (os error 5)`，与 `crates/engine/tests/` 里
    那 13 条失败同源，`reconcile: cannot start beta` 就是它）。所以调试屏的列表与详情
    是用**合成记录**（一次性探针，提交前已删）验证渲染的，真实抓包链路未在本机跑通。
-   设置屏不受影响：CA 摘要是真实数据（演示状态目录里那张 mitmproxy 形态的共享 CA）。
+   CA 屏不受影响：摘要、指纹与证书路径都是真实数据（演示状态目录里那张 mitmproxy
+   形态的共享 CA）。
 
 ## 走查抓到的缺陷（都已修，记在这里防复发）
 
@@ -127,19 +147,25 @@ UI 测试又依赖 `gpui-kit/test-support` —— 该 feature 在 0.8.0 上不�
 * **`proxy_put` 请求体形状**：`port` 必须是 JSON 数字，`user`/`password` 空串会被
   服务端判成非法凭据（要么成对给、要么都不给）。第一版把两者都发成空字符串，
   等于"新建一个不配鉴权的代理"都会失败。
+* **`GroupBox::fill()` 在暗色主题下看不见**：`group_box` 填充色与窗口底色在本机暗色下
+  几乎同色，设置页 / CA 页的分组边界直接消失（浅色一切正常，所以**只在浅色里看过
+  就会漏掉**）。改用 `outline()`：描边在两个主题里都成立。判据：任何自定义表面都要
+  在浅色与深色各截一张图对账（设计守则「Verify every custom surface in light and dark」）。
 
 ## 证据
 
-截图（本机 release，`PrintWindow`，1493×959 @125% DPI，非黑帧色数 122–269）：
-`target/tmp/p03-demo/shots/` 下 `p08-environments-final.png`（最终入库二进制）、
+截图（本机 `PrintWindow`，1493×959 @125% DPI，非黑帧色数 159–292；L1 另出一张
+1920×1369 离屏整帧）：`target/tmp/p03-demo/shots/` 下 `p08-environments-final.png`、
 `p08-rules.png`、`p08-proxies.png`、`p08-create.png`、`p08-import.png`、
 `p08-text.png`、`p08-put.png`、`p08-edit.png`（后四张与两张目录屏来自含探针的
-同源码构建）；P2 新增 `p2-debug.png`（记录表）、`p2-debug-sheet.png`（请求详情
-Sheet + 页签 + 正文）、`p2-env-light.png`（标题栏已无主题开关）与设置屏三张：
-`p2-theme-select.png`（主题下拉框收起态）、`p2-theme-select-open.png`（展开、勾选
-当前档）、`p2-theme-select-dark.png`（选「暗色」后即时生效并写入 `ui.json`）。
-后两张是靠「向窗口 PostMessage 点击」真正操作出来的，不是摆拍。改控件之前的
-单选框旧图（`p2-settings-*.png`）已作废。
+同源码构建）；`p2-debug.png`（记录表）、`p2-debug-sheet.png`（请求详情 Sheet）、
+`p2-env-light.png`（标题栏已无主题开关）、`p2-theme-select-open.png`（主题下拉展开）；
+CA 独立成屏之后：`p4-settings-light.png`（设置：外观 + 关于两组）、
+`p4-settings-dark.png`（同一屏在「深色」档下的对账）、`p4-ca-dark.png`（CA 屏暗色：
+摘要 / 文件 / 步骤三组）、`p3-ca-scrolled.png`（CA 屏浅色，滚到「如何使用」）、
+`p4-l1-offscreen.png`（L1 离屏整帧，侧栏六项齐）。
+这几张都是 L2 真点出来的（点侧栏、开下拉、点档位），不是摆拍；控件改版前的
+`p2-settings-*.png`（单选框版）与 `p3-settings*.png`（填充表面版）已作废。
 种子数据：三个环境（`beta` 绑 `corp` + `up-lab`）、规则集 `corp` 2 条、
 上游代理 `up-lab`、共享 CA 一张 mitmproxy 形态的根证书。
 
