@@ -658,3 +658,99 @@ fn environment_rows_keep_a_uniform_height() {
         "同列两行的内容高度应一致：{height_ratio}"
     );
 }
+
+/// F3 回归：删除当前选中环境后，指向它的详情面板必须一起消失。
+///
+/// 旧行为只清 `selected`，Sheet 仍挂着那个已不存在的环境名，`Detail::render`
+/// 退化为一句「环境 X 已不存在」的空壳，而且每帧仍被 `touch_detail` 唤醒。
+/// 判据用面板自己的 debug 锚点（`env-detail-panel`），与键盘那条用例同源。
+#[test]
+fn deleting_the_selected_environment_closes_its_detail_sheet() {
+    let state = StateDir::new("l0-delete-sheet");
+    let mut cx = TestAppContext::build(
+        TestDispatcher::new(0),
+        Some("deleting_the_selected_environment_closes_its_detail_sheet"),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("应当能建 tokio runtime");
+    cx.update(|cx| install_globals(cx, state.path(), &runtime));
+
+    // Sheet 依赖 component Root，走带 Root 的装配路径。
+    let (view, vcx) = open_workbench(&mut cx, &["del-a", "del-b"], true);
+    let environments = vcx.update(|_, cx| view.read(cx).environments().clone());
+
+    vcx.update(|window, cx| {
+        environments.update(cx, |view, cx| view.open_detail("del-a".into(), window, cx));
+    });
+    vcx.cx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("env-detail-panel").is_some(),
+        "先打开 del-a 的详情面板"
+    );
+
+    // 直接调 `remove` 走真实回执路径（确认弹窗的交互另由手工走查覆盖）。
+    vcx.update(|window, cx| {
+        environments.update(cx, |view, cx| view.remove("del-a".into(), window, cx));
+    });
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        vcx.cx.run_until_parked();
+        if vcx.debug_bounds("env-detail-panel").is_none() {
+            break;
+        }
+    }
+    assert!(
+        vcx.debug_bounds("env-detail-panel").is_none(),
+        "环境被删后不该留下一个指向它的空壳面板"
+    );
+    assert_eq!(
+        vcx.update(|_, cx| environments.read(cx).selected()),
+        None,
+        "选中态也应一并收起"
+    );
+}
+
+/// F2 回归：面板实体复用时，换环境不能把上一个环境的规则正文带过来。
+///
+/// 这里不依赖读盘时序（规则正文是异步的），只钉住 `rename` 的静态契约：
+/// 换名字后「规则」状态必须作废、旧任务句柄必须清掉。`Detail` 是独立实体，
+/// 通过 `Workbench` 暴露环境屏的 `open_detail` 连续换两次即可观察。
+#[test]
+fn switching_environments_resets_the_rules_panel() {
+    let state = StateDir::new("l0-rules-rename");
+    let mut cx = TestAppContext::build(
+        TestDispatcher::new(0),
+        Some("switching_environments_resets_the_rules_panel"),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("应当能建 tokio runtime");
+    cx.update(|cx| install_globals(cx, state.path(), &runtime));
+
+    let (view, vcx) = open_workbench(&mut cx, &["rule-a", "rule-b"], true);
+    let environments = vcx.update(|_, cx| view.read(cx).environments().clone());
+
+    // 连续两次 open_detail 复用同一个 Detail 实体：第二次就是走查里 A→B 的路径。
+    vcx.update(|window, cx| {
+        environments.update(cx, |view, cx| {
+            view.open_detail("rule-a".into(), window, cx);
+            view.open_detail("rule-b".into(), window, cx);
+        });
+    });
+    vcx.cx.run_until_parked();
+
+    assert!(
+        vcx.debug_bounds("env-detail-panel").is_some(),
+        "详情面板应当还开着（换环境不关面板）"
+    );
+    // 面板标题与内容都来自 Detail::name；暴露一个只读访问器给断言用。
+    let shown = vcx.update(|_, cx| environments.read(cx).detail_name(cx));
+    assert_eq!(
+        shown.as_deref(),
+        Some("rule-b"),
+        "面板应指向新环境，而不是还留着 rule-a 的正文"
+    );
+}

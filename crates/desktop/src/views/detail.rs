@@ -68,7 +68,11 @@ impl DetailTab {
 
 /// 规则页签的取数状态（正文是读盘来的：可能失败，也可能压根没绑）。
 enum RulesState {
+    /// 还没为当前环境发起过读盘（切页签 / 换环境后由加载逻辑接手）。
     Idle,
+    /// 当前环境还没进快照，等下一帧再试。与 Idle 分开是为了不让渲染期
+    /// 每帧重复发起读盘 —— `rules_task` 仍是 `None`。
+    WaitingSnapshot,
     Loading,
     /// 未绑定规则集。
     Unbound,
@@ -115,13 +119,23 @@ impl Detail {
     }
 
     /// 换到另一个环境：表单与规则正文都作废重建（旧环境的脏改动不该跟过来）。
-    pub fn rename(&mut self, name: SharedString, _: &mut Window, cx: &mut Context<Self>) {
-        if self.name != name {
-            self.name = name;
-            self.config = None;
-            self.rules = RulesState::Idle;
-            cx.notify();
+    ///
+    /// 面板实体是复用的（`open_detail` 只 `rename`），所以这里必须**同时**处理
+    /// 在途的规则读盘：旧环境的异步回执会无条件写 `self.rules`，不取消它、也不
+    /// 校验回执属于谁，A 的正文就会落到 B 的面板里。`Task` drop 即取消。
+    pub fn rename(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        if self.name == name {
+            return;
         }
+        self.name = name;
+        self.config = None;
+        self.rules = RulesState::Idle;
+        self.rules_task = None;
+        // 停留在「规则」页签时立即为新环境重读；没停留就等下次切进来。
+        if self.tab == DetailTab::Rules {
+            self.load_rules(window, cx);
+        }
+        cx.notify();
     }
 
     /// 当前要展示的环境：从同一份表数据里按名字取（快照换代后名字仍有效）。
@@ -150,7 +164,11 @@ impl Detail {
 
     /// 读绑定规则的正文（读盘走 tokio，主线程不碰 IO）。
     fn load_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(env) = self.env(cx) else { return };
+        let Some(env) = self.env(cx) else {
+            // 新环境可能还没进这一拍快照：标记等待，别在渲染期反复起任务。
+            self.rules = RulesState::WaitingSnapshot;
+            return;
+        };
         let Some(bound) = env.rules.clone() else {
             self.rules = RulesState::Unbound;
             return;
@@ -163,11 +181,17 @@ impl Detail {
         let admin = cx.global::<Host>().admin().clone();
         let name = bound.clone();
         let subject = bound.clone();
+        // 回执带环境名：面板可能在读盘途中被 `rename` 到别的环境，那份旧正文
+        // 不能落进新面板（`rules_task` 被取消时，已送进主线程的回执仍会到达）。
+        let owner = self.name.clone();
         self.rules_task = Some(hop(
             window,
             cx,
             async move { admin.rules_read(&name) },
             move |this, outcome, _, cx| {
+                if this.name != owner {
+                    return;
+                }
                 this.rules = match outcome {
                     Ok(text) => RulesState::Text(text.into()),
                     Err(error) => RulesState::Failed(Notice::from_error(
@@ -220,6 +244,20 @@ impl Render for Detail {
             let name = SharedString::from(env.name.clone());
             let seed = env.clone();
             self.config = Some(cx.new(|cx| ConfigForm::new(seed, name, parent, window, cx)));
+        }
+        // 上一帧还在等快照，这一帧环境已经进表了 → 回到 Idle，让下面的
+        // 守卫接手重读（不在 render 里直接起任务，保持"一处加载"）。
+        if matches!(self.rules, RulesState::WaitingSnapshot) && self.env(cx).is_some() {
+            self.rules = RulesState::Idle;
+        }
+        // 兜底：`rename` 时新环境可能还没进快照（找不到就标 WaitingSnapshot），
+        // 等下一帧快照到了要再试一次。`rules_task` 守卫保证不会每帧起一次读盘：
+        // 真正起过任务的状态（Loading / Text / Failed）都不该再进这里。
+        if self.tab == DetailTab::Rules
+            && matches!(self.rules, RulesState::Idle)
+            && self.rules_task.is_none()
+        {
+            self.load_rules(window, cx);
         }
         let body = match self.tab {
             DetailTab::Overview => self.render_overview(&env, cx),
@@ -430,6 +468,10 @@ impl Detail {
             other => {
                 let (id, body) = match other {
                     RulesState::Loading => ("detail-rules-loading", "读取规则正文…"),
+                    RulesState::WaitingSnapshot => (
+                        "detail-rules-waiting",
+                        "等待环境进入快照，随后读取规则正文…",
+                    ),
                     RulesState::Unbound => (
                         "detail-rules-unbound",
                         "未绑定规则集：这个环境不改写任何域名。",
@@ -438,7 +480,7 @@ impl Detail {
                         "detail-rules-missing",
                         "绑定了规则名，但账本里没有这份规则 —— 该环境当前不覆盖任何域名。",
                     ),
-                    _ => ("detail-rules-idle", "切换到「规则」页签时读取正文。"),
+                    _ => ("detail-rules-idle", "切换到「规则」页签读取正文。"),
                 };
                 div()
                     .id(id)

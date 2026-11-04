@@ -163,6 +163,13 @@ pub struct EnvTable {
     generation: u64,
     loading: bool,
     error: Option<Notice>,
+    /// 表头排序的当前状态（列下标 + 方向）。
+    ///
+    /// 组件把箭头状态存在 `TableState` 里、通过 `perform_sort` 的参数送下来；
+    /// 这里必须自己留一份：快照是**服务端账本序的全量帧**，每秒覆盖一次
+    /// `rows`，只排当前一帧的话下一拍就退回账本序，而表头箭头还指着刚才那档。
+    /// `ColumnSort` 是 `Copy + PartialEq + Default`（gpui-component 0.8.0）。
+    sort: Option<(usize, ColumnSort)>,
     /// 这条错误来自**取数**还是**写操作**。
     ///
     /// 两种失败的收场方式不同：取数失败在下一次成功快照时自然消失（数据回来了，
@@ -185,17 +192,29 @@ impl EnvTable {
             filter: Filter::All,
             generation: 0,
             loading: true,
+            sort: None,
             error: None,
             error_from_load: false,
             view,
         }
     }
 
-    /// 写入一帧快照；返回**是否真的变了**（没变就不必通知重绘）。
+    /// 写入一帧快照；返回**视图是否需要重绘**（没变就不必通知）。
+    ///
+    /// 「需要重绘」不等于「行数据变了」：取数失败被撤掉、首帧脱掉 loading、
+    /// 在途标记被清理，这些挂在视图层的东西都得靠这一句返回值才能刷新。
     pub fn apply(&mut self, snapshot: Snapshot) -> bool {
         match snapshot {
-            Ok((generation, rows)) => {
-                let changed = self.rows != rows;
+            Ok((generation, mut rows)) => {
+                // 先把新帧按保存的排序键排好，再比较：
+                // * `changed` 必须是**顺序无关**的，否则排过序的行与账本序永远不等，
+                //   每秒都会误报"数据变了"；
+                // * 排序状态由用户点表头时留下，不能让全量快照把它覆盖回去。
+                let sort = self.sort;
+                sort_rows(&mut rows, sort);
+                let rows_changed = self.rows != rows;
+                let error_cleared = self.error_from_load;
+                let loading_changed = self.loading;
                 self.generation = generation;
                 self.rows = rows;
                 self.loading = false;
@@ -205,13 +224,18 @@ impl EnvTable {
                     self.error_from_load = false;
                 }
                 // 已被删除的环境不该继续在途表里挂着（否则名字会被幽灵占住）。
+                let pending_before = self.pending.len();
                 self.pending
                     .retain(|name| self.rows.iter().any(|env| env.name == *name));
+                let pending_changed = self.pending.len() != pending_before;
                 self.rebuild_visible();
-                changed
+                rows_changed || error_cleared || loading_changed || pending_changed
             }
             // 取数失败**不清空已有行**：界面继续显示上一次的事实，另说一句错误。
-            Err(notice) => self.set_error(notice),
+            Err(notice) => {
+                let loading_changed = self.loading;
+                self.set_error(notice) || loading_changed
+            }
         }
     }
 
@@ -392,21 +416,15 @@ impl TableDelegate for EnvTable {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
-        let ascending = match sort {
-            ColumnSort::Default => return,
-            ColumnSort::Ascending => true,
-            ColumnSort::Descending => false,
+        // 先记下这一档，再排当前的 `rows`。此后每一帧全量快照都会由
+        // `apply` 按同一个键重排，排序不会因为轮询而丢失（也不会与表头
+        // 箭头说的方向相反）。
+        self.sort = match sort {
+            ColumnSort::Default => None,
+            _ => Some((col_ix, sort)),
         };
-        // 稳定排序：同键的行保持服务端顺序（账本序），不靠运气。
-        self.rows.sort_by(|left, right| {
-            let left_key = sort_key_of(left, col_ix);
-            let right_key = sort_key_of(right, col_ix);
-            if ascending {
-                left_key.cmp(&right_key)
-            } else {
-                right_key.cmp(&left_key)
-            }
-        });
+        let saved = self.sort;
+        sort_rows(&mut self.rows, saved);
         self.rebuild_visible();
     }
 
@@ -666,6 +684,31 @@ fn sort_key_of(env: &EnvView, col_ix: usize) -> String {
     }
 }
 
+/// 按保存的排序键重排一帧行。
+///
+/// 抽成自由函数是为了让"排序能不能扛住全量快照覆盖"这件事能直接单测 ——
+/// `EnvTable` 需要一个 `WeakEntity<Environments>`，纯逻辑用例里造不出来。
+/// 稳定排序：同键的行保持服务端顺序（账本序），不靠运气。
+fn sort_rows(rows: &mut [EnvView], sort: Option<(usize, ColumnSort)>) {
+    let Some((col_ix, sort)) = sort else {
+        return;
+    };
+    let ascending = match sort {
+        ColumnSort::Default => return,
+        ColumnSort::Ascending => true,
+        ColumnSort::Descending => false,
+    };
+    rows.sort_by(|left, right| {
+        let left_key = sort_key_of(left, col_ix);
+        let right_key = sort_key_of(right, col_ix);
+        if ascending {
+            left_key.cmp(&right_key)
+        } else {
+            right_key.cmp(&left_key)
+        }
+    });
+}
+
 /// 色调 → 主题令牌（**不许出现字面色值**，一切经 `cx.theme()`）。
 fn tone_color(tone: Tone, cx: &App) -> Hsla {
     let theme = cx.theme();
@@ -795,17 +838,23 @@ impl Environments {
         let table = self.table.clone();
         self.poll = cx.spawn_in(window, async move |this, cx| {
             while let Some(frame) = receiver.recv().await {
-                let _ = table.update_in(cx, |state, _, cx| {
-                    if state.delegate_mut().apply(frame) {
+                let changed = table.update_in(cx, |state, _, cx| {
+                    let changed = state.delegate_mut().apply(frame);
+                    if changed {
                         state.refresh(cx);
                     }
+                    changed
                 });
                 // 计数、chips 与错误条都挂在视图这一层，表刷新不等于视图刷新。
-                // `this` 是 WeakEntity：视图可能已随窗口销毁，这里就是要忽略那个 Err。
-                let _ = this.update_in(cx, |this, _, cx| {
-                    this.touch_detail(cx);
-                    cx.notify();
-                });
+                // 但**只在数据真的变了时**才通知：否则每秒一帧会把 tier_counts()
+                // 的四次全量遍历、rebuild_visible() 与详情面板的 notify 全拖进来，
+                // 哪怕快照和上一帧一模一样。
+                if changed.unwrap_or(false) {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.touch_detail(cx);
+                        cx.notify();
+                    });
+                }
             }
         });
     }
@@ -823,6 +872,14 @@ impl Environments {
     /// 当前选中的环境名（只读）。键盘 ↑/↓ 只改这个，不打开面板。
     pub fn selected(&self) -> Option<SharedString> {
         self.selected.clone()
+    }
+
+    /// 详情面板当前指向的环境名（只读）。给无头 UI 测试断言「换环境后面板
+    /// 不再指向旧环境」用；没有面板时为 `None`。
+    pub fn detail_name(&self, cx: &App) -> Option<String> {
+        self.detail
+            .as_ref()
+            .map(|detail| detail.read(cx).name().to_string())
     }
 
     /// 把焦点交给表格。给无头测试用：Tab 顺序在无头上下文里不会自己发生。
@@ -970,9 +1027,20 @@ impl Environments {
                         cx,
                     );
                 }
-                // 删掉的正是被选中的那个 → 选中态自动收起（详情面板跟着关）。
+                // 删掉的正是被选中的那个 → 选中态收起，并把指向它的详情面板
+                // 一并关掉。只清 `selected` 是不够的：面板实体还活着，Sheet
+                // 标题仍是旧环境名，正文只会显示"环境 X 已不存在"的空壳，
+                // 而且 `touch_detail` 还每帧 notify 它。
                 if this.selected.as_deref() == Some(name.as_ref()) {
                     this.selected = None;
+                }
+                if this
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.read(cx).name() == name.as_ref())
+                {
+                    this.detail = None;
+                    window.close_sheet(cx);
                 }
                 this.refresh_now(window, cx);
             },
@@ -1440,5 +1508,63 @@ mod tests {
             sort_key_of(&env("a", "running", Desired::Running), LISTEN),
             "127.0.0.1:16600"
         );
+    }
+
+    /// F1 回归：排序状态必须能扛住服务端每秒一次的全量账本序帧。
+    /// 只有把新帧按保存的键重排之后再比较，`changed` 才不会因为"排过序
+    /// 就与账本序不等"而每帧误报变化（F15 依赖这个返回值收敛重绘）。
+    #[test]
+    fn a_saved_sort_survives_a_full_ledger_ordered_snapshot() {
+        // 账本序：c, a, b（不是按名字排的）。
+        let ledger = || {
+            vec![
+                env("c", "running", Desired::Running),
+                env("a", "running", Desired::Running),
+                env("b", "running", Desired::Running),
+            ]
+        };
+        let sort = Some((NAME, ColumnSort::Ascending));
+
+        // 用户点表头：当前帧按名字排好。
+        let mut shown = ledger();
+        sort_rows(&mut shown, sort);
+        assert_eq!(
+            shown.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+
+        // 下一帧快照仍是账本序：先按同一个键重排，再与当前行比较 ——
+        // 应该判定"没变"，且行序仍是用户选的那档。
+        let mut next_frame = ledger();
+        sort_rows(&mut next_frame, sort);
+        assert_eq!(shown, next_frame, "排序过的帧不该与重排后的新帧比出差异");
+        assert_eq!(
+            next_frame
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"],
+            "新帧不能悄悄退回账本序"
+        );
+
+        // 数据真变了（新增一行）仍要报变化；排序方向也照样生效。
+        let mut changed_frame = next_frame.clone();
+        changed_frame.push(env("d", "stopped", Desired::Stopped));
+        sort_rows(&mut changed_frame, sort);
+        assert_ne!(shown, changed_frame);
+
+        let mut descending = ledger();
+        sort_rows(&mut descending, Some((NAME, ColumnSort::Descending)));
+        assert_eq!(
+            descending
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["c", "b", "a"]
+        );
+        // 清掉排序（回到 Default）不该自己改行序。
+        let mut untouched = ledger();
+        sort_rows(&mut untouched, None);
+        assert_eq!(untouched, ledger());
     }
 }

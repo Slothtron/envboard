@@ -5,7 +5,7 @@
 没有实机跑构建产物，因此每条改动都要配一条自动断言或一次视觉复核才算收口。
 
 计划只动 `crates/desktop/src/views/` 与 `crates/desktop/tests/ui_l0.rs`
-（外加 `CHANGELOG.md`），边界见 §5。
+（外加 `CHANGELOG.md`），边界见本文件 §5。
 
 ---
 
@@ -44,7 +44,8 @@
 
 - Rust **1.98.0**，由 `rust-toolchain.toml` 钉死；`mise.toml` 只管 python，
   不存在「mise 激活 rust」这一步。
-- 快回路：`cargo test -p envboard-desktop`（含 `tests/ui_l0.rs` 的 L0 无窗口断言）。
+- 快回路：`cargo test -p envboard-desktop`（含 `crates/desktop/tests/ui_l0.rs`
+  的 L0 无窗口断言）。
 - 门禁：`python scripts/verify.py all` = policy + rust + contract，其中 rust 层依次跑
   `cargo fmt --all --check` / `clippy --workspace --all-targets --offline -- -D warnings` /
   `check --workspace --all-targets` / `build --workspace` / `test --workspace`。
@@ -243,7 +244,7 @@ F17 会改变 `overlay(false)` 的既有取舍（有意让主列表照常可点�
 - **不碰 `external/`**（第三方只读克隆）。
 - **不处理 README 里 ⏳ 的 P2 剩余**（请求轨迹页 / HAR 导入会话 / 活动审计 /
   跨环境对比）：那是功能缺口，不是走查缺陷，另立计划。
-- 不改根工作区 `AGENTS.md` / `README.md`（根级文件不索引项目文档）。
+- 不改工作区根级规范文件与根级 README（根级文件不索引项目文档）。
 
 ---
 
@@ -251,7 +252,7 @@ F17 会改变 `overlay(false)` 的既有取舍（有意让主列表照常可点�
 
 | 风险 | 判据 / 绕法 |
 |---|---|
-| 64 项未提交改动 | §2.2；全程逐文件 `Edit`，禁止 `checkout` / `reset` / 批量回退 |
+| 64 项未提交改动 | 见本文件 §2.2；全程逐文件 `Edit`，禁止 `checkout` / `reset` / 批量回退 |
 | `ColumnSort` 形态未知（定义在 gpui-kit 依赖里，源码中只有 import） | 批次 1.1 动手前先查依赖源码；必要时退化成两个基础类型字段 |
 | `Task` drop 取消语义（F2 依赖它） | `host.rs:121` 的 `hop` 返回 gpui `Task`，drop 即取消；仍需在改动后验证旧回执不再落地 |
 | `close_sheet` 与详情实体复用的配对（F3） | 全仓目前仅 `debug.rs:1013` 一处调用，第二处要实测 |
@@ -270,9 +271,10 @@ F17 会改变 `overlay(false)` 的既有取舍（有意让主列表照常可点�
 | M3 | 批次 3 完成：成功反馈、候选失败、危险确认、CA 文案一致 |
 | M4 | 批次 4 择项完成 + `verify.py all` 全绿 + 截图重出 + CHANGELOG 更新 |
 
-**动手前待用户裁决的两项**：
+**动手前的两项裁决（2026-11-04 已定）**：
 
-1. **基线处理走 A 还是 B**（§2.2，涉及 git 提交/分支，不代为决定）。
-2. **F11 取「改文案 + 清除按钮」还是「真做到关页即清」**（推荐前者，理由见 3.4）。
+1. **基线处理**：选 A —— 现有改动先固化成基线提交 `e124e57`，再开
+   `fix/ui-ux-review-2026-11` 分支，每批一个 commit。`master` 不动。
+2. **F11**：选「改文案 + 清除按钮」，不引入跨屏状态流。
 
 其余各条按本计划默认方案执行。

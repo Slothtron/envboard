@@ -485,9 +485,7 @@ fn main() {
         std::thread::spawn(move || {
             std::thread::sleep(budget);
             if !finished.load(Ordering::Acquire) {
-                eprintln!(
-                    "idle: 超时（{budget:?} 内没有采完）：窗口停止换帧或被平台节流"
-                );
+                eprintln!("idle: 超时（{budget:?} 内没有采完）：窗口停止换帧或被平台节流");
                 let _ = std::fs::remove_dir_all(&state_dir);
                 std::process::exit(2);
             }
