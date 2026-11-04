@@ -524,12 +524,21 @@ impl RulesCatalog {
             cx,
             async move { admin.rules_delete(&query) },
             move |this, outcome, window, cx| {
-                if let Err(error) = outcome {
-                    let notice = Notice::from_error(Action::DeleteRules, Some(&subject), &error);
-                    table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(notice);
-                        state.refresh(cx);
-                    });
+                match &outcome {
+                    Ok(_) => crate::views::push_success_toast(
+                        Action::DeleteRules,
+                        Some(&subject),
+                        window,
+                        cx,
+                        "rules-write",
+                    ),
+                    Err(error) => {
+                        let notice = Notice::from_error(Action::DeleteRules, Some(&subject), error);
+                        table.update(cx, |state, cx| {
+                            state.delegate_mut().set_error(notice);
+                            state.refresh(cx);
+                        });
+                    }
                 }
                 this.reload(window, cx);
             },
@@ -608,12 +617,21 @@ impl RulesCatalog {
             cx,
             async move { admin.import_rules(&name, &text).map(|_| ()) },
             move |this, outcome, window, cx| {
-                if let Err(error) = outcome {
-                    let notice = Notice::from_error(Action::ImportRules, Some(&subject), &error);
-                    table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(notice);
-                        state.refresh(cx);
-                    });
+                match &outcome {
+                    Ok(_) => crate::views::push_success_toast(
+                        Action::ImportRules,
+                        Some(&subject),
+                        window,
+                        cx,
+                        "rules-write",
+                    ),
+                    Err(error) => {
+                        let notice = Notice::from_error(Action::ImportRules, Some(&subject), error);
+                        table.update(cx, |state, cx| {
+                            state.delegate_mut().set_error(notice);
+                            state.refresh(cx);
+                        });
+                    }
                 }
                 this.reload(window, cx);
             },
@@ -1077,12 +1095,21 @@ impl ProxiesCatalog {
             cx,
             async move { admin.proxy_delete(&query) },
             move |this, outcome, window, cx| {
-                if let Err(error) = outcome {
-                    let notice = Notice::from_error(Action::DeleteProxy, Some(&subject), &error);
-                    table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(notice);
-                        state.refresh(cx);
-                    });
+                match &outcome {
+                    Ok(_) => crate::views::push_success_toast(
+                        Action::DeleteProxy,
+                        Some(&subject),
+                        window,
+                        cx,
+                        "proxies-write",
+                    ),
+                    Err(error) => {
+                        let notice = Notice::from_error(Action::DeleteProxy, Some(&subject), error);
+                        table.update(cx, |state, cx| {
+                            state.delegate_mut().set_error(notice);
+                            state.refresh(cx);
+                        });
+                    }
                 }
                 this.reload(window, cx);
             },
@@ -1236,12 +1263,22 @@ impl ProxiesCatalog {
             cx,
             async move { admin.proxy_put(&body).map(|_| ()) },
             move |this, outcome, window, cx| {
-                if let Err(error) = outcome {
-                    let notice = Notice::from_error(Action::SaveProxy, subject.as_deref(), &error);
-                    table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(notice);
-                        state.refresh(cx);
-                    });
+                match &outcome {
+                    Ok(_) => crate::views::push_success_toast(
+                        Action::SaveProxy,
+                        subject.as_deref(),
+                        window,
+                        cx,
+                        "proxies-write",
+                    ),
+                    Err(error) => {
+                        let notice =
+                            Notice::from_error(Action::SaveProxy, subject.as_deref(), error);
+                        table.update(cx, |state, cx| {
+                            state.delegate_mut().set_error(notice);
+                            state.refresh(cx);
+                        });
+                    }
                 }
                 this.reload(window, cx);
             },

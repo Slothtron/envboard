@@ -86,6 +86,37 @@ impl Action {
             Action::ClearCapture => with(subject, "清空记录", "清空记录"),
         }
     }
+
+    /// 成功回执的短句（`已启动 dev`）。只对**写操作**有意义；读操作返回 `None`，
+    /// 免得"加载环境列表成功"这种没人要的话冒出来。
+    ///
+    /// 与 [`Self::headline`] 同一份动词表：成功和失败是同一件事的两面，
+    /// 各写一份必然漂成"启动 dev 失败" / "dev 已开始"这样的两种说法。
+    pub fn success(self, subject: Option<&str>) -> Option<String> {
+        let verb = match self {
+            Action::CreateEnvironment => "已新建",
+            Action::StartEnvironment => "已启动",
+            Action::StopEnvironment => "已停止",
+            Action::RestartEnvironment => "已重启",
+            Action::DeleteEnvironment => "已删除",
+            Action::SaveEnvironment => "已保存",
+            Action::DeleteRules => "已删除规则集",
+            Action::ImportRules => "已导入规则集",
+            Action::SaveProxy => "已保存上游代理",
+            Action::DeleteProxy => "已删除代理",
+            Action::StartDebug => "已开始调试",
+            Action::StopDebug => "已停止调试",
+            Action::ClearCapture => "已清空记录",
+            // 读操作没有"成功"可报：数据出现在界面上就是回执。
+            Action::LoadSnapshot | Action::LoadRules | Action::ReadRules | Action::LoadProxies => {
+                return None;
+            }
+        };
+        Some(match subject {
+            Some(name) => format!("{verb} {name}"),
+            None => verb.to_string(),
+        })
+    }
 }
 
 /// 错误码 → 中文结论。**每个码都必须有一句**，且与 `spec/errors.md` 的"含义"一列对齐：
@@ -213,6 +244,28 @@ mod tests {
         );
         // 反例：不能拼出「加载环境列表环境」这种把名词重复一遍的句子。
         assert!(!notice.summary.contains("列表环境"));
+    }
+
+    #[test]
+    fn success_lines_cover_writes_and_skip_reads() {
+        // 写操作：动词 + 对象，成功与失败同一份动词表。
+        assert_eq!(
+            Action::StartEnvironment.success(Some("dev")).as_deref(),
+            Some("已启动 dev")
+        );
+        assert_eq!(
+            Action::DeleteEnvironment.success(Some("beta")).as_deref(),
+            Some("已删除 beta")
+        );
+        assert_eq!(
+            Action::ClearCapture.success(None).as_deref(),
+            Some("已清空记录")
+        );
+        // 读操作没有"成功"可报：数据出现就是回执。
+        assert!(Action::LoadSnapshot.success(None).is_none());
+        assert!(Action::LoadRules.success(None).is_none());
+        assert!(Action::ReadRules.success(None).is_none());
+        assert!(Action::LoadProxies.success(None).is_none());
     }
 
     #[test]

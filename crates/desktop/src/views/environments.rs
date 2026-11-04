@@ -970,8 +970,9 @@ impl Environments {
                     state.delegate_mut().set_pending(&name, false);
                     state.refresh(cx);
                 });
-                if let Err(error) = outcome {
-                    this.report(Notice::from_error(action, Some(&name), &error), cx);
+                match &outcome {
+                    Ok(_) => this.toast_success(action, Some(&name), window, cx),
+                    Err(error) => this.report(Notice::from_error(action, Some(&name), error), cx),
                 }
                 this.refresh_now(window, cx);
             },
@@ -1021,11 +1022,12 @@ impl Environments {
                     state.delegate_mut().set_pending(&name, false);
                     state.refresh(cx);
                 });
-                if let Err(error) = outcome {
-                    this.report(
-                        Notice::from_error(Action::DeleteEnvironment, Some(&name), &error),
+                match &outcome {
+                    Ok(_) => this.toast_success(Action::DeleteEnvironment, Some(&name), window, cx),
+                    Err(error) => this.report(
+                        Notice::from_error(Action::DeleteEnvironment, Some(&name), error),
                         cx,
-                    );
+                    ),
                 }
                 // 删掉的正是被选中的那个 → 选中态收起，并把指向它的详情面板
                 // 一并关掉。只清 `selected` 是不够的：面板实体还活着，Sheet
@@ -1122,11 +1124,14 @@ impl Environments {
             cx,
             async move { admin.create(&serde_json::json!({ "name": name })) },
             move |this, outcome, window, cx| {
-                if let Err(error) = outcome {
-                    this.report(
-                        Notice::from_error(Action::CreateEnvironment, Some(&subject), &error),
+                match &outcome {
+                    Ok(_) => {
+                        this.toast_success(Action::CreateEnvironment, Some(&subject), window, cx)
+                    }
+                    Err(error) => this.report(
+                        Notice::from_error(Action::CreateEnvironment, Some(&subject), error),
                         cx,
-                    );
+                    ),
                 }
                 this.refresh_now(window, cx);
             },
@@ -1143,6 +1148,21 @@ impl Environments {
             }
         });
         cx.notify();
+    }
+
+    /// 写操作成功的轻提示（`已启动 dev`）。
+    ///
+    /// 以前成功路径什么都不说：按钮转圈结束、状态列等下一拍（≤1s）才变，
+    /// 期间用户不知道到底成没成。失败仍走 [`Self::report`] 的错误条 ——
+    /// 失败要留住，成功可以自己消失。
+    fn toast_success(
+        &self,
+        action: Action,
+        subject: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::views::push_success_toast(action, subject, window, cx, "env-write");
     }
 
     fn set_pending(&mut self, name: &str, pending: bool, cx: &mut Context<Self>) {

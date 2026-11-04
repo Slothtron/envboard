@@ -558,10 +558,16 @@ pub struct ConfigForm {
     proxy_password: Entity<InputState>,
     public_listen: bool,
     capture: bool,
+    /// 打开表单时的初始值，用来判断"这次保存是不是暴露性/破坏性变更"。
+    seed_public: bool,
+    seed_port: u16,
     rules: Option<SharedString>,
     upstream: Option<SharedString>,
     rule_names: Vec<SharedString>,
     proxy_names: Vec<SharedString>,
+    /// 候选取数失败的原因。以前用 `unwrap_or_default()` 吞成空列表，
+    /// 用户分不清"没有规则集"和"读失败了"，还会以为自己的绑定丢了。
+    options_error: Option<SharedString>,
     advanced_open: bool,
     dirty: bool,
     saving: bool,
@@ -637,6 +643,8 @@ impl ConfigForm {
             proxy_password,
             public_listen: is_public_listen(&env),
             capture: env.capture,
+            seed_public: is_public_listen(&env),
+            seed_port: env.listen.port,
             rules: env.rules.clone().map(SharedString::from),
             upstream: env.upstream.clone().map(SharedString::from),
             rule_names: Vec::new(),
@@ -645,6 +653,7 @@ impl ConfigForm {
             dirty: false,
             saving: false,
             message: None,
+            options_error: None,
             options_task: None,
             save_task: None,
             _subscriptions: subscriptions,
@@ -654,33 +663,41 @@ impl ConfigForm {
     /// 规则集与上游代理的候选：一次 tokio 往返取两份列表（列表短，不建缓存层）。
     fn load_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
+        let current_rules = self.rules.clone();
+        let current_upstream = self.upstream.clone();
         self.options_task = Some(hop(
             window,
             cx,
-            async move {
-                let rules = admin
-                    .rules_list()
-                    .map(|names| {
-                        names
-                            .into_iter()
-                            .map(SharedString::from)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let proxies = admin
-                    .proxy_list()
-                    .map(|views| {
-                        views
+            async move { (admin.rules_list(), admin.proxy_list()) },
+            move |this, (rules, proxies), _, cx| {
+                this.options_error = None;
+                match rules {
+                    Ok(names) => {
+                        this.rule_names = names.into_iter().map(SharedString::from).collect();
+                    }
+                    Err(error) => {
+                        this.rule_names.clear();
+                        this.options_error =
+                            Some(format!("加载规则集候选失败：{}", error.message).into());
+                    }
+                }
+                match proxies {
+                    Ok(views) => {
+                        this.proxy_names = views
                             .into_iter()
                             .map(|proxy| SharedString::from(proxy.name))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                (rules, proxies)
-            },
-            move |this, (rules, proxies), _, cx| {
-                this.rule_names = rules;
-                this.proxy_names = proxies;
+                            .collect();
+                    }
+                    Err(error) => {
+                        this.proxy_names.clear();
+                        this.options_error =
+                            Some(format!("加载上游代理候选失败：{}", error.message).into());
+                    }
+                }
+                // 当前绑定值必须留在候选里：取数失败时列表是空的，菜单里少了它，
+                // 用户会以为绑定被清掉了（按钮上却还显示着它）。
+                ensure_option(&mut this.rule_names, current_rules.as_ref());
+                ensure_option(&mut this.proxy_names, current_upstream.as_ref());
                 cx.notify();
             },
         ));
@@ -772,6 +789,51 @@ impl ConfigForm {
                 return;
             }
         };
+        // 暴露性 / 破坏性变更先确认：概览把"对外服务"当成风险高亮、删除也有
+        // 确认弹窗，同一个应用里不该只有这里可以一键生效。
+        let mut warnings: Vec<&str> = Vec::new();
+        if self.public_listen && !self.seed_public {
+            warnings.push("勾选「对外服务」后，局域网内可直接连到这个代理。");
+        }
+        let port_changed = self
+            .port
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u16>()
+            .is_ok_and(|port| port != self.seed_port);
+        if port_changed {
+            warnings.push("监听端口已修改：已分发出去的代理地址会失效，需要重新复制命令。");
+        }
+        if warnings.is_empty() {
+            self.commit(patch, window, cx);
+            return;
+        }
+        let view = cx.weak_entity();
+        let description = warnings.join("\n");
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let patch = patch.clone();
+            dialog
+                .confirm()
+                .title("保存这些会改变暴露面的设置？")
+                .description(description.clone())
+                .ok_text("保存")
+                .on_ok(move |_, window, cx| {
+                    let patch = patch.clone();
+                    view.update(cx, |form, cx| form.commit(patch, window, cx))
+                        .is_ok()
+                })
+        });
+    }
+
+    /// 真正发出保存（校验与确认都过了）。
+    fn commit(
+        &mut self,
+        patch: serde_json::Map<String, serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let admin = cx.global::<Host>().admin().clone();
         let name = self.env_name.clone();
         let body = serde_json::Value::Object(patch);
@@ -792,6 +854,13 @@ impl ConfigForm {
                     Ok(_) => {
                         this.dirty = false;
                         this.message = None;
+                        crate::views::push_success_toast(
+                            Action::SaveEnvironment,
+                            Some(&name),
+                            window,
+                            cx,
+                            "config-save",
+                        );
                     }
                     Err(error) => {
                         this.message = Some(Notice::from_error(
@@ -822,7 +891,10 @@ impl ConfigForm {
             .current(self)
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| SharedString::from(kind.none_label()));
-        let options = kind.options(self).to_vec();
+        let mut options = kind.options(self).to_vec();
+        // 当前绑定值一定进候选：取数失败时列表是空的，少了它，按钮上显示的名字
+        // 在菜单里找不到对应项，看着像"绑了个不存在的东西"。
+        ensure_option(&mut options, kind.current(self).as_ref());
         let selected = kind.current(self).unwrap_or_default();
 
         Button::new(kind.id())
@@ -911,6 +983,30 @@ impl ConfigForm {
                     .clone()
                     .map(|message| error_banner("config-message", message)),
             )
+            // 候选取数失败：给原因 + 重试。以前失败被吞成空列表，用户误以为
+            // 规则集/代理"不存在"。
+            .children(self.options_error.clone().map(|message| {
+                let this = cx.weak_entity();
+                div()
+                    .id("config-options-error")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(error_banner("config-options-banner", Notice::plain(message)))
+                    .child(
+                        Button::new("config-options-retry")
+                            .xsmall()
+                            .ghost()
+                            .label("重试")
+                            .on_click(move |_, _, cx| {
+                                let _ = this.update(cx, |form, cx| {
+                                    form.options_task = None;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }))
             .child(
                 Field::new()
                     .label("说明")
@@ -1111,6 +1207,16 @@ fn port_hint_text((start, end): (u16, u16)) -> String {
     format!("自动分配区间 {start}–{end}；显式端口 1–65535 均可。停机生效。")
 }
 
+/// 让"当前绑定值"一定出现在候选里（取数失败或列表还没回来时也不缺它）。
+fn ensure_option(options: &mut Vec<SharedString>, current: Option<&SharedString>) {
+    let Some(current) = current.filter(|name| !name.is_empty()) else {
+        return;
+    };
+    if !options.iter().any(|name| name == current) {
+        options.push(current.clone());
+    }
+}
+
 /// 绑定字段的 JSON：空 = 清除绑定（服务端接受 null）。
 fn binding_json(value: &Option<SharedString>) -> serde_json::Value {
     match value {
@@ -1121,7 +1227,7 @@ fn binding_json(value: &Option<SharedString>) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Notice, PickerKind, binding_json, field_changed, port_hint_text};
+    use super::{Notice, PickerKind, binding_json, ensure_option, field_changed, port_hint_text};
     use gpui_kit::SharedString;
 
     #[test]
@@ -1154,6 +1260,28 @@ mod tests {
         assert!(text.contains("17100–17199"), "应带真实区间：{text}");
         assert!(text.contains("1–65535"), "显式端口不受分配区间限制：{text}");
         assert!(!text.contains("16000"), "不许再出现写死的旧区间：{text}");
+    }
+
+    /// F9 回归：候选取数失败时，当前绑定值仍要出现在候选里，
+    /// 否则按钮上显示的名字在菜单里找不到对应项，看着像绑定丢了。
+    #[test]
+    fn the_current_binding_is_always_an_option() {
+        let mut options = vec![SharedString::from("corp")];
+        ensure_option(&mut options, Some(&SharedString::from("corp")));
+        assert_eq!(options.len(), 1, "已在候选里就不该重复");
+
+        ensure_option(&mut options, Some(&SharedString::from("legacy")));
+        assert_eq!(
+            options.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+            ["corp", "legacy"],
+            "缺失的当前绑定要补进候选"
+        );
+
+        // 空绑定（未绑定 / 直连）不往候选里塞空串。
+        let mut empty = Vec::new();
+        ensure_option(&mut empty, Some(&SharedString::from("")));
+        ensure_option(&mut empty, None);
+        assert!(empty.is_empty());
     }
 
     #[test]

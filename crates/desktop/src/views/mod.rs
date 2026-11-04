@@ -19,13 +19,15 @@ use std::rc::Rc;
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Sizable as _;
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{
-    AnyElement, AnyView, App, FontWeight, InteractiveElement as _, IntoElement as _,
+    AnyElement, AnyView, App, Context, FontWeight, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, Styled, TestSupportExt as _, Window, div,
 };
 
-use crate::errors::Notice;
+use crate::errors::{Action, Notice};
 
 /// 截断文本的悬浮提示：把被裁掉的那部分还给用户。
 ///
@@ -78,6 +80,24 @@ impl DialogProblem {
                 .into_any_element(),
         )
     }
+}
+
+/// 写操作成功的轻提示（`已启动 dev`）。
+///
+/// 成功让用户看见"动作发生了"，失败仍走各屏的错误条 —— 失败要留住，成功可以
+/// 自己消失。所有调用点共用同一个 id：连续操作时后一条替换前一条，不会堆一列
+/// 过期的"已启动"。
+pub fn push_success_toast<V: 'static>(
+    action: Action,
+    subject: Option<&str>,
+    window: &mut Window,
+    cx: &mut Context<V>,
+    id: &'static str,
+) {
+    let Some(text) = action.success(subject) else {
+        return;
+    };
+    window.push_notification(Notification::success(text).id1::<V>(id), cx);
 }
 
 /// 错误条：一条带图标的 `Alert`（而不是一行红字）。

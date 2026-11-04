@@ -908,7 +908,16 @@ impl DebugScreen {
             cx,
             async move { admin.start_debug(&body) },
             move |this, outcome, window, cx| match outcome {
-                Ok(view) => this.adopt(view, window, cx),
+                Ok(view) => {
+                    crate::views::push_success_toast(
+                        Action::StartDebug,
+                        Some(&name),
+                        window,
+                        cx,
+                        "debug-write",
+                    );
+                    this.adopt(view, window, cx);
+                }
                 Err(error) => {
                     // 失败不留"已选"的幽灵状态：按钮回到「选择环境」，原因进错误条。
                     this.target = None;
@@ -988,6 +997,13 @@ impl DebugScreen {
                     this.report(Notice::from_error(Action::StopDebug, None, &error), cx);
                     return;
                 }
+                crate::views::push_success_toast(
+                    Action::StopDebug,
+                    None,
+                    window,
+                    cx,
+                    "debug-write",
+                );
                 this.reset_session(window, cx);
             },
         );
@@ -1007,6 +1023,7 @@ impl DebugScreen {
             });
             self.captured = 0;
             self.cursor.store(0, Ordering::Relaxed);
+            crate::views::push_success_toast(Action::ClearCapture, None, window, cx, "debug-write");
             cx.notify();
             return;
         };
@@ -1016,7 +1033,7 @@ impl DebugScreen {
             window,
             cx,
             async move { admin.clear_capture(&target) },
-            move |this, outcome, _, cx| match outcome {
+            move |this, outcome, window, cx| match outcome {
                 Ok(_) => {
                     table.update(cx, |state, cx| {
                         if state.delegate_mut().clear() {
@@ -1026,6 +1043,13 @@ impl DebugScreen {
                     this.captured = 0;
                     // 清空后 request_id 从头计；游标必须跟着归零，否则"下一批"永远空。
                     this.cursor.store(0, Ordering::Relaxed);
+                    crate::views::push_success_toast(
+                        Action::ClearCapture,
+                        Some(&subject),
+                        window,
+                        cx,
+                        "debug-write",
+                    );
                     cx.notify();
                 }
                 Err(error) => this.report(

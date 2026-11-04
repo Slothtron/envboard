@@ -380,13 +380,33 @@ impl CaScreen {
                                         view.copy(key, "已复制叶子私钥", window, cx)
                                     });
                                 })
+                        })
+                        .child({
+                            let this = this.clone();
+                            Button::new("ca-issue-clear")
+                                .xsmall()
+                                .ghost()
+                                .icon(Icon::new(IconName::Close))
+                                .label("清除签发结果")
+                                .tooltip("从内存里清掉这次签发的证书与私钥")
+                                .on_click(move |_, _, cx| {
+                                    let _ = this.update(cx, |view, cx| {
+                                        view.issued = None;
+                                        cx.notify();
+                                    });
+                                })
                         }),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .child("私钥只在这一刻给到剪贴板；屏上不落盘，关掉本页即清空。"),
+                        // 文案必须与实现一致：各屏是常驻实体、切屏不重建，
+                        // 私钥会留到应用退出或手动清除，不存在"关掉本页即清空"。
+                        .child(
+                            "私钥只在这一刻给到剪贴板；屏上不落盘，离开本页也不会自动清掉 \
+                             —— 需要时点「清除签发结果」，应用退出时也会释放。",
+                        ),
                 );
         }
 
