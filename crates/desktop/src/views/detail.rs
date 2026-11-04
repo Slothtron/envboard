@@ -31,8 +31,8 @@ use gpui_kit::component::table::TableState;
 use gpui_kit::component::{Icon, IconName, WindowExt};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Font, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, Window, div, px,
+    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, Task, Window, div, px,
 };
 
 use envboard_protocol::{Desired, EnvView};
@@ -596,33 +596,33 @@ impl ConfigForm {
                 .masked(true)
         });
 
-        // 任一输入变化都算脏（保存钮与"有未保存的改动"提示都看这个）。
+        // 任一输入变化都算脏（保存钮与"有未保存的改动"提示都看这个），同时
+        // 撤掉上一次保存留下的错误：用户已经改了值，那条旧结论不再成立，
+        // 挂在表单上只会让人以为新值也被判过。
+        let on_change = |this: &mut Self, cx: &mut Context<Self>| {
+            if field_changed(&mut this.dirty, &mut this.message) {
+                cx.notify();
+            }
+        };
         let mut subscriptions = Vec::new();
         for state in [&description, &port, &proxy_user, &proxy_password] {
-            subscriptions.push(cx.subscribe_in(state, window, |this, _, event, _, cx| {
-                let InputEvent::Change = event else { return };
-                if !this.dirty {
-                    this.dirty = true;
-                    cx.notify();
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe_in(state, window, move |this, _, event, _, cx| {
+                    let InputEvent::Change = event else { return };
+                    on_change(this, cx);
+                }),
+            );
         }
-        subscriptions.push(
-            cx.subscribe_in(&insecure_hosts, window, |this, _, event, _, cx| {
+        subscriptions.push(cx.subscribe_in(&insecure_hosts, window, {
+            move |this, _, event, _, cx| {
                 let InputEvent::Change = event else { return };
-                if !this.dirty {
-                    this.dirty = true;
-                    cx.notify();
-                }
-            }),
-        );
+                on_change(this, cx);
+            }
+        }));
         subscriptions.push(
-            cx.subscribe_in(&mitm_hosts, window, |this, _, event, _, cx| {
+            cx.subscribe_in(&mitm_hosts, window, move |this, _, event, _, cx| {
                 let InputEvent::Change = event else { return };
-                if !this.dirty {
-                    this.dirty = true;
-                    cx.notify();
-                }
+                on_change(this, cx);
             }),
         );
 
@@ -874,7 +874,10 @@ impl ConfigForm {
         let saving = self.saving;
         let dirty = self.dirty;
         let owner = cx.weak_entity();
-        let hint = |text: &'static str| div().text_xs().text_color(muted).child(text);
+        let hint = |text: &str| hint_line(SharedString::from(text.to_string()), muted);
+        // 自动分配区间来自组合根（`app.rs` 侧栏页脚读的是同一个值）；显式端口
+        // 不受它约束，服务端按 u16 判 1–65535。写死一个区间会与三处判据矛盾。
+        let port_hint = port_hint_text(cx.global::<Host>().port_range());
 
         div()
             .id("config-form")
@@ -883,6 +886,31 @@ impl ConfigForm {
             .gap_3()
             .w_full()
             .max_w(px(760.))
+            // 键盘提交：填完配置不必切到鼠标点「保存」。只认 Ctrl+Enter ——
+            // 表单里有 Textarea，裸 Enter 属于正文换行；Esc 也刻意不绑：
+            // 状态栏「回根焦点」、搜索框「清空」、Sheet「关闭」三层语义已经叠加。
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let mods = &event.keystroke.modifiers;
+                if event.keystroke.key.as_str() != "enter"
+                    || !mods.control
+                    || mods.alt
+                    || mods.platform
+                    || mods.shift
+                {
+                    return;
+                }
+                if this.dirty && !this.saving {
+                    this.save(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            // 错误条放在表单最上面：端口字段在顶部，错误留在底部要隔着整棵
+            // 表单才能读到（保存失败时视线还在按钮附近，更不该回滚到页首找原因）。
+            .children(
+                self.message
+                    .clone()
+                    .map(|message| error_banner("config-message", message)),
+            )
             .child(
                 Field::new()
                     .label("说明")
@@ -893,7 +921,7 @@ impl ConfigForm {
                 Field::new()
                     .label("监听端口")
                     .child(Input::new(&self.port).w(px(160.)))
-                    .child(hint("范围 16000–16999。停机生效。")),
+                    .child(hint(&port_hint)),
             )
             .child(
                 Field::new()
@@ -999,11 +1027,6 @@ impl ConfigForm {
                             ),
                     ),
             )
-            .children(
-                self.message
-                    .clone()
-                    .map(|message| error_banner("config-message", message)),
-            )
             .child(
                 div()
                     .flex()
@@ -1052,6 +1075,42 @@ impl ConfigForm {
     }
 }
 
+/// 表单里的一行说明文字：次要色、小字号。
+///
+/// 抽成自由函数是为了让 `render_body` 里的局部 `hint` 闭包能吃 `&str`
+/// （闭包参数不能写 `impl Trait`），同时端口提示那条动态文案也能复用它。
+fn hint_line(text: SharedString, muted: gpui_kit::Hsla) -> AnyElement {
+    div()
+        .text_xs()
+        .text_color(muted)
+        .child(text)
+        .into_any_element()
+}
+
+/// 表单里的一次输入变化：置脏，并撤掉上一次保存的错误。
+///
+/// 抽成自由函数是为了能单测"改值必须清旧错误"这条回归 —— 闭包里只有状态迁移，
+/// 没有 IO、没有 UI。
+fn field_changed(dirty: &mut bool, message: &mut Option<Notice>) -> bool {
+    let mut changed = false;
+    if !*dirty {
+        *dirty = true;
+        changed = true;
+    }
+    if message.take().is_some() {
+        changed = true;
+    }
+    changed
+}
+
+/// 端口字段的说明文案。
+///
+/// 区间来自组合根，**不许写死字面量**：写死会与侧栏页脚动态显示的区间、
+/// 以及服务端 1–65535 的显式端口校验三处互相矛盾（走查 F4）。
+fn port_hint_text((start, end): (u16, u16)) -> String {
+    format!("自动分配区间 {start}–{end}；显式端口 1–65535 均可。停机生效。")
+}
+
 /// 绑定字段的 JSON：空 = 清除绑定（服务端接受 null）。
 fn binding_json(value: &Option<SharedString>) -> serde_json::Value {
     match value {
@@ -1062,7 +1121,7 @@ fn binding_json(value: &Option<SharedString>) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{PickerKind, binding_json};
+    use super::{Notice, PickerKind, binding_json, field_changed, port_hint_text};
     use gpui_kit::SharedString;
 
     #[test]
@@ -1070,6 +1129,31 @@ mod tests {
         // 选择器的"空"必须与概览/表格里的说法一致，否则同一件事有两种文案。
         assert_eq!(PickerKind::Rules.none_label(), "未绑定");
         assert_eq!(PickerKind::Upstream.none_label(), "直连");
+    }
+
+    /// F6 回归：改一个值必须把上一次保存留下的错误撤掉，否则用户会以为
+    /// 新值也被服务端判过了。
+    #[test]
+    fn editing_a_field_clears_the_previous_save_error() {
+        let mut dirty = false;
+        let mut message = Some(Notice::plain("端口超出范围（1–65535）。"));
+        assert!(field_changed(&mut dirty, &mut message), "应报告状态变了");
+        assert!(dirty, "改值即置脏");
+        assert!(message.is_none(), "旧错误必须撤掉");
+        // 再改一次：已经是脏的、也没有错误，不该反复触发重绘。
+        assert!(
+            !field_changed(&mut dirty, &mut message),
+            "没有新变化就不该重绘"
+        );
+    }
+
+    /// F4 回归：端口提示必须来自组合根给的区间，不能写死。
+    #[test]
+    fn port_hint_uses_the_configured_range_and_allows_explicit_ports() {
+        let text = port_hint_text((17_100, 17_199));
+        assert!(text.contains("17100–17199"), "应带真实区间：{text}");
+        assert!(text.contains("1–65535"), "显式端口不受分配区间限制：{text}");
+        assert!(!text.contains("16000"), "不许再出现写死的旧区间：{text}");
     }
 
     #[test]

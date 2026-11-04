@@ -39,7 +39,9 @@ use envboard_protocol::ProxyView;
 use crate::errors::{Action, Notice};
 use crate::host::{Host, hop};
 use crate::views::environments::EnvTable;
-use crate::views::{empty_state, empty_state_with_action, error_banner, text_tooltip};
+use crate::views::{
+    DialogProblem, empty_state, empty_state_with_action, error_banner, text_tooltip,
+};
 
 // --------------------------------------------------------------------------- #
 // 规则集目录
@@ -542,10 +544,12 @@ impl RulesCatalog {
             cx.new(|cx| InputState::new(window, cx).placeholder("小写字母开头，限 a-z 0-9 _ -"));
         let text_input =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("127.0.0.1 api.example.com"));
+        let problem = DialogProblem::default();
         window.open_dialog(cx, move |dialog, _window, cx| {
             let view = view.clone();
             let name_input = name_input.clone();
             let text_input = text_input.clone();
+            let problem = problem.clone();
             dialog
                 .title("导入规则集")
                 .child(
@@ -565,6 +569,7 @@ impl RulesCatalog {
                             "每行一条 `ip 域名`；导入即覆盖同名规则集，解析与拒绝由服务端裁决。",
                         ),
                 )
+                .children(problem.render("rules-import-error", cx))
                 .footer(
                     DialogFooter::new()
                         .child(DialogClose::new().trigger(|button| button.label("取消")))
@@ -576,12 +581,20 @@ impl RulesCatalog {
                 .on_ok(move |_, window, cx| {
                     let name = name_input.read(cx).value().trim().to_string();
                     let text = text_input.read(cx).value().to_string();
-                    // 形状先拦一道（省一次往返），裁决仍在服务端。
-                    if name.is_empty() || !valid_rule_name(&name) || text.trim().is_empty() {
-                        return false;
+                    // 形状先拦一道（省一次往返），裁决仍在服务端；每种拒绝都要
+                    // 说清是哪一个字段，不能只让弹窗静默地不关。
+                    if name.is_empty() {
+                        return problem.reject(window, "请填写规则集名字。");
+                    }
+                    if !valid_rule_name(&name) {
+                        return problem
+                            .reject(window, "规则集名不合法：小写字母开头，只允许 a-z 0-9 _ -");
+                    }
+                    if text.trim().is_empty() {
+                        return problem.reject(window, "hosts 正文不能为空，每行一条「ip 域名」。");
                     }
                     let _ = view.update(cx, |view, cx| view.import(name, text, window, cx));
-                    true
+                    problem.accept()
                 })
         });
     }
@@ -1125,6 +1138,7 @@ impl ProxiesCatalog {
         } else {
             "鉴权两栏必须同时填写，都不能含「:」或空白。留空表示不配置鉴权。凭据只进不出。"
         };
+        let problem = DialogProblem::default();
         window.open_dialog(cx, move |dialog, _window, cx| {
             let view = view.clone();
             let (name, host, port, user, password) = (
@@ -1134,6 +1148,7 @@ impl ProxiesCatalog {
                 user.clone(),
                 password.clone(),
             );
+            let problem = problem.clone();
             dialog
                 .title(title.clone())
                 .child(Field::new().label("名字").child(Input::new(&name).w_full()))
@@ -1163,6 +1178,7 @@ impl ProxiesCatalog {
                         .text_color(cx.theme().muted_foreground)
                         .child(note),
                 )
+                .children(problem.render("proxy-put-error", cx))
                 .footer(
                     DialogFooter::new()
                         .child(DialogClose::new().trigger(|button| button.label("取消")))
@@ -1180,17 +1196,29 @@ impl ProxiesCatalog {
                     let port = port.read(cx).value().trim().to_string();
                     let user = user.read(cx).value().to_string();
                     let password = password.read(cx).value().to_string();
-                    // 名字/地址/端口缺一不提交；鉴权的"半填"交给服务端报，
-                    // 因为它的错误文案已经把 all-or-nothing 说清楚了。
-                    if name.is_empty() || host.is_empty() || port.is_empty() {
-                        return false;
+                    // 逐字段说清是哪一项不合格；尤其"凭据半填"过去会被
+                    // `build_proxy_body` 静默丢掉两栏，用户以为保存成功了。
+                    if name.is_empty() {
+                        return problem.reject(window, "请填写代理名字。");
+                    }
+                    if host.is_empty() {
+                        return problem.reject(window, "请填写代理地址（host）。");
+                    }
+                    if port.is_empty() {
+                        return problem.reject(window, "请填写代理端口。");
                     }
                     let Ok(port) = port.parse::<u16>() else {
-                        return false;
+                        return problem.reject(window, "端口必须是 1–65535 的整数。");
                     };
+                    if user.is_empty() != password.is_empty() {
+                        return problem.reject(
+                            window,
+                            "代理鉴权的用户名与密码必须同时填写；只填一栏会被忽略。",
+                        );
+                    }
                     let body = build_proxy_body(&name, &host, port, &user, &password);
                     let _ = view.update(cx, |view, cx| view.put(body, window, cx));
-                    true
+                    problem.accept()
                 })
         });
     }

@@ -33,6 +33,7 @@ use gpui_kit::{
 use envboard_host::{LeafPem, StorePresence};
 
 use crate::host::Host;
+use crate::views::DialogProblem;
 
 /// CA 屏。
 pub struct CaScreen {
@@ -489,9 +490,11 @@ impl CaScreen {
         let view: WeakEntity<Self> = cx.weak_entity();
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder("api.example.com 或 127.0.0.1"));
+        let problem = DialogProblem::default();
         window.open_dialog(cx, move |dialog, _window, cx| {
             let view = view.clone();
             let input = input.clone();
+            let problem = problem.clone();
             dialog
                 .title("按域名签发")
                 .child(
@@ -507,6 +510,7 @@ impl CaScreen {
                             "签一张服务端用途的叶子证书（CN 与 SAN 都是它）。IP 字面量走 iPAddress。",
                         ),
                 )
+                .children(problem.render("ca-issue-error", cx))
                 .footer(
                     DialogFooter::new()
                         .child(DialogClose::new().trigger(|button| button.label("取消")))
@@ -518,10 +522,10 @@ impl CaScreen {
                 .on_ok(move |_, window, cx| {
                     let host = input.read(cx).value().trim().to_string();
                     if host.is_empty() {
-                        return false;
+                        return problem.reject(window, "请填写要签发的域名或 IP。");
                     }
                     let _ = view.update(cx, |view, cx| view.issue(host, window, cx));
-                    true
+                    problem.accept()
                 })
         });
     }

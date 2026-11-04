@@ -898,6 +898,8 @@ impl DebugScreen {
     }
 
     /// 开始 / 切换调试会话。切换即换代（服务端保证：停旧 + 清旧 + 开新）。
+    ///
+    /// 这里只负责真正发起；"切走会丢掉已抓记录"的确认在 [`Self::request_start`]。
     fn start(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
         let body = serde_json::json!({ "env": name });
@@ -918,6 +920,36 @@ impl DebugScreen {
             },
         );
         self.inflight.push(task);
+    }
+
+    /// 切换目标前的把关：已抓到的记录会被换代清掉，先问一句。
+    ///
+    /// 只有"已有会话 + 换了目标 + 真有记录"三个条件同时成立才弹确认；
+    /// 首次开始、或重选同一个目标（那只是重开一个空会话）都不烦人。
+    fn request_start(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.table.read(cx).delegate().total();
+        let switching = self.session_id.is_some() && self.target.as_deref() != Some(name.as_str());
+        if !switching || rows == 0 {
+            self.start(name, window, cx);
+            return;
+        }
+        let view = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let name = name.clone();
+            dialog
+                .confirm()
+                .title(format!("切换到 {name} 调试？"))
+                .description(format!(
+                    "当前会话已捕获 {rows} 条记录；切换目标会停掉旧会话并清空这些记录。此操作不可撤销。"
+                ))
+                .ok_text("切换")
+                .on_ok(move |_, window, cx| {
+                    let name = name.clone();
+                    view.update(cx, |view, cx| view.start(name, window, cx))
+                        .is_ok()
+                })
+        });
     }
 
     /// 把服务端给的会话视图装进界面（开始/切换后的第一帧全量）。
@@ -963,11 +995,22 @@ impl DebugScreen {
     }
 
     fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let table = self.table.clone();
         let Some(target) = self.target.clone() else {
+            // 会话已失效（目标停了 / 会话被拿走）但记录还留着：服务端那份没得清，
+            // 本地这一份仍要能清掉 —— 否则它们会一直挂在表里，而按钮又因为
+            // "没有会话"被禁用，等于把用户困住。
+            table.update(cx, |state, cx| {
+                if state.delegate_mut().clear() {
+                    state.refresh(cx);
+                }
+            });
+            self.captured = 0;
+            self.cursor.store(0, Ordering::Relaxed);
+            cx.notify();
             return;
         };
         let admin = cx.global::<Host>().admin().clone();
-        let table = self.table.clone();
         let subject = target.clone();
         let task = hop(
             window,
@@ -1089,7 +1132,10 @@ impl DebugScreen {
     }
 
     /// 会话状态行：有会话说会话，没会话说"选一个环境"。
-    fn status_line(&self) -> String {
+    ///
+    /// `rows` 是表里还留着的记录数：会话失效后记录仍可查看，这时说"未开始"
+    /// 会让人以为那些记录不存在了。
+    fn status_line(&self, rows: usize) -> String {
         match (&self.target, self.session_id) {
             (Some(target), Some(id)) => {
                 let started = self
@@ -1103,6 +1149,9 @@ impl DebugScreen {
                 )
             }
             (Some(_), None) => "会话未建立：目标环境还没起来".to_string(),
+            (None, _) if rows > 0 => {
+                format!("会话已失效：{rows} 条记录仍在，可清空后重选环境")
+            }
             (None, _) => "未开始：选一个运行中的环境".to_string(),
         }
     }
@@ -1300,6 +1349,10 @@ impl DebugScreen {
         let has_live = targets.iter().any(|(_, live)| *live);
         let current = self.target.clone();
         let has_session = self.session_id.is_some();
+        // 清空按钮看的是"有没有记录"，不是"有没有会话"：会话失效后记录仍留在
+        // 表里，禁用按钮会把它们困在那里。
+        let record_count = self.table.read(cx).delegate().total();
+        let has_records = record_count > 0;
 
         let picker = {
             let this = view.clone();
@@ -1339,8 +1392,9 @@ impl DebugScreen {
                                 .disabled(!live)
                                 .on_click(move |_, window, cx| {
                                     let target = target.clone();
-                                    let _ =
-                                        this.update(cx, |view, cx| view.start(target, window, cx));
+                                    let _ = this.update(cx, |view, cx| {
+                                        view.request_start(target, window, cx)
+                                    });
                                 }),
                         );
                     }
@@ -1366,7 +1420,7 @@ impl DebugScreen {
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(SharedString::from(self.status_line())),
+                    .child(SharedString::from(self.status_line(record_count))),
             )
             .child(div().flex_1())
             .child({
@@ -1397,7 +1451,7 @@ impl DebugScreen {
                     .ghost()
                     .label("清空记录")
                     .tooltip("清空当前会话已捕获的记录")
-                    .disabled(!has_session)
+                    .disabled(!has_records)
                     .on_click({
                         let this = view.clone();
                         move |_, window, cx| {
@@ -1557,6 +1611,31 @@ mod tests {
         // 1xx 与 600+ 落在「其他」，不被悄悄并入任何一档。
         assert_eq!(StatusClass::of(101), StatusClass::Other);
         assert_eq!(StatusClass::of(700), StatusClass::Other);
+    }
+
+    /// F7 回归：会话失效（没有 target）时，本地记录仍要能被清掉。
+    ///
+    /// 这不是纯 UI 便利：会话消失后服务端那份没得清，界面这份是唯一副本；
+    /// 清不掉 + 按钮被禁用 = 记录被困在表里。
+    #[test]
+    fn records_can_be_cleared_without_a_live_session() {
+        let mut table = RecordsTable::new();
+        table.append([
+            record(1, "GET", "a.test", 200),
+            record(2, "POST", "b.test", 500),
+        ]);
+        // 先叠一个筛选，确认清空会一并把筛选条件收掉（选项已指向空结果）。
+        assert!(table.set_filter(RecordFilter {
+            method: Some("GET".into()),
+            ..RecordFilter::default()
+        }));
+        assert_eq!(table.visible_count(), 1);
+
+        assert!(table.clear(), "有记录时清空应报告变化");
+        assert_eq!(table.total(), 0);
+        assert_eq!(table.visible_count(), 0);
+        assert!(table.filter().is_empty(), "记录没了，筛选条件也该归零");
+        assert!(!table.clear(), "已经空了，再清不该报告变化");
     }
 
     #[test]

@@ -14,12 +14,15 @@ pub use detail::Detail;
 pub use environments::Environments;
 pub use settings::Settings;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{
     AnyElement, AnyView, App, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, Styled, Window, div,
+    ParentElement as _, SharedString, Styled, TestSupportExt as _, Window, div,
 };
 
 use crate::errors::Notice;
@@ -34,6 +37,47 @@ pub fn text_tooltip(
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text = text.into();
     move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+}
+
+/// 模态弹窗里的校验原因。
+///
+/// 弹窗是模态的，表格上方那条错误条会被它挡住；校验失败又必须让弹窗**开着**，
+/// 所以原因只能写在弹窗内部。状态用 `Rc<RefCell<…>>` 是因为弹窗内容闭包与
+/// `on_ok` 回调各持一份，且 `on_ok` 里要写完原因再让弹窗层重画一帧。
+///
+/// 一个应用里同类表单只有一种"点了没反应"是不可接受的：新建环境最早用了这套
+/// 写法（见 `views/environments.rs` 的注释），这里抽出来给规则导入、上游代理
+/// 表单、按域名签发共用。
+#[derive(Clone, Default)]
+pub struct DialogProblem(Rc<RefCell<Option<SharedString>>>);
+
+impl DialogProblem {
+    /// 校验不通过：记下原因、让弹窗层重画一帧、`on_ok` 返回 `false`（不关闭）。
+    pub fn reject(&self, window: &mut Window, reason: impl Into<SharedString>) -> bool {
+        *self.0.borrow_mut() = Some(reason.into());
+        window.refresh();
+        false
+    }
+
+    /// 校验通过：清掉上一次的原因，`on_ok` 返回 `true`（关闭弹窗）。
+    pub fn accept(&self) -> bool {
+        *self.0.borrow_mut() = None;
+        true
+    }
+
+    /// 渲染错误行（只在有问题时出现）。要挂在弹窗的 `children()` 上。
+    pub fn render(&self, id: &'static str, cx: &App) -> Option<AnyElement> {
+        let message = self.0.borrow().clone()?;
+        Some(
+            div()
+                .id(id)
+                .test_support()
+                .text_xs()
+                .text_color(cx.theme().danger)
+                .child(message)
+                .into_any_element(),
+        )
+    }
 }
 
 /// 错误条：一条带图标的 `Alert`（而不是一行红字）。
@@ -98,4 +142,21 @@ pub fn empty_state_with_action(
         )
         .children(action)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DialogProblem;
+
+    /// `accept()` 必须清掉上一次拒绝留下的原因：同一个弹窗二次提交时，
+    /// 不能让旧错误继续挂在表单上。
+    #[test]
+    fn accepting_a_dialog_problem_clears_the_previous_reason() {
+        let problem = DialogProblem::default();
+        assert!(problem.0.borrow().is_none(), "默认没有原因");
+        // reject 需要 Window 做 refresh，这里直接写内部状态验证 accept 的收尾。
+        *problem.0.borrow_mut() = Some("名字不合法".into());
+        assert!(problem.accept(), "accept 返回 true 表示可以关闭弹窗");
+        assert!(problem.0.borrow().is_none(), "接受后原因必须清空");
+    }
 }

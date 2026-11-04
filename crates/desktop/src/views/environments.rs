@@ -11,10 +11,8 @@
 //! 补一次快照 —— 用户不该等下一拍才看到按钮灰下去。在途的环境名记在 delegate 里
 //! （按钮转圈 + 禁用，防连点），所以"哪一行在等回执"也只有一处真相。
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,7 +43,9 @@ use crate::display::{Tone, health_label, health_tone, listen_address, needs_atte
 use crate::errors::{Action, Notice};
 use crate::host::{Host, hop};
 use crate::views::detail::Detail;
-use crate::views::{empty_state, empty_state_with_action, error_banner, text_tooltip};
+use crate::views::{
+    DialogProblem, empty_state, empty_state_with_action, error_banner, text_tooltip,
+};
 
 /// 一帧快照：`(账本代次, 全量环境视图)` —— 与 `AdminService::snapshot()` 同形。
 ///
@@ -1058,14 +1058,12 @@ impl Environments {
         });
         // 校验失败的原因写在**弹窗里**：弹窗是模态，表格上方的错误条被它挡住，
         // 写到那儿等于没人看见（这条是走查抓出来的真缺陷）。
-        let problem: Rc<RefCell<Option<SharedString>>> = Rc::new(RefCell::new(None));
+        let problem = DialogProblem::default();
         window.open_dialog(cx, move |dialog, _, cx| {
             let view = view.clone();
             let name_input = name_input.clone();
             let problem = problem.clone();
             let hint_color = cx.theme().muted_foreground;
-            // 先把可能存在的校验原因取出来（借用在表达式内结束，不与闭包抢 cx）。
-            let invalid = problem.borrow().clone();
             dialog
                 .title("新建环境")
                 .child(
@@ -1091,15 +1089,7 @@ impl Environments {
                         ),
                 )
                 // 校验失败时的原因行（只在有问题时出现）。
-                .children(invalid.map(|message| {
-                    div()
-                        .id("create-error")
-                        .test_support()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(message)
-                        .into_any_element()
-                }))
+                .children(problem.render("create-error", cx))
                 // 普通 Dialog 不画按钮：页脚不给，弹窗就只有「关闭」，谁都提交不了。
                 .footer(
                     DialogFooter::new()
@@ -1113,15 +1103,11 @@ impl Environments {
                     let raw = name_input.read(cx).value().to_string();
                     if !valid_env_name(&raw) {
                         // 校验不过就让弹窗开着，并把原因写进弹窗里的错误行（不静默关）。
-                        *problem.borrow_mut() =
-                            Some("环境名不合法：小写字母开头，只允许 a-z 0-9 _ -".into());
-                        // 弹窗层要重画一帧才会带上这行错误。
-                        window.refresh();
-                        return false;
+                        return problem
+                            .reject(window, "环境名不合法：小写字母开头，只允许 a-z 0-9 _ -");
                     }
-                    *problem.borrow_mut() = None;
                     let _ = view.update(cx, |view, cx| view.create(raw, window, cx));
-                    true
+                    problem.accept()
                 })
         });
     }
