@@ -48,6 +48,8 @@ pub struct EnvView {
     pub upstream: Option<String>,
     /// 按域名放宽上游校验的完整域名清单（不是凭据，可以回显）。
     pub insecure_hosts: Vec<String>,
+    /// 只对这些域名做 TLS 解密（空 = 全部解密；名单外的 CONNECT 直通）。
+    pub mitm_hosts: Vec<String>,
     pub description: String,
     pub desired: Desired,
     /// 健康字面量（starting / running / failed / stopped / port_conflict …）。
@@ -157,6 +159,9 @@ pub struct EnvCreateReq {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insecure_hosts: Option<Vec<String>>,
+    /// MITM 白名单（空/缺省 = 全部解密）。与 `insecure_hosts` 同款：整体替换。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitm_hosts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,6 +226,9 @@ pub struct EnvPatchReq {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insecure_hosts: Option<Vec<String>>,
+    /// MITM 白名单（空/缺省 = 全部解密）。与 `insecure_hosts` 同款：整体替换。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitm_hosts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,6 +379,7 @@ mod tests {
             rules: Some("stage".into()),
             upstream: None,
             insecure_hosts: vec!["api.example.com".into()],
+            mitm_hosts: vec!["api.example.com".into()],
             description: "开发".into(),
             desired: Desired::Running,
             health: "running".into(),
@@ -388,6 +397,7 @@ mod tests {
             "rules",
             "upstream",
             "insecure_hosts",
+            "mitm_hosts",
             "description",
             "desired",
             "health",
@@ -440,7 +450,8 @@ mod tests {
         let full: EnvCreateReq = serde_json::from_str(
             r#"{"name":"dev","listen":{"host":"127.0.0.1","port":16000},
                "rules":"beta","upstream":null,"description":"开发",
-               "insecure_hosts":["api.example.com"],"capture":true,
+               "insecure_hosts":["api.example.com"],"mitm_hosts":["api.example.com"],
+               "capture":true,
                "proxy_user":"u","proxy_password":"p"}"#,
         )
         .unwrap();

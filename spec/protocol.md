@@ -33,6 +33,7 @@ envboard 的界面只有一个形态（桌面 GUI），但它消费的词汇**�
 ```json
 {"name": "dev", "listen": {"host": "127.0.0.1", "port": 9000},
  "rules": "stage", "upstream": null, "insecure_hosts": ["api.example.com"],
+ "mitm_hosts": [],
  "description": "…", "desired": "running", "health": "running",
  "health_reason": null, "rules_count": 3, "rules_missing": false,
  "proxy_command": "export https_proxy=http://…", "proxy_auth_enabled": false,

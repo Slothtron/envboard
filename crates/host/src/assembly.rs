@@ -7,23 +7,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use envboard_admin::AdminService;
+use envboard_engine::ca::CaStore;
 use envboard_engine::{CaOutcome, EngineBackend, Error, ErrorCode, ProxyEngine, SharedCa};
 use envboard_manager::infra::{RealFiles, SocketPortProbe, StderrLogger, SystemClock};
 use envboard_manager::{JsonFileStateRepo, Manager, ManagerConfig, StateRepo};
 
+use crate::ca_control::CaControl;
 use crate::options::HostOptions;
-
-/// 共享 CA 的**公开面**：证书摘要等信息 + 证书 PEM。
-///
-/// 私钥不进这里，也就永远到不了任何界面形态与传输面（原 `envboard-web` 的
-/// `CaAssets` 承载同一对字段；类型留在 host 是为了让 host 不依赖任何传输 crate）。
-#[derive(Debug, Clone, Default)]
-pub struct CaBundle {
-    /// CA 信息的 JSON 视图；尚未物化时为 `None`。
-    pub info: Option<serde_json::Value>,
-    /// CA 证书 PEM 字节（下载/安装链接用）。
-    pub pem: Arc<Vec<u8>>,
-}
 
 /// 装配完成的宿主：界面形态拿到它之后只需要 [`Prepared::admin`] 与 [`Prepared::startup`]。
 ///
@@ -33,13 +23,22 @@ pub struct Prepared {
     pub(crate) manager: Arc<Manager>,
     /// 交给界面形态的管理门面（唯一的使用面）。
     pub admin: Arc<AdminService>,
-    /// 共享 CA 公开面（设置页展示与下载用）。
-    pub ca: CaBundle,
+    /// 共享 CA 的操作面（设置页：摘要、重新签发、按域名签发、信任库探测）。
+    ///
+    /// `None` = 本宿主没有物化 CA（测试注入的假引擎）。
+    pub ca: Option<CaControl>,
     /// 装配期产生的、**不允许静默**的警告（例如共享 CA 被重新物化：
     /// 已装证书的客户端要重装）。由调用方决定是打印还是渲染成界面提示。
     pub warnings: Vec<String>,
     /// 状态目录（宿主参数与界面展示都要用）。
     pub state_dir: PathBuf,
+    /// 界面偏好文件（主题）的路径。
+    ///
+    /// 它住在状态目录里，但**写它的是界面形态**（桌面形态的 `UiPrefs`）——
+    /// 管理器自己不碰这个文件。可路径规则只有一份（`envboard_manager::layout`），
+    /// 所以这里把算好的路径交出去：界面形态不必自己拼 `state_dir.join("ui.json")`，
+    /// 也就不会有第二份路径实现（两份必然漂移，漂移的症状从外部几乎无法归因）。
+    pub ui_prefs_file: PathBuf,
     /// CA 材料所在目录（设置屏据此指出"证书文件在哪"）。
     ///
     /// 只给目录不给路径：文件名规则属于引擎（`envboard_engine::ca::cert_path`），
@@ -70,11 +69,11 @@ pub fn prepare(options: HostOptions) -> Result<Prepared, Error> {
 /// 而它们要走的正是生产的那条装配路径 —— 复制一遍构造序列就等于测试与实现脱钩。
 pub fn prepare_with(options: HostOptions, engine: Arc<dyn ProxyEngine>) -> Result<Prepared, Error> {
     let config = options.into_config()?;
-    build_prepared(config, engine, CaBundle::default(), Vec::new())
+    build_prepared(config, engine, None, Vec::new())
 }
 
 /// 引擎装配的产物：引擎句柄 + 共享 CA 公开面 + 装配期警告。
-type Assembled = (Arc<dyn ProxyEngine>, CaBundle, Vec<String>);
+type Assembled = (Arc<dyn ProxyEngine>, Option<CaControl>, Vec<String>);
 
 /// v3 引擎构造：进程内纯库引擎，共享 CA 在 confdir 就绪（兼容既有 mitmproxy
 /// 生成的 CA 文件，已装证书的客户端零感知）。
@@ -97,11 +96,10 @@ fn build_engine(config: &ManagerConfig) -> Result<Assembled, Error> {
             config.confdir.display()
         ));
     }
-    let bundle = CaBundle {
-        info: ca.info().and_then(|info| serde_json::to_value(info).ok()),
-        pem: Arc::new(ca.ca_cert_pem().into_bytes()),
-    };
-    Ok((Arc::new(EngineBackend::new(ca)), bundle, warnings))
+    // 引擎与界面共用同一份「当前 CA」：重新签发时两边看到的是同一张。
+    let store = CaStore::new(ca);
+    let control = CaControl::new(store.clone(), config.confdir.clone());
+    Ok((Arc::new(EngineBackend::new(store)), Some(control), warnings))
 }
 
 /// 管理器构造（含单实例锁）+ Admin 门面。引擎由此处注入，所以真装配与测试注入
@@ -109,10 +107,11 @@ fn build_engine(config: &ManagerConfig) -> Result<Assembled, Error> {
 fn build_prepared(
     config: ManagerConfig,
     engine: Arc<dyn ProxyEngine>,
-    ca: CaBundle,
+    ca: Option<CaControl>,
     warnings: Vec<String>,
 ) -> Result<Prepared, Error> {
     let state_dir = config.state_dir.clone();
+    let ui_prefs_file = config.ui_prefs_file();
     let ca_dir = config.confdir.clone();
     let port_range = config.port_range;
     let state_file = config.state_file();
@@ -131,6 +130,7 @@ fn build_prepared(
     let manager = Arc::new(manager);
     Ok(Prepared {
         state_dir,
+        ui_prefs_file,
         ca_dir,
         port_range,
         manager: Arc::clone(&manager),

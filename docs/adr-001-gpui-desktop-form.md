@@ -67,7 +67,9 @@ debug 每 500ms 增量、轨迹按字节偏移 tail），桌面用界面自己�
 游标语义照搬：`state_generation` 是 advisory，界面不得据它跳过渲染。
 
 **不引入的东西**：模块宏（照 dipswitch 的 `dipswitch_modules!` 写法对本仓 3 个目的地
-是过度设计，用现成 `Sidebar` 即可）、自嵌 SVG 图标（只用默认图标集）、
+是过度设计，用现成 `Sidebar` 即可）、自嵌 SVG 图标（图标一律取自 `gpui-kit-assets`；
+入口注册的是**完整目录** `AllAssets` 而不是组件默认的 106 个 —— 默认集之外的名字
+不会报错，只会画成空白 svg，代理屏的「编辑」就这么丢过一次）、
 SQLite 偏好库（主题持久化推到设置屏一起做）。
 
 ## 代价（P0.2 实测，2026-10-28）
@@ -103,6 +105,19 @@ SQLite 偏好库（主题持久化推到设置屏一起做）。
 | **OS 输入注入** | ❌ `SetCursorPos failed: 拒绝访问 (0x80070005)` | **实机点击不可用** |
 | 当前用户证书存储 | ❌ 拒绝访问 | 凡"真起一个环境"的测试必红（`live_workbench`、`engine/tests/backend.rs`） |
 | 默认用户 `TEMP` | ❌ 拒绝访问 | `cargo test` 需把 `TEMP` 指到可写目录 |
+
+> **2026-10-29 更正**：上表后三项的「拒绝访问」**不是这台机器的固有属性**，而是
+> 工作区目录带着 **Low 完整性标签**（`C:\Users\WPS\Workspace\myclaw` 上的
+> `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`，沙箱会话残留）：从低完整性
+> 目录里构建/存放的 exe 启动后进程继承 Low 完整性，凡是写 Medium 位置的操作
+> （`%LOCALAPPDATA%`、当前用户证书存储、`SetCursorPos`）一律 `拒绝访问`，
+> 而**读是正常的** —— 所以症状看起来像"某个 API 不可用"，其实是进程令牌的问题。
+> 判据：`icacls <exe>` 看 `Mandatory Label`，或把同一份 exe 拷到用户主目录下再跑
+> 一次（行为翻转即证实）。修法是 `icacls <目录> /setintegritylevel (OI)(CI)M`
+> （自动传播到子树）。修好后本机实测：`cargo test --workspace` **全绿**，包括
+> 此前必红的 `engine/tests/backend.rs` 与 `data_plane`；桌面形态用默认状态目录
+> 正常启动。`SetCursorPos` 属同类，未单独复验。原表保留作为当时的记录；
+> 「`TEMP` 指到可写目录」那条措施不再必要（测试里保留它也无害）。
 
 **因此本 ADR 的 R6 只被部分满足**，并且有一条明确的未验证项：标题栏内控件的点击
 （坑 #1 的 `stop_propagation` 处理）是从 dipswitch 逐字照搬的成熟写法，但**本会话

@@ -69,6 +69,7 @@ impl Manager {
             rules: environment.rules().map(str::to_string),
             upstream: environment.upstream().map(str::to_string),
             insecure_hosts: environment.insecure_hosts().to_vec(),
+            mitm_hosts: environment.mitm_hosts().to_vec(),
             description: environment.description().to_string(),
             capture: environment.capture(),
             desired: match state.desired_of(&name) {

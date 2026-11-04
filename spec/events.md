@@ -100,13 +100,16 @@ request/end | custom`
   丢弃路径只有两个：手动 `POST .../capture/clear`（缓冲清零，会话延续，`generation` +1）
   与实例消亡。对齐 mitmproxy 的内存 View + `view.clear`（它无 id、无生命周期管理），
   这里把 `session.id / started_at / generation` 形式化出来供 UI 明示。
-- 记录形状：`{version, session, request_id, time, request{method,path,authority,headers,body},
-  response{status,headers,body}, error}`；成对落"盘"（内存条目），无半条记录
+- 记录形状：`{version, session, request_id, time, duration_ms, request{method,path,authority,headers,body},
+  response{status,headers,body}, error}`；`duration_ms` 是上游交换耗时（请求行到达 →
+  响应体收齐，不含写回客户端）；与 `request/end` 轨迹、终局日志同一起点、终点略早
+  一档（抓包记录在写回之前就落）。HAR 导入的记录取 entry 的 `time`。成对落"盘"
+  （内存条目），无半条记录
   （与 mitmproxy `save.py` 在 response/error 才写整条 flow 同一纪律）。
 - **缺失而非截断**（mitmproxy `stream_large_bodies` 的语义等价物）：单侧 body 超
   256 KiB → 只记头与元数据、body 标 `omitted: true`；body 按原始字节存
   （utf8 直存 / 二进制 base64 标注），解码延迟到展示端。
-- 缓冲按字节预算淘汰（默认 256 MiB/环境，`--capture-budget` 可调），**满即淘最旧**，
+- 缓冲按字节预算淘汰（默认 256 MiB/环境，引擎默认值；没有调参入口），**满即淘最旧**，
   `captured/dropped` 计数随 API 可见——内存占用恒定，长会话不丢记录的出路是导出。
 - 消费：`GET .../captures?limit=`、`GET .../captures/:request_id`（全缓冲查找；
   已被淘汰或不存在 → 404）、

@@ -12,7 +12,9 @@
 //! * tokio 运行时由 `main` 的栈帧持有，界面只拿 `Handle`；跨界只有 [`host::hop`]
 //!   这一条通道。
 //!
-//! 框架只用一个 crate：`gpui-kit`（GPUI + gpui-component + gpui-base + 默认图标）。
+//! 框架只用一个 crate：`gpui-kit`（GPUI + gpui-component + gpui-base + 图标）。
+//! 图标取 `gpui-kit-assets` 的**完整目录**（入口注册 `AllAssets`）：名字不在资产源里
+//! 时 GPUI 不报错、不占位，只画空白 svg —— 默认集之外的名字等于一枚看不见的按钮。
 //! 组件一律取现成的，不另造视觉语汇；本 crate 只写「取数 + 组装」那一层。
 //!
 //! 两条上游文档里不显眼、但踩中就是功能性缺陷的坑（都在这台机器的截图走查里抓到）：
@@ -33,10 +35,12 @@
 //! views/*        各屏（DataTable、表单、面板…）
 //! host.rs        tokio ↔ GPUI 的唯一通道
 //! display.rs     展示层派生（纯函数，可单测）
+//! errors.rs      错误的界面呈现（错误码 + 英文原文 + 中文提示）
 //! ```
 
 pub mod app;
 pub mod display;
+pub mod errors;
 pub mod host;
 pub mod ui_prefs;
 pub mod views;
@@ -44,3 +48,4 @@ pub mod views;
 pub use app::{Destination, Workbench};
 pub use host::Host;
 pub use ui_prefs::{ThemePreference, UiPrefs};
+pub use views::environments::Filter;

@@ -160,6 +160,13 @@ pub fn parse_session(id: u64, name: &str, body: &Value) -> Result<ImportedSessio
             "session": id,
             "request_id": index + 1,
             "time": entry.get("startedDateTime").cloned().unwrap_or(Value::Null),
+            // HAR 的 entry.time 就是整段耗时（毫秒）：抓包表按同一列渲染，
+            // 导入会话与实时会话读法一致。
+            "duration_ms": entry
+                .get("time")
+                .and_then(Value::as_f64)
+                .map(|time| time.max(0.0).round() as u64)
+                .unwrap_or(0),
             "request": {
                 "method": method,
                 "authority": authority,
@@ -221,6 +228,7 @@ mod tests {
                 "entries": [
                     {
                         "startedDateTime": "2026-09-18T00:00:00Z",
+                        "time": 42.4,
                         "request": {
                             "method": "GET",
                             "url": "http://svc.test:8443/x?q=1",
@@ -247,6 +255,8 @@ mod tests {
         assert_eq!(record["request"]["authority"], "svc.test:8443");
         assert_eq!(record["request"]["path"], "/x?q=1");
         assert_eq!(record["response"]["status"], 200);
+        // HAR 的 entry.time 就是毫秒耗时：导入会话与实时会话用同一列渲染。
+        assert_eq!(record["duration_ms"], 42);
         assert_eq!(
             record["request"]["headers"][0],
             json!(["host", "svc.test:8443"])

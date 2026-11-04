@@ -23,6 +23,10 @@
 //! 11. **GUI 框架只住在桌面形态**：`gpui-kit` 只允许出现在 `envboard-desktop` 的
 //!     产物依赖里。它一个包带来约 660 个传递依赖（本仓其余产物约 157 个包），
 //!     谁引它谁的产物就无声翻几倍 —— 判据写在 manifest 的产物依赖面，不看代码。
+//! 12. **产物里不许出现命令行解析库**：产品是从启动器/程序坞点开的 GUI，`argv`
+//!     永远是空的，参数等于"藏在看不见的地方的配置"—— 用户拿不到，却要为它维护
+//!     解析与帮助文本。这条把"现在正确"变成"以后不许破"：想加开关，得先说服评审
+//!     它为什么不该进设置屏。
 
 mod common;
 
@@ -133,6 +137,22 @@ const ASSEMBLY_OWNER: &str = "envboard-host";
 /// GUI 框架（外部依赖名）与它唯一的容身处：见第 11 条的产物体积守卫。
 const GUI_FRAMEWORK: &str = "gpui-kit";
 const GUI_FRAMEWORK_OWNER: &str = "envboard-desktop";
+
+/// 命令行解析库：产物依赖里**一个都不许有**（第 12 条）。
+///
+/// 清单是**封闭**的：真要为某个新库开例外，先把它加进这里再看门禁怎么说 ——
+/// 那时评审必须解释"为什么这个开关不能进设置屏"。
+const CLI_PARSERS: &[&str] = &[
+    "clap",
+    "structopt",
+    "argh",
+    "pico-args",
+    "lexopt",
+    "gumdrop",
+    "bpaf",
+    "xflags",
+    "argparse",
+];
 
 /// **装配盲区**：消费 Admin 门面或充当宿主的 crate，一律不认识装配。
 ///
@@ -347,6 +367,21 @@ fn the_rust_layering_holds() {
                 "{name} 依赖 {GUI_FRAMEWORK:?}：GUI 框架只允许出现在 {GUI_FRAMEWORK_OWNER}，\
                  否则会把它约 660 个传递依赖拖进与服务/引擎同名的产物"
             ));
+        }
+
+        // 12. 产物里不许出现命令行解析库。产品没有命令行参数：它是从启动器/程序坞
+        //     点开的 GUI，`argv` 永远是空的。引入一个解析库等于把某个开关放回
+        //     "只能从终端传"的位置 —— 那种开关用户永远拿不到，却要为它维护一份
+        //     帮助文本；正确的去处是设置屏（看得见、能持久化）。
+        for parser in external_deps(&manifest, PROD_SECTIONS) {
+            if CLI_PARSERS.contains(&parser.as_str()) {
+                problems.push(format!(
+                    "{name} 的产物依赖里有命令行解析库 {parser:?}：本产品不解析命令行参数\
+                     （GUI 从启动器点开，argv 为空）。要暴露的开关属于设置屏；\
+                     决定与理由见 crates/desktop/src/main.rs 的模块文档\
+                     与 Cargo.toml 的 workspace.dependencies 注释"
+                ));
+            }
         }
 
         // 8. 引擎装配只允许住在唯一组合根里（源文件面判据）。

@@ -1,7 +1,11 @@
-//! 设置屏：**外观**（主题）+ **关于**（运行参数）。
+//! 设置屏：**外观**（主题）+ **关于**（引擎与版本）。
 //!
 //! 共享证书不在这里 —— 它是独立的一屏（`views/ca.rs`，侧栏「CA」）：那里有它自己的
 //! 任务（把证书交到客户端手里），塞进设置页只会让两边都看不清。
+//!
+//! 「关于」**只放版本信息与装配警告**，不摆状态目录 / 端口区间 / 偏好文件路径：
+//! 这页的任务是"改点什么"，本机路径既改不了也不该在这里读；排障要用的路径由错误条
+//! 在出错那一刻点名（错误信息本来就带着它）。
 //!
 //! 版面走组件库的设置几何：每组一个 `GroupBox` 填充表面，组内一行一项
 //! （**标题与说明在左、控件在右**，与 `SettingItem` 同一横向布局），选中即生效，
@@ -20,6 +24,7 @@ use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement,
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
@@ -84,15 +89,15 @@ impl Settings {
             return;
         }
         let host = cx.global::<Host>();
-        let state_dir = host.state_dir().clone();
+        let prefs_file = host.ui_prefs_file().clone();
         let prefs = UiPrefs::current(cx).set_theme(theme, Some(window), cx);
         self.theme = theme;
-        self.save_error = match prefs.save(&state_dir) {
+        self.save_error = match prefs.save(&prefs_file) {
             Ok(()) => None,
             Err(error) => Some(
                 format!(
-                    "主题已切换，但偏好没能写入 {}/ui.json：{error}",
-                    state_dir.display()
+                    "主题已切换，但偏好没能写入 {}：{error}",
+                    prefs_file.display()
                 )
                 .into(),
             ),
@@ -147,72 +152,67 @@ impl Settings {
         )
     }
 
-    /// 关于组：版本与本机路径，全部只读。
+    /// 关于组：版本与引擎名，全部只读。
+    ///
+    /// 这里**不摆状态目录、界面偏好文件、端口区间这些本机路径/参数**：
+    /// 设置页是"我要改点什么"的地方，一串要拿去提问才用得上的路径只会把
+    /// 真正可改的那一项（主题）淹掉；排障需要的信息在错误条里会指名道姓。
     fn render_about(&self, cx: &mut Context<Self>) -> AnyElement {
-        let host = cx.global::<Host>();
-        let core = host.admin().core_info();
-        let (min, max) = host.port_range();
-        let muted = cx.theme().muted_foreground;
-        let mono_family = cx.theme().mono_font_family.clone();
-        let mono = |text: String| {
-            div()
-                .font(gpui_kit::Font {
-                    family: mono_family.clone(),
-                    ..Default::default()
-                })
-                .child(SharedString::from(text))
-                .into_any_element()
+        let (core, warnings) = {
+            let host = cx.global::<Host>();
+            let core = host.admin().core_info();
+            (
+                format!("{} {}", core.name, core.version),
+                host.warnings().to_vec(),
+            )
         };
+        let muted = cx.theme().muted_foreground;
         let value = |text: String| div().text_sm().child(text).into_any_element();
 
         let mut items = vec![
-            row(
-                "引擎",
-                None,
-                value(format!("{} {}", core.name, core.version)),
-                muted,
-            ),
+            row("引擎", None, value(core), muted),
             row(
                 "版本",
                 None,
                 value(env!("CARGO_PKG_VERSION").to_string()),
                 muted,
             ),
-            row(
-                "状态目录",
-                Some("环境账本、规则库、日志与共享 CA 都在它下面。".into()),
-                mono(host.state_dir().display().to_string()),
-                muted,
-            ),
-            row("端口区间", None, value(format!("{min}-{max}")), muted),
-            row(
-                "界面偏好",
-                Some("主题只改这台机器上的界面，不动环境账本。".into()),
-                mono(format!("{}/ui.json", host.state_dir().display())),
-                muted,
-            ),
         ];
-        // 装配警告是"这一份宿主跑得不对"的信息，归在运行参数这一组，不单独开组。
-        let warnings: Vec<String> = host.warnings().to_vec();
+        // 装配警告是"这一份宿主跑得不对"的信息：它不该只是几行淡黄字，
+        // 而是一条**能被看见形状**的提示条（图标 + 表面 + 边框）。
         if !warnings.is_empty() {
             items.push(
                 div()
                     .id("settings-warnings")
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(div().text_xs().text_color(muted).child("装配警告"))
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("装配警告"),
+                    )
                     .children(warnings.into_iter().map(|warning| {
                         div()
+                            .id("settings-warning-item")
+                            .flex()
+                            .items_start()
+                            .gap_2()
                             .text_xs()
-                            .text_color(cx.theme().warning)
+                            // 图标带警告色（形状 + 颜色两重标记），正文仍是常规前景色。
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .size_3()
+                                    .text_color(cx.theme().warning),
+                            )
                             .child(SharedString::from(warning))
                     }))
                     .into_any_element(),
             );
         }
 
-        group("关于", "运行参数与本机路径。", items)
+        group("关于", "引擎与界面的版本信息。", items)
     }
 }
 
@@ -220,7 +220,6 @@ impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = self.render_appearance(cx);
         let about = self.render_about(cx);
-        let muted = cx.theme().muted_foreground;
 
         div()
             .id("settings-screen")
@@ -232,12 +231,8 @@ impl Render for Settings {
             .gap_4()
             .overflow_y_scroll()
             .p_4()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("本机的界面偏好与运行参数。"),
-            )
+            // 不再加一行页面副标题：下面两组的说明已经把这件事说完了
+            // （"界面在本机上的样子" + "运行参数与本机路径"）。
             .child(appearance)
             .child(about)
     }

@@ -3,7 +3,8 @@
 # 任务 recipe 一律单命令、不用 `&&`，sh 与 PowerShell 均可直接执行（Windows 原生可用）。
 #
 # 这里**没有**前端工具链：web 形态（SPA + HTTP 宿主）已整体出库，本仓只剩 Rust
-# 与一份 Python 编排（scripts/verify.py）。想把它带回来，先读 docs/adr-003。
+# 与 Python 编排（scripts/verify.py 验证、scripts/package.py 打绿色包）。
+# 想把它带回来，先读 docs/adr-003。
 
 [tools]
 python = "3.14.7"
@@ -29,3 +30,7 @@ run = "cargo test -p envboard-desktop"
 [tasks.package]
 description = "打包唯一发布物：桌面 GUI 二进制 envboard"
 run = "cargo build --release"
+
+[tasks.package-portable]
+description = "绿色免安装压缩包（exe + 便携标记 + 说明；产物在 dist/）"
+run = "python scripts/package.py"

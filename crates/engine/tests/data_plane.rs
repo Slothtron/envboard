@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use envboard_engine::EngineConfig;
-use envboard_engine::ca::SharedCa;
+use envboard_engine::ca::{CaStore, SharedCa};
 use envboard_engine::engine::{EngineInstance, EngineState};
 use envboard_engine::http;
 use envboard_engine::http::Message;
@@ -112,7 +112,7 @@ async fn start_engine(cfg: EngineConfig, ca: Arc<SharedCa>) -> EngineInstance {
     let recorder = std::sync::Arc::new(envboard_engine::trajectory::TrajectoryRecorder::start(
         std::sync::Arc::new(envboard_engine::NullLineWriter),
     ));
-    let engine = EngineInstance::start(cfg, ca, recorder, 1).unwrap();
+    let engine = EngineInstance::start(cfg, CaStore::new(ca), recorder, 1).unwrap();
     let status = engine.wait_until_settled(Duration::from_secs(5));
     assert_eq!(
         status.state,
@@ -384,7 +384,13 @@ async fn port_conflict_is_detected_without_try_bind() {
     let recorder = std::sync::Arc::new(envboard_engine::trajectory::TrajectoryRecorder::start(
         std::sync::Arc::new(envboard_engine::NullLineWriter),
     ));
-    let second = EngineInstance::start(localhost_config(proxy), ca.clone(), recorder, 1).unwrap();
+    let second = EngineInstance::start(
+        localhost_config(proxy),
+        CaStore::new(ca.clone()),
+        recorder,
+        1,
+    )
+    .unwrap();
     let status = second.wait_until_settled(Duration::from_secs(5));
     assert_eq!(
         status.state,
@@ -441,6 +447,93 @@ async fn tunnel_keepalive_serves_sequential_requests() {
         .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("path=/ka"));
     }
+    engine.stop();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// CONNECT 之后照原样发明文 HTTP（**不做 TLS**）：证明代理没有尝试解密。
+/// 返回（CONNECT 状态、隧道内的响应体）。
+async fn tunnel_plain_get(proxy: u16, authority: &str, credentials: Option<&str>) -> (u16, String) {
+    let mut socket = TcpStream::connect(("127.0.0.1", proxy)).await.unwrap();
+    let auth = match credentials {
+        Some(value) => format!("Proxy-Authorization: Basic {value}\r\n"),
+        None => String::new(),
+    };
+    socket
+        .write_all(
+            format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let established = read_head_raw(&mut socket).await.expect("CONNECT response");
+    let status = established.status().unwrap_or(0);
+    if status != 200 {
+        return (status, String::new());
+    }
+    // 隧道内发明文：只有"字节原样转给上游"才可能被明文 echo 读懂。
+    socket
+        .write_all(format!("GET /blind HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(&mut socket);
+    let Some(response) = http::read_head(&mut reader).await.ok().flatten() else {
+        return (200, String::new());
+    };
+    let framing = http::response_framing("GET", response.status().unwrap_or(0), &response);
+    let body = http::read_body(&mut reader, framing, http::MAX_BODY_BYTES)
+        .await
+        .unwrap_or_default();
+    (200, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// MITM 白名单：**名单内解密、名单外直通**，且两侧的语义差异可观测。
+#[tokio::test]
+async fn mitm_allowlist_decrypts_only_listed_hosts() {
+    // 名单内用 TLS echo（要真的走完上游 TLS），名单外用明文 echo（解密了就读不懂）。
+    let tls_origin = spawn_echo(true).await;
+    let plain_origin = spawn_echo(false).await;
+    let dir = temp("mitm-allow");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let mut cfg = localhost_config(proxy);
+    cfg.rules_text = Some("127.0.0.1 inside.test\n127.0.0.1 outside.test".to_string());
+    cfg.insecure_hosts = vec!["inside.test".to_string()];
+    cfg.mitm_hosts = vec!["inside.test".to_string()];
+    let engine = start_engine(cfg.clone(), ca.clone()).await;
+
+    // 名单内：客户端拿 CA 校验代理现签的叶子证书，请求被解密改写后到达上游。
+    let (established, status, body) =
+        connect_get(proxy, &format!("inside.test:{tls_origin}"), None, &ca).await;
+    assert_eq!(established, 200, "listed host is decrypted: {body}");
+    assert_eq!(status, 200, "listed host served: {body}");
+    assert!(body.contains("host=inside.test"), "MITM 内层 host: {body}");
+
+    // 名单外：不解密 —— 明文 HTTP 直接穿到上游（解密路径会卡在 TLS accept）。
+    let (established, body) =
+        tunnel_plain_get(proxy, &format!("outside.test:{plain_origin}"), None).await;
+    assert_eq!(established, 200, "unlisted CONNECT must still establish");
+    assert!(
+        body.contains("path=/blind"),
+        "unlisted host must be tunnelled verbatim: {body}"
+    );
+
+    // 名单外也是代理：鉴权在 CONNECT 上判，缺凭据一律 407（隧道里看不到 HTTP）。
+    cfg.proxy_user = Some("alice".into());
+    cfg.proxy_password = Some("s3cret".into());
+    engine.apply_config(cfg.clone()).unwrap();
+    let (established, _) =
+        tunnel_plain_get(proxy, &format!("outside.test:{plain_origin}"), None).await;
+    assert_eq!(established, 407, "tunnel path must not bypass proxy auth");
+    let credentials = basic("alice", "s3cret");
+    let (established, body) = tunnel_plain_get(
+        proxy,
+        &format!("outside.test:{plain_origin}"),
+        Some(&credentials),
+    )
+    .await;
+    assert_eq!(established, 200, "with CONNECT credentials: {body}");
+    assert!(body.contains("path=/blind"), "{body}");
+
     engine.stop();
     std::fs::remove_dir_all(&dir).ok();
 }

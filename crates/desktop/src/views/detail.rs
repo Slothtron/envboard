@@ -17,25 +17,33 @@ use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::description_list::DescriptionList;
-use gpui_kit::prelude::FluentBuilder as _;
 
 use gpui_kit::component::form::Field;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Input, InputContentType, InputEvent, InputState, Textarea, TextareaState,
+};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::TableState;
+use gpui_kit::component::{Icon, IconName, WindowExt};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Font, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    Window, div, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Font, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, Window, div, px,
 };
 
 use envboard_protocol::{Desired, EnvView};
 
-use crate::display::{health_label, is_public_listen, listen_address, needs_attention};
+use crate::display::{
+    command_lines, health_label, is_public_listen, listen_address, needs_attention,
+};
+use crate::errors::{Action, Notice};
 use crate::host::{Host, hop};
 use crate::views::environments::{EnvTable, Environments};
+use crate::views::error_banner;
 use gpui_kit::WeakEntity;
 
 /// 面板页签。顺序与 web 形态一致：概览 / 配置 / 规则。
@@ -67,7 +75,7 @@ enum RulesState {
     /// 绑了名字但账本里没有（该环境当前不覆盖任何域名）。
     Missing,
     Text(SharedString),
-    Failed(SharedString),
+    Failed(Notice),
 }
 
 /// 详情面板实体。
@@ -154,14 +162,19 @@ impl Detail {
         self.rules = RulesState::Loading;
         let admin = cx.global::<Host>().admin().clone();
         let name = bound.clone();
+        let subject = bound.clone();
         self.rules_task = Some(hop(
             window,
             cx,
-            async move { admin.rules_read(&name).map_err(|error| error.message) },
+            async move { admin.rules_read(&name) },
             move |this, outcome, _, cx| {
                 this.rules = match outcome {
                     Ok(text) => RulesState::Text(text.into()),
-                    Err(message) => RulesState::Failed(message.into()),
+                    Err(error) => RulesState::Failed(Notice::from_error(
+                        Action::ReadRules,
+                        Some(&subject),
+                        &error,
+                    )),
                 };
                 cx.notify();
             },
@@ -223,6 +236,9 @@ impl Render for Detail {
 
         div()
             .id("detail-panel")
+            // L0 用它判断"面板到底开没开"：无头上下文没有查询 Sheet 的 API，
+            // 只能看这一块锚点有没有被画出来。
+            .debug_selector(|| "env-detail-panel".to_string())
             .flex()
             .flex_col()
             .size_full()
@@ -244,9 +260,8 @@ impl Render for Detail {
 }
 
 impl Detail {
-    fn render_overview(&self, env: &EnvView, cx: &App) -> AnyElement {
+    fn render_overview(&mut self, env: &EnvView, cx: &mut Context<Self>) -> AnyElement {
         let mono = self.mono(cx);
-        let muted = cx.theme().muted_foreground;
         let warning = cx.theme().warning;
         let status = SharedString::from(format!(
             "{} · 期望 {}",
@@ -275,56 +290,115 @@ impl Detail {
         };
         let attention = needs_attention(env);
         let public = is_public_listen(env);
+        let reason = env
+            .health_reason
+            .clone()
+            .filter(|reason| !reason.trim().is_empty());
 
-        DescriptionList::horizontal()
+        let mut list = DescriptionList::horizontal()
             .columns(1)
             .bordered(true)
             .label_width(px(120.))
-            .item("状态", status, 1)
-            .item(
+            .item("状态", status, 1);
+
+        // 「需处理」只在真的需要处理时出现：一行恒为"否"的布尔值只是噪音，
+        // 它还会让面板看起来"每条都有问题"。原因跟在这行后面 —— 这是"需处理"
+        // 唯一有用的下半句（服务端一直在给，此前界面从不显示）。
+        if attention {
+            list = list.item(
                 "需处理",
-                div()
-                    .text_color(if attention { warning } else { muted })
-                    .child(SharedString::from(if attention { "是" } else { "否" }))
-                    .into_any_element(),
+                div().text_color(warning).child("是").into_any_element(),
                 1,
-            )
+            );
+            if let Some(reason) = reason {
+                list = list.item(
+                    "原因",
+                    div()
+                        .text_color(warning)
+                        .child(SharedString::from(reason))
+                        .into_any_element(),
+                    1,
+                );
+            }
+        }
+
+        list = list
             .item(
                 "监听",
                 div().font(mono.clone()).child(listen).into_any_element(),
                 1,
             )
-            .item(
-                "对外服务",
-                div()
-                    .text_color(if public { warning } else { muted })
-                    .child(SharedString::from(if public {
-                        "是（绑在非回环地址）"
-                    } else {
-                        "否（仅回环）"
-                    }))
-                    .into_any_element(),
-                1,
-            )
+            // 只在真的对外服务时占一行（回环是默认，默认不必说）。
             .item("规则", rules, 1)
             .item("上游代理", upstream, 1)
             .item(
                 "抓包",
                 SharedString::from(if env.capture { "开启" } else { "关闭" }),
                 1,
-            )
+            );
+
+        if public {
+            list = list.item(
+                "对外服务",
+                div()
+                    .text_color(warning)
+                    .child("是（绑在非回环地址）")
+                    .into_any_element(),
+                1,
+            );
+        }
+
+        // 代理设置命令是这一屏里**唯一要用户带走**的内容：必须能一键复制。
+        // 命令用服务端回显的 `proxy_command`，桌面不许自己重算。
+        let command = env.proxy_command.clone();
+        // 图标按钮而不是带字按钮：这一行的宽度要留给命令本身（等宽文本，
+        // 一行 `export VAR=http://host:port` 在面板里刚好一行放得下，
+        // 「复制」两个字会把最后几位端口挤出去）。
+        let copy_command = Button::new("copy-proxy-command")
+            .xsmall()
+            .ghost()
+            .icon(Icon::new(IconName::Copy))
+            .accessibility_label("复制代理设置命令")
+            .tooltip("复制代理设置命令（可直接粘到终端）")
+            .on_click(cx.listener(move |_, _, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                window.push_notification(
+                    Notification::success("已复制代理设置命令").id1::<Self>("detail-copy"),
+                    cx,
+                );
+            }));
+
+        list = list
             .item(
                 "代理设置命令",
-                // 命令用服务端回显的 `proxy_command`，桌面**不许自己重算**。
                 div()
-                    .font(mono)
-                    .text_sm()
-                    .child(SharedString::from(env.proxy_command.clone()))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .font(mono)
+                            // 比正文小一档：一行 `export VAR=http://host:port` 要挤进
+                            // 「标签列 + 值列 + 复制按钮」三段之后的宽度里，text_sm 会
+                            // 差最后几位端口（实测 42 字符 × 8.3px > 可用 332px）。
+                            .text_xs()
+                            // 一条赋值一行、行内不折行：等宽文本按字符折行会从 URL
+                            // 中间断开（读起来像两条命令）。复制仍给整条原文。
+                            .children(command_lines(&env.proxy_command).into_iter().map(|line| {
+                                div().whitespace_nowrap().child(SharedString::from(line))
+                            })),
+                    )
+                    .child(copy_command)
                     .into_any_element(),
                 1,
             )
-            .item("说明", SharedString::from(description), 1)
-            .into_any_element()
+            .item("说明", SharedString::from(description), 1);
+
+        list.into_any_element()
     }
 
     fn render_rules(&self, cx: &App) -> AnyElement {
@@ -350,12 +424,9 @@ impl Detail {
                         })),
                 )
                 .into_any_element(),
-            RulesState::Failed(message) => div()
-                .id("detail-rules-failed")
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(format!("读取规则失败：{message}"))
-                .into_any_element(),
+            // 与表格上的错误条同一套呈现（中文主句 + 码 + 英文原文）：同一个应用里
+            // 错误只有一种长相。
+            RulesState::Failed(notice) => error_banner("detail-rules-failed", notice.clone()),
             other => {
                 let (id, body) = match other {
                     RulesState::Loading => ("detail-rules-loading", "读取规则正文…"),
@@ -440,6 +511,7 @@ pub struct ConfigForm {
     description: Entity<InputState>,
     port: Entity<InputState>,
     insecure_hosts: Entity<TextareaState>,
+    mitm_hosts: Entity<TextareaState>,
     proxy_user: Entity<InputState>,
     proxy_password: Entity<InputState>,
     public_listen: bool,
@@ -451,7 +523,7 @@ pub struct ConfigForm {
     advanced_open: bool,
     dirty: bool,
     saving: bool,
-    message: Option<SharedString>,
+    message: Option<Notice>,
     options_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -470,12 +542,17 @@ impl ConfigForm {
             cx.new(|cx| InputState::new(window, cx).default_value(env.listen.port.to_string()));
         let insecure_hosts = cx
             .new(|cx| TextareaState::new(window, cx).default_value(env.insecure_hosts.join("\n")));
+        let mitm_hosts =
+            cx.new(|cx| TextareaState::new(window, cx).default_value(env.mitm_hosts.join("\n")));
         // 凭据只进不出：两个框永远从空开始，留空 = 保持不变（服务端语义）。
         let proxy_user = cx.new(|cx| InputState::new(window, cx).placeholder("用户名"));
-        // 已知缺口：gpui-component 0.8.0 的 InputState 没有 password/mask 构造器，
-        // 所以这一栏是明文输入。值不回填、不进日志、服务端永不回显凭据，但"输入时
-        // 旁人可见"这条没做到 —— 补它要换 Editor 的 secret 方案或等上游支持。
-        let proxy_password = cx.new(|cx| InputState::new(window, cx).placeholder("留空则保持不变"));
+        // 密码框打码输入：`InputState::masked` 在 gpui-base 里就有（组件层的
+        // `Input` 只是把它渲染出来），打码顺带把值挡在剪贴板选择之外。
+        let proxy_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("留空则保持不变")
+                .masked(true)
+        });
 
         // 任一输入变化都算脏（保存钮与"有未保存的改动"提示都看这个）。
         let mut subscriptions = Vec::new();
@@ -497,6 +574,15 @@ impl ConfigForm {
                 }
             }),
         );
+        subscriptions.push(
+            cx.subscribe_in(&mitm_hosts, window, |this, _, event, _, cx| {
+                let InputEvent::Change = event else { return };
+                if !this.dirty {
+                    this.dirty = true;
+                    cx.notify();
+                }
+            }),
+        );
 
         Self {
             env_name: name,
@@ -504,6 +590,7 @@ impl ConfigForm {
             description,
             port,
             insecure_hosts,
+            mitm_hosts,
             proxy_user,
             proxy_password,
             public_listen: is_public_listen(&env),
@@ -588,6 +675,17 @@ impl ConfigForm {
             .collect::<Vec<_>>();
         patch.insert("insecure_hosts".into(), hosts.into());
 
+        let mitm = self
+            .mitm_hosts
+            .read(cx)
+            .value()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        patch.insert("mitm_hosts".into(), mitm.into());
+
         // 代理鉴权：两栏必须同时填（同时空着 = 保持不变），都不能含 ":" 或空白。
         let user = self.proxy_user.read(cx).value().to_string();
         let password = self.proxy_password.read(cx).value().to_string();
@@ -625,7 +723,9 @@ impl ConfigForm {
         let patch = match self.build_patch(cx) {
             Ok(patch) => patch,
             Err(message) => {
-                self.message = Some(message);
+                // 本地校验拦下来的（形状不对，还没到服务端）：没有错误码也没有原文，
+                // 只有一句中文 —— 与门面错误同一个错误条、同一种长相。
+                self.message = Some(Notice::plain(message));
                 cx.notify();
                 return;
             }
@@ -642,10 +742,7 @@ impl ConfigForm {
             cx,
             async move {
                 let outcome = admin.update(&name, &body);
-                (
-                    name,
-                    outcome.map(|env| env.name).map_err(|error| error.message),
-                )
+                (name, outcome.map(|env| env.name))
             },
             move |this, (name, outcome), window, cx| {
                 this.saving = false;
@@ -654,9 +751,12 @@ impl ConfigForm {
                         this.dirty = false;
                         this.message = None;
                     }
-                    Err(message) => {
-                        this.message =
-                            Some(SharedString::from(format!("保存 {name} 失败：{message}")));
+                    Err(error) => {
+                        this.message = Some(Notice::from_error(
+                            Action::SaveEnvironment,
+                            Some(&name),
+                            &error,
+                        ));
                     }
                 }
                 cx.notify();
@@ -774,71 +874,94 @@ impl ConfigForm {
                         Button::new("toggle-advanced")
                             .xsmall()
                             .ghost()
+                            // 折叠区用组件库的 `Collapsible`：它自己管"开/合"的内容
+                            // 挂载与可逆的展开动画；触发器仍是一个普通按钮
+                            // （按钮负责"按下就展开"的语义）。
                             .label(if self.advanced_open {
                                 "收起高级配置"
                             } else {
-                                "高级配置（放宽校验 / 对外服务 / 抓包 / 访问鉴权）"
+                                "高级配置（放宽校验 / 解密白名单 / 对外服务 / 抓包 / 访问鉴权）"
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.advanced_open = !this.advanced_open;
                                 cx.notify();
                             })),
                     )
-                    .when(self.advanced_open, |this| {
-                        this.child(
-                            Field::new()
-                                .label("按域名放宽上游校验")
-                                .child(Textarea::new(&self.insecure_hosts).w_full()),
-                        )
-                        .child(hint(
-                            "每行一个完整域名，精确匹配：列出的域名才跳过上游证书校验，子域不继承、后缀不匹配，通配符会被服务端拒绝。热生效。",
-                        ))
-                        .child(
-                            Checkbox::new("public-listen")
-                                .label("对外服务（绑到 0.0.0.0）")
-                                .checked(self.public_listen)
-                                .on_change(cx.listener(|this, value, _, cx| {
-                                    this.public_listen = *value;
-                                    this.dirty = true;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(hint(
-                            "默认只监听 127.0.0.1；勾选后局域网内可直接连此代理。停机生效。",
-                        ))
-                        .child(
-                            Checkbox::new("capture")
-                                .label("抓包（记录该环境的 HTTPS 请求/响应）")
-                                .checked(self.capture)
-                                .on_change(cx.listener(|this, value, _, cx| {
-                                    this.capture = *value;
-                                    this.dirty = true;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(hint("热生效。清空走显式动作。"))
-                        .child(
-                            Field::new().label("代理访问鉴权").child(
+                    .child(
+                        Collapsible::new()
+                            .open(self.advanced_open)
+                            .content(
                                 div()
                                     .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(Input::new(&self.proxy_user).w_1_2())
-                                    .child(Input::new(&self.proxy_password).w_1_2()),
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(
+                                        Field::new()
+                                            .label("按域名放宽上游校验")
+                                            .child(Textarea::new(&self.insecure_hosts).w_full()),
+                                    )
+                                    .child(hint(
+                                        "每行一个完整域名，精确匹配：列出的域名才跳过上游证书校验，子域不继承、后缀不匹配，通配符会被服务端拒绝。热生效。",
+                                    ))
+                                    .child(
+                                        Field::new()
+                                            .label("MITM 白名单（只解密这些域名）")
+                                            .child(Textarea::new(&self.mitm_hosts).w_full()),
+                                    )
+                                    .child(hint(
+                                        "留空 = 全部域名解密。填了就只对这些域名做 TLS 解密与改写，名单外的 CONNECT 字节原样直通（不抓包、不改写，鉴权在 CONNECT 上判）。热生效。",
+                                    ))
+                                    .child(
+                                        Checkbox::new("public-listen")
+                                            .label("对外服务（绑到 0.0.0.0）")
+                                            .checked(self.public_listen)
+                                            .on_change(cx.listener(|this, value, _, cx| {
+                                                this.public_listen = *value;
+                                                this.dirty = true;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(hint(
+                                        "默认只监听 127.0.0.1；勾选后局域网内可直接连此代理。停机生效。",
+                                    ))
+                                    .child(
+                                        Checkbox::new("capture")
+                                            .label("抓包（记录该环境的 HTTPS 请求/响应）")
+                                            .checked(self.capture)
+                                            .on_change(cx.listener(|this, value, _, cx| {
+                                                this.capture = *value;
+                                                this.dirty = true;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(hint("热生效。清空走显式动作。"))
+                                    .child(
+                                        Field::new().label("代理访问鉴权").child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(Input::new(&self.proxy_user).w_1_2())
+                                                // 掩码 + 可切换可见：值不回显，但用户能确认自己打对了。
+                                                .child(
+                                                    Input::new(&self.proxy_password)
+                                                        .w_1_2()
+                                                        .mask_toggle()
+                                                        .content_type(InputContentType::Password),
+                                                ),
+                                        ),
+                                    )
+                                    .child(hint(
+                                        "两栏必须同时填写，都不能含「:」或空白字符。凭据只进不出 —— 服务端永不回显。停机生效。",
+                                    )),
                             ),
-                        )
-                        .child(hint(
-                            "两栏必须同时填写，都不能含「:」或空白字符。凭据只进不出 —— 服务端永不回显。停机生效。",
-                        ))
-                    }),
+                    ),
             )
-            .children(self.message.clone().map(|message| {
-                div()
-                    .id("config-message")
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .child(message)
-            }))
+            .children(
+                self.message
+                    .clone()
+                    .map(|message| error_banner("config-message", message)),
+            )
             .child(
                 div()
                     .flex()

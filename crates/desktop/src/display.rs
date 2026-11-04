@@ -83,6 +83,44 @@ pub fn format_bytes(size: u64) -> String {
     }
 }
 
+/// 耗时的短表示（抓包表用）：毫秒档给整数，秒档给一位小数。
+///
+/// 阈值取 1000 ms：`999 ms` 读起来比 `1.0 s` 精确，`1000 ms` 起进位能少三格宽度。
+pub fn format_duration(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    }
+}
+
+/// 代理设置命令拆成「一行一条赋值」。
+///
+/// 为什么拆：面板里的等宽文本按字符折行，会**从 URL 中间**折断
+/// （`https_proxy=http://` / `/127.0.0.1:17103`），读起来像两条命令。
+/// 赋值之间本来就有空格，那个空格就是天然的换行点 —— 按空格取词，
+/// 开头的动词（`export` / `set`）与它后面第一条赋值合成一行，
+/// 剩下的每条赋值各占一行。
+pub fn command_lines(command: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut verb: Option<&str> = None;
+    for token in command.split_whitespace() {
+        if !token.contains('=') {
+            // 只有动词位置的词会被挂起；连续两个动词时前一个自成一行。
+            if let Some(previous) = verb.take() {
+                lines.push(previous.to_string());
+            }
+            verb = Some(token);
+        } else if let Some(prefix) = verb.take() {
+            lines.push(format!("{prefix} {token}"));
+        } else {
+            lines.push(token.to_string());
+        }
+    }
+    lines.extend(verb.map(str::to_string));
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +135,7 @@ mod tests {
             rules: None,
             upstream: None,
             insecure_hosts: Vec::new(),
+            mitm_hosts: Vec::new(),
             description: String::new(),
             desired,
             health: health.into(),
@@ -166,5 +205,42 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.0 KB");
         assert_eq!(format_bytes(2048), "2.0 KB");
         assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn duration_formatting_switches_units_at_one_second() {
+        assert_eq!(format_duration(0), "0 ms");
+        assert_eq!(format_duration(34), "34 ms");
+        assert_eq!(format_duration(999), "999 ms");
+        assert_eq!(format_duration(1000), "1.0 s");
+        assert_eq!(format_duration(1234), "1.2 s");
+        assert_eq!(format_duration(64_000), "64.0 s");
+    }
+
+    #[test]
+    fn command_lines_break_between_assignments_never_inside_urls() {
+        assert_eq!(
+            command_lines(
+                "export https_proxy=http://127.0.0.1:17103 http_proxy=http://127.0.0.1:17103"
+            ),
+            vec![
+                "export https_proxy=http://127.0.0.1:17103",
+                "http_proxy=http://127.0.0.1:17103",
+            ]
+        );
+        // 没有动词时每条赋值各自一行。
+        assert_eq!(
+            command_lines("https_proxy=http://127.0.0.1:1 http_proxy=http://127.0.0.1:1"),
+            vec![
+                "https_proxy=http://127.0.0.1:1",
+                "http_proxy=http://127.0.0.1:1"
+            ]
+        );
+        // Windows 形态同样成立；空命令不留空行。
+        assert_eq!(
+            command_lines("set https_proxy=http://127.0.0.1:1"),
+            vec!["set https_proxy=http://127.0.0.1:1"]
+        );
+        assert!(command_lines("   ").is_empty());
     }
 }

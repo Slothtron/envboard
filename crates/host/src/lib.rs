@@ -40,7 +40,12 @@
 //!     .enable_all()
 //!     .build()
 //!     .map_err(|error| envboard_engine::Error::internal_error(error.to_string()))?;
-//! let prepared: Prepared = envboard_host::prepare(HostOptions::default())?;
+//! let prepared: Prepared = envboard_host::prepare(HostOptions {
+//!     // 应用目录名是**产品身份**，由宿主二进制从自己的 `Cargo.toml` 取来传进来
+//!     // （`env!("CARGO_BIN_NAME")`）；组合根不猜也不硬编码。
+//!     app_dir_name: Some("your-app".to_owned()),
+//!     ..HostOptions::default()
+//! })?;
 //! let report = runtime.block_on(prepared.startup())?;
 //! for (environment, action) in &report.actions {
 //!     println!("reconcile: {action:<14} {environment}");
@@ -52,9 +57,19 @@
 //! ```
 
 pub mod assembly;
+pub mod ca_control;
 pub mod options;
 pub mod startup;
+pub mod trust_store;
 
-pub use assembly::{CaBundle, Prepared};
+pub use assembly::Prepared;
 pub use assembly::{prepare, prepare_with};
-pub use options::{HostOptions, parse_port_range};
+pub use ca_control::{CaControl, LeafPem};
+pub use options::HostOptions;
+pub use trust_store::{StorePresence, TrustProbe};
+
+/// 状态目录的**布局表**（转出管理器的定义）。
+///
+/// 界面形态要拼状态目录里的路径时（例如界面偏好文件），路径规则必须只有一份 ——
+/// 所以这里把布局表转出来，而不是让界面自己去 `join("ui.json")`。
+pub use envboard_manager::layout;

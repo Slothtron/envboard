@@ -26,6 +26,49 @@ pub const DEFAULT_MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// 轮转上限的下限：64 KiB（约 210 个请求的日志），再小就没有排障价值了。
 pub const MIN_MAX_LOG_BYTES: u64 = 64 * 1024;
 
+/// 状态目录的**布局表** —— 全仓唯一的一份。
+///
+/// 为什么单独成表，而不是散落在各处的 `join("...")`：这份表回答的是"状态目录
+/// 里能出现什么"，而**路径规则一旦有两份实现就必然漂移** —— 改了一处忘了另一处，
+/// 症状是"界面读的是 A、管理器写的是 B"，这种分叉从外部几乎无法归因。
+///
+/// 桌面形态的界面偏好（`ui.json`）也登记在这里，尽管写它的是界面而不是管理器：
+/// 它同样住在状态目录里，规则就不该有第二份（原来的 `ui_prefs.rs` 自己拼
+/// `state_dir.join("ui.json")`，正是那种第二实现）。
+///
+/// 门禁：`tests/policy-tests/tests/state_layout.rs` 钉住"这些字面量只在
+/// `state.rs` 里出现"。
+pub mod layout {
+    /// 账本（环境、规则账本、代理账本、期望状态）。
+    pub const STATE_FILE: &str = "state.json";
+    /// 界面偏好（主题；桌面形态写，不进账本）。
+    pub const UI_PREFS_FILE: &str = "ui.json";
+    /// 控制面审计事件（append-only；权威仍是账本）。
+    pub const EVENTS_FILE: &str = "events.jsonl";
+    /// 单实例锁（状态只有一个写者的凭据）。
+    pub const LOCK_FILE: &str = "lock";
+    /// 规则物化目录（账本 rendered 的**可再生**投影）。
+    pub const RULES_DIR: &str = "rules";
+    /// 实例日志目录（可被 `--log-dir` 改址；`--no-log-file` 关闭）。
+    pub const LOGS_DIR: &str = "logs";
+    /// 请求轨迹目录（数据面事件流；字节偏移游标）。
+    ///
+    /// 它**不跟 `--log-dir` 走**：轨迹是数据面事件流（有自己的游标与生命周期），
+    /// 不是实例日志；把它挂在日志目录下会让"改日志目录"顺带搬走轨迹 —— 一条
+    /// 与调用方意图无关的副作用。它跟的是"要不要落盘"（`--no-log-file`）。
+    pub const TRAJECTORIES_DIR: &str = "trajectories";
+    /// 共享材料目录（目前只有 CA）。
+    pub const SHARED_DIR: &str = "shared";
+    /// CA 材料目录（在共享目录下；文件名规则归引擎，见 `engine::ca`）。
+    pub const CONFDIR_DIR: &str = "confdir";
+    /// **v2 遗留**的 agent 工件目录（注入器时代）。
+    ///
+    /// v3 的产品路径**永不创建**它；这里登记它只为了一件事：升级时把旧状态目录里
+    /// 残留的 `<state_dir>/agent/<env>/` 清掉（见 [`ManagerConfig::legacy_agent_dir`]）。
+    /// 登记在表里而不是随手拼字面量，是为了"这个名字在本仓只出现一次"这条纪律。
+    pub const LEGACY_AGENT_DIR: &str = "agent";
+}
+
 /// 状态文件里一份环境的形状（就是 `Environment::to_json` 的结果）。
 pub type EnvironmentJson = serde_json::Value;
 
@@ -137,10 +180,17 @@ impl PersistedState {
 #[derive(Debug, Clone)]
 pub struct ManagerConfig {
     pub state_dir: PathBuf,
-    pub runtime_dir: PathBuf,
     pub rules_dir: PathBuf,
-    pub agent_dir: PathBuf,
     pub confdir: PathBuf,
+    /// 请求轨迹目录（数据面事件流）。
+    ///
+    /// `None` = 轨迹不落盘（`--no-log-file`）。
+    ///
+    /// **位置不跟 `--log-dir` 走**：轨迹是数据面事件流（有字节偏移游标、独立生命周期），
+    /// 不是实例日志。原来它挂在 `log_dir` 下面，于是"改日志目录"会顺带搬走轨迹
+    /// —— 一条与调用方意图无关的副作用。现在两件事各归各：**落到哪**由状态目录定，
+    /// **要不要落盘**由 `--no-log-file` 定。
+    pub trajectories_dir: Option<PathBuf>,
     /// 实例日志落盘目录。`None` = **不落盘**，只在内存里保留有界环形缓冲（`--no-log-file`）。
     ///
     /// 默认**落盘**：子进程的 stdout/stderr 直接接文件（没有管道、我们进程不在链路上），
@@ -158,14 +208,16 @@ pub struct ManagerConfig {
 
 impl ManagerConfig {
     /// 从一个 state_dir 推出全部默认路径。
+    ///
+    /// **所有路径都从 `state_dir` 派生**（`--log-dir` 是唯一的例外，它是显式覆盖）。
+    /// 字面量只在 [`layout`] 里出现一次；这里不再重复任何目录名。
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
         let state_dir = state_dir.into();
         Self {
-            runtime_dir: state_dir.join("runtime"),
-            rules_dir: state_dir.join("rules"),
-            agent_dir: state_dir.join("agent"),
-            confdir: state_dir.join("shared").join("confdir"),
-            log_dir: Some(state_dir.join("logs")),
+            rules_dir: state_dir.join(layout::RULES_DIR),
+            confdir: state_dir.join(layout::SHARED_DIR).join(layout::CONFDIR_DIR),
+            trajectories_dir: Some(state_dir.join(layout::TRAJECTORIES_DIR)),
+            log_dir: Some(state_dir.join(layout::LOGS_DIR)),
             max_log_bytes: DEFAULT_MAX_LOG_BYTES,
             state_dir,
             listen_host: DEFAULT_LISTEN_HOST,
@@ -175,32 +227,44 @@ impl ManagerConfig {
         }
     }
 
-    /// 某个环境的 agent 目录（v2 遗留工件的去处；remove 时整目录清扫）。
-    ///
-    /// 环境名已在 domain 层过白名单校验，所以这里的拼接不会逃出 `agent_dir`。
-    pub fn env_agent_dir(&self, env: &str) -> PathBuf {
-        self.agent_dir.join(env)
+    /// 账本文件（环境、规则、代理、期望状态的唯一真相）。
+    pub fn state_file(&self) -> PathBuf {
+        self.state_dir.join(layout::STATE_FILE)
     }
 
-    pub fn state_file(&self) -> PathBuf {
-        self.state_dir.join("state.json")
+    /// 界面偏好文件（桌面形态写；坏文件回落到默认，永不拦启动）。
+    ///
+    /// 路径规则登记在 [`layout`] 里，但**写它的是界面形态** —— 所以这个函数
+    /// 归界面那一侧用，管理器自己不碰这个文件。
+    pub fn ui_prefs_file(&self) -> PathBuf {
+        self.state_dir.join(layout::UI_PREFS_FILE)
     }
 
     /// 控制面审计事件日志（E-B：权威在 state.json，事件是观察）。
     pub fn events_file(&self) -> PathBuf {
-        self.state_dir.join("events.jsonl")
+        self.state_dir.join(layout::EVENTS_FILE)
     }
 
     /// 某个环境的请求轨迹文件（`<state_dir>/trajectories/<env>.jsonl`）。
-    /// `None` = 日志目录被显式关闭（--no-log-file）时连轨迹一起关。
+    ///
+    /// `None` = 轨迹不落盘（`--no-log-file`）。
     pub fn trajectory_file(&self, env: &str) -> Option<PathBuf> {
-        self.log_dir
+        self.trajectories_dir
             .as_ref()
-            .map(|dir| dir.join("trajectories").join(format!("{env}.jsonl")))
+            .map(|dir| dir.join(format!("{env}.jsonl")))
     }
 
     pub fn lock_file(&self) -> PathBuf {
-        self.state_dir.join("lock")
+        self.state_dir.join(layout::LOCK_FILE)
+    }
+
+    /// **v2 遗留**的 agent 工件目录（注入器时代）：`<state_dir>/agent/<env>/`。
+    ///
+    /// v3 的产品路径永不创建它 —— 这个方法只为**清扫**而存在：删环境 / 改环境名时
+    /// 把旧状态目录里的残留一并带走（残留不清就永远留在那儿，占着地方还误导人）。
+    /// 环境名已在 domain 层过白名单校验，所以这里的拼接不会逃出 agent 目录。
+    pub fn legacy_agent_dir(&self, env: &str) -> PathBuf {
+        self.state_dir.join(layout::LEGACY_AGENT_DIR).join(env)
     }
 
     /// 某个环境的日志文件绝对路径（白名单名字 + 固定父目录）。
@@ -208,11 +272,6 @@ impl ManagerConfig {
         self.log_dir
             .as_ref()
             .map(|dir| dir.join(format!("{env}.log")))
-    }
-
-    /// 轮转后保留的那一份。
-    pub fn rotated_log_file(&self, env: &str) -> Option<PathBuf> {
-        self.log_file(env).map(|path| path.with_extension("log.1"))
     }
 
     /// 某个环境的规则文件绝对路径 —— **名字白名单 + 固定父目录 + 固定后缀**，
@@ -266,14 +325,16 @@ pub struct InstanceLock {
 impl InstanceLock {
     pub fn acquire(path: &Path) -> Result<Self, Error> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::io_at("create the state directory", parent, e))?;
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(path)?;
+            .open(path)
+            .map_err(|e| Error::io_at("open the instance lock", path, e))?;
         // 状态目录下的东西一律收紧（同款纪律）。
         restrict_permissions(path)?;
 
@@ -312,7 +373,8 @@ impl crate::ports::StateRepo for JsonFileStateRepo {
         if !self.path.exists() {
             return Ok(PersistedState::default());
         }
-        let raw = std::fs::read_to_string(&self.path)?;
+        let raw = std::fs::read_to_string(&self.path)
+            .map_err(|e| Error::io_at("read the state file", &self.path, e))?;
         let state: PersistedState = serde_json::from_str(&raw).map_err(|error| {
             Error::new(
                 ErrorCode::StoreFailure,
@@ -333,13 +395,15 @@ impl crate::ports::StateRepo for JsonFileStateRepo {
 
     fn save(&self, state: &PersistedState) -> Result<(), Error> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::io_at("create the state directory", parent, e))?;
         }
         let raw = serde_json::to_vec_pretty(state)?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &raw)?;
+        std::fs::write(&tmp, &raw).map_err(|e| Error::io_at("write the state file", &tmp, e))?;
         restrict_permissions(&tmp)?;
-        std::fs::rename(&tmp, &self.path)?;
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| Error::io_at("replace the state file", &self.path, e))?;
         Ok(())
     }
 }
@@ -381,6 +445,40 @@ mod tests {
             PathBuf::from("/tmp/envboard-test/rules/beta.rules")
         );
         assert_eq!(config.lock_file(), PathBuf::from("/tmp/envboard-test/lock"));
+    }
+
+    #[test]
+    fn the_trajectory_sits_beside_the_logs_not_inside_them() {
+        // 轨迹是数据面事件流，不是实例日志：它与 `logs/` **平级**，
+        // 不挂在日志目录下 —— 否则 `--log-dir` 改址会顺带搬走轨迹。
+        let config = ManagerConfig::new("/tmp/envboard-test");
+        let trajectory = config.trajectory_file("beta").expect("默认要落盘");
+        assert_eq!(
+            trajectory,
+            PathBuf::from("/tmp/envboard-test/trajectories/beta.jsonl"),
+            "轨迹必须在状态目录的 trajectories 下"
+        );
+        let log_dir = config.log_dir.clone().expect("默认要落盘");
+        assert!(
+            !trajectory.starts_with(&log_dir),
+            "轨迹不该落在日志目录里面：{trajectory:?}"
+        );
+    }
+
+    #[test]
+    fn the_layout_table_covers_everything_the_state_dir_holds() {
+        // 布局表是"规范"：少登记一项就等于给布局开了个没锁的口子。
+        // 门禁 `tests/policy-tests/tests/state_layout.rs` 从另一头盯这件事。
+        assert_eq!(layout::STATE_FILE, "state.json");
+        assert_eq!(layout::UI_PREFS_FILE, "ui.json");
+        assert_eq!(layout::EVENTS_FILE, "events.jsonl");
+        assert_eq!(layout::LOCK_FILE, "lock");
+        assert_eq!(layout::RULES_DIR, "rules");
+        assert_eq!(layout::LOGS_DIR, "logs");
+        assert_eq!(layout::TRAJECTORIES_DIR, "trajectories");
+        assert_eq!(layout::SHARED_DIR, "shared");
+        assert_eq!(layout::CONFDIR_DIR, "confdir");
+        assert_eq!(layout::LEGACY_AGENT_DIR, "agent");
     }
 
     #[test]

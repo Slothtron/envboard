@@ -221,7 +221,7 @@ impl Manager {
 
         // v2 遗留的 agent 目录（注入器时代）在这里彻底消失；规则库里的规则不动
         // （它可能还被别的环境绑着，删除规则是 rules.delete 的事）。
-        let agent_dir = self.config.env_agent_dir(name);
+        let agent_dir = self.config.legacy_agent_dir(name);
         if agent_dir.exists() {
             std::fs::remove_dir_all(&agent_dir)?;
         }
@@ -230,8 +230,9 @@ impl Manager {
 
     /// 热/停机矩阵（契约的一部分）：
     ///
-    /// * 热：description、insecure_hosts、rules 绑定、规则内容、upstream 绑定 ——
-    ///   全部经同步 apply 装配即生效（上游连接每请求新建，换绑定没有残留）；
+    /// * 热：description、insecure_hosts、mitm_hosts、rules 绑定、规则内容、
+    ///   upstream 绑定 —— 全部经同步 apply 装配即生效（上游连接每请求新建，
+    ///   换绑定没有残留；MITM 名单也是每连接在快照上判定）；
     /// * 停机：name、listen、proxy_user、proxy_password —— 划分与 v2 一致：
     ///   换端口/换身份要动监听与客户端配置，换凭据是安全语义的变更，都该是
     ///   一次显式的停机重启。v3 凭据已不经 argv，但字段划分不因实现方便而漂移。
@@ -245,14 +246,18 @@ impl Manager {
         let binding_changed = merged.rules() != environment.rules();
         let upstream_changed = merged.upstream() != environment.upstream();
         let insecure_changed = merged.insecure_hosts() != environment.insecure_hosts();
+        let mitm_changed = merged.mitm_hosts() != environment.mitm_hosts();
         let credentials_changed = merged.proxy_user() != environment.proxy_user()
             || merged.proxy_password() != environment.proxy_password();
         // capture 也是热字段：调试页「开启 / 切换」驱动的就是它。曾经它不在触发集合里，
         // 开关只落盘不热应用 —— 引擎手里的快照永远 capture=false，抓包计数恒 0，
         // 而页面忠实地把 0 渲染出来（坏的是数据源，不是渲染）。
         let capture_changed = merged.capture() != environment.capture();
-        let hot_changed =
-            binding_changed || upstream_changed || insecure_changed || capture_changed;
+        let hot_changed = binding_changed
+            || upstream_changed
+            || insecure_changed
+            || mitm_changed
+            || capture_changed;
         if (identity_changed || credentials_changed) && self.is_live(name) {
             return Err(Error::new(
                 ErrorCode::Conflict,
@@ -271,6 +276,7 @@ impl Manager {
             || binding_changed
             || upstream_changed
             || insecure_changed
+            || mitm_changed
             || credentials_changed;
 
         let mut state = self.state.lock().unwrap();
@@ -305,7 +311,7 @@ impl Manager {
                 };
                 self.handles.lock().unwrap().insert(new_name, moved);
             }
-            let old_dir = self.config.env_agent_dir(environment.name());
+            let old_dir = self.config.legacy_agent_dir(environment.name());
             if old_dir.exists() {
                 let _ = std::fs::remove_dir_all(&old_dir);
             }
@@ -325,6 +331,9 @@ impl Manager {
         }
         if insecure_changed {
             changed.push("insecure_hosts");
+        }
+        if mitm_changed {
+            changed.push("mitm_hosts");
         }
         if credentials_changed {
             changed.push("proxy_user/proxy_password");

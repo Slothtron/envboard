@@ -1,8 +1,8 @@
 //! 环境（`Environment`）领域模型 —— 纯逻辑，不碰 fs / 网络 / 宿主。
 //!
-//! 契约见 `spec/capabilities.md`（§领域不变量）。当前模型是 **8 个字段**：
-//! `name` / `listen` / `rules` / `upstream` / `insecure_hosts` / `description` /
-//! `proxy_user` / `proxy_password`。`upstream` 按名引用上游代理账本
+//! 契约见 `spec/capabilities.md`（§领域不变量）。当前模型是 **9 个字段**：
+//! `name` / `listen` / `rules` / `upstream` / `insecure_hosts` / `mitm_hosts` /
+//! `description` / `proxy_user` / `proxy_password`。`upstream` 按名引用上游代理账本
 //! （`crate::domain::upstream`），`null` = 直连 —— 与 `rules` 的按名绑定完全对称。
 //!
 //! 两条形状变更都**只做一次**（迁移 shim，读到旧形状就转换，写出永不含旧字段）：
@@ -27,6 +27,7 @@ pub const KNOWN_FIELDS: &[&str] = &[
     "rules",
     "upstream",
     "insecure_hosts",
+    "mitm_hosts",
     "description",
     "proxy_user",
     "proxy_password",
@@ -63,6 +64,9 @@ pub struct Environment {
     rules: Option<String>,
     upstream: Option<String>,
     insecure_hosts: Vec<String>,
+    /// MITM 白名单：**非空**时只对这些域名解密，其余 CONNECT 一律直通。
+    /// 空 = 全部解密（v3 以来的默认行为）。
+    mitm_hosts: Vec<String>,
     description: String,
     proxy_user: Option<String>,
     proxy_password: Option<String>,
@@ -84,6 +88,7 @@ impl Environment {
             rules,
             upstream: None,
             insecure_hosts,
+            mitm_hosts: Vec::new(),
             description: description.into(),
             proxy_user: None,
             proxy_password: None,
@@ -124,6 +129,11 @@ impl Environment {
     /// 按域名放宽上游证书校验的完整域名清单（**已归一化 + 去重 + 排序**）。
     pub fn insecure_hosts(&self) -> &[String] {
         &self.insecure_hosts
+    }
+
+    /// 只对这些域名做 MITM 解密的名单（**已归一化 + 去重 + 排序**）。空 = 全部解密。
+    pub fn mitm_hosts(&self) -> &[String] {
+        &self.mitm_hosts
     }
 
     pub fn description(&self) -> &str {
@@ -183,6 +193,15 @@ impl Environment {
             ),
         );
         out.insert(
+            "mitm_hosts".into(),
+            Value::Array(
+                self.mitm_hosts
+                    .iter()
+                    .map(|host| Value::String(host.clone()))
+                    .collect(),
+            ),
+        );
+        out.insert(
             "description".into(),
             Value::String(self.description.clone()),
         );
@@ -221,7 +240,16 @@ impl Environment {
         let (host, port) = parse_listen(object.get("listen"))?;
         let rules = normalize_rules(object.get("rules"))?;
         let upstream = normalize_upstream(object.get("upstream"))?;
-        let insecure_hosts = parse_insecure_hosts(object.get("insecure_hosts"))?;
+        let insecure_hosts = parse_host_list(
+            object.get("insecure_hosts"),
+            &format!("{PATH}.insecure_hosts"),
+            "insecure_hosts",
+        )?;
+        let mitm_hosts = parse_host_list(
+            object.get("mitm_hosts"),
+            &format!("{PATH}.mitm_hosts"),
+            "mitm_hosts",
+        )?;
         let description = parse_description(object.get("description"))?;
         let (proxy_user, proxy_password) = parse_credentials(object)?;
         let capture = parse_capture(object.get("capture"))?;
@@ -232,6 +260,7 @@ impl Environment {
             rules,
             upstream,
             insecure_hosts,
+            mitm_hosts,
             description,
             proxy_user,
             proxy_password,
@@ -339,7 +368,7 @@ pub fn normalize_rules(value: Option<&Value>) -> Result<Option<String>, Error> {
     }
     let raw = value.as_str().ok_or_else(|| {
         Error::invalid_config(
-            &field,
+            field,
             format!("rules must be a string or null, got {value}"),
         )
     })?;
@@ -366,7 +395,7 @@ pub fn normalize_upstream(value: Option<&Value>) -> Result<Option<String>, Error
     }
     let raw = value.as_str().ok_or_else(|| {
         Error::invalid_config(
-            &field,
+            field,
             format!("upstream must be a string or null, got {value}"),
         )
     })?;
@@ -499,14 +528,13 @@ fn parse_description(value: Option<&Value>) -> Result<String, Error> {
     Ok(text)
 }
 
-/// `insecure_hosts` 解析：缺省/`null` = 空列表；否则必须是字符串数组。
+/// 主机名单解析（`insecure_hosts` 与 `mitm_hosts` 共用）：缺省/`null` = 空列表；
+/// 否则必须是字符串数组。
 ///
 /// 每条都归一化（trim → 小写 → 去尾部根点）后**去重 + 排序**再持久化，
-/// 所以"同一份输入"永远得到"同一份列表"。拒绝通配符的理由见
-/// `spec/capabilities.md` 的「insecure_hosts（按域名放宽上游校验）」一节：
-/// 放宽校验必须逐条点名，偷偷扩大范围比不生效更危险。
-fn parse_insecure_hosts(value: Option<&Value>) -> Result<Vec<String>, Error> {
-    let field = format!("{PATH}.insecure_hosts");
+/// 所以"同一份输入"永远得到"同一份列表"。拒绝通配符：两张名单都是**逐条点名**
+/// 的语义（放宽校验 / 缩小解密面），偷偷扩大范围比不生效更危险。
+fn parse_host_list(value: Option<&Value>, field: &str, label: &str) -> Result<Vec<String>, Error> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -515,15 +543,15 @@ fn parse_insecure_hosts(value: Option<&Value>) -> Result<Vec<String>, Error> {
     }
     let array = value.as_array().ok_or_else(|| {
         Error::invalid_config(
-            &field,
-            format!("insecure_hosts must be an array of complete domain names, got {value}"),
+            field,
+            format!("{label} must be an array of complete domain names, got {value}"),
         )
     })?;
     if array.len() > crate::rules::INSECURE_HOSTS_MAX {
         return Err(Error::invalid_config(
-            &field,
+            field,
             format!(
-                "insecure_hosts has {} entries; the limit is {}",
+                "{label} has {} entries; the limit is {}",
                 array.len(),
                 crate::rules::INSECURE_HOSTS_MAX
             ),
@@ -540,7 +568,7 @@ fn parse_insecure_hosts(value: Option<&Value>) -> Result<Vec<String>, Error> {
             return Err(Error::invalid_config(
                 &entry_field,
                 format!(
-                    "{raw:?} contains a wildcard: insecure_hosts matches complete domain names \
+                    "{raw:?} contains a wildcard: {label} matches complete domain names \
                      only, so list every domain explicitly (wildcards are not expanded)"
                 ),
             ));

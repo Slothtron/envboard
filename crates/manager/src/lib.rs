@@ -40,5 +40,5 @@ pub use manager::Manager;
 pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};
 pub use state::{
     InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION, StoredError,
-    StoredRules,
+    StoredRules, layout,
 };

@@ -15,7 +15,7 @@ use crate::{
     ProxyEngine,
 };
 
-use crate::ca::SharedCa;
+use crate::ca::CaStore;
 use crate::config::EngineConfig;
 use crate::engine::{EngineInstance, EngineState};
 use crate::logsink::BoundedLinePump;
@@ -52,7 +52,7 @@ impl Entry {
 
 /// v3 引擎后端（进程内、多线程安全：簿记锁只保护 map，不跨 await 持有）。
 pub struct EngineBackend {
-    ca: Arc<SharedCa>,
+    ca: CaStore,
     entries: Mutex<BTreeMap<String, Entry>>,
     /// 轨迹记录器与会话 id，**独立于 entries 的生命周期**：stop 移除 Entry 后
     /// 再 start，seq/request_id 仍要续着上一次的走（否则轨迹文件断档）。
@@ -60,7 +60,7 @@ pub struct EngineBackend {
 }
 
 impl EngineBackend {
-    pub fn new(ca: Arc<SharedCa>) -> Self {
+    pub fn new(ca: CaStore) -> Self {
         EngineBackend {
             ca,
             entries: Mutex::new(BTreeMap::new()),
@@ -73,6 +73,7 @@ fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> Engine
     EngineConfig {
         listen: spec.listen,
         insecure_hosts: spec.insecure_hosts.clone(),
+        mitm_hosts: spec.mitm_hosts.clone(),
         proxy_user: spec.proxy_user.clone(),
         proxy_password: spec.proxy_password.clone(),
         upstream: spec.upstream.clone(),
@@ -138,7 +139,7 @@ impl ProxyEngine for EngineBackend {
         };
         let engine = EngineInstance::start(
             spec_to_config(&spec, Some(pump.writer())),
-            Arc::clone(&self.ca),
+            self.ca.clone(),
             recorder,
             session_id,
         )?;

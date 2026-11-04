@@ -43,9 +43,10 @@ environment.validate  ←  environment.merge
 
 ### 环境（`Environment`）
 
-v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**当前模型是 8 个字段**：
+v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**当前模型是 9 个字段**：
 任意的 `options` 透传**已删除**、`proxy_auth` **已拆成两个字段**、新增 `insecure_hosts`
-与 `upstream`（按名引用上游代理账本，见本文件「上游代理（chained proxy）」）。
+与 `upstream`（按名引用上游代理账本，见本文件「上游代理（chained proxy）」），
+以及 `mitm_hosts`（MITM 白名单，见本文件「mitm_hosts（只解密这些域名）」）。
 
 | 字段 | JSON 形状 | 约束 | 生效 |
 |---|---|---|---|
@@ -54,6 +55,7 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 | `rules` | `string \| null` | 规则名（**不是路径**，见本文件「规则库账本与固定名软链」） | **热**（换软链） |
 | `upstream` | `string \| null` | 上游代理名（引用代理账本；`null` = 直连）；名字白名单与 `rules` 同形 | **热** |
 | `insecure_hosts` | `string[]` | 完整域名（也接受 IP 字面量）；拒绝 `*` / `?`；≤200 条；归一化 + 去重 + 排序；默认 `[]` | **热** |
+| `mitm_hosts` | `string[]` | 同上约束；**空 = 全部解密**，非空 = 只解密列出的域名；默认 `[]` | **热** |
 | `description` | `string` | 可空；最长 200 字符 | 热 |
 | `proxy_user` | `string \| null` | 与 `proxy_password` **同生共死**；非空时不含 `:`、空白或控制字符；≤64 字符 | 停机 |
 | `proxy_password` | `string \| null` | 同上；≤128 字符；**任何错误信息不回显取值** | 停机 |
@@ -91,6 +93,11 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
    - 条数 ≤200；失败 `field = environment.insecure_hosts`（不是数组 / 超限）或
      `environment.insecure_hosts.<index>`（某一项非法 / 值不是字符串）；
    - 持久化前**去重 + 按字典序排序**：同一份输入永远得到同一份列表，diff 才稳定。
+6b. **`mitm_hosts`**：MITM 白名单，语义见本文件「mitm_hosts（只解密这些域名）」。
+   约束与归一化**与 `insecure_hosts` 逐条相同**（同一个解析器、同一套拒绝规则、
+   同一次去重排序），只有判定方向相反：清单为空 = 全部解密（默认，行为与今天一致），
+   非空 = 只有列出的域名被解密，其余 CONNECT 直通。错误路径是
+   `environment.mitm_hosts` / `environment.mitm_hosts.<index>`。
 7. **`proxy_user` / `proxy_password`**：两个字段，**同生共死**。
    - 都 `null`/缺省 = 不启用代理鉴权；**只有一边** → `invalid_config`，
      `field` 指向**缺失**的那一边（`environment.proxy_password` / `environment.proxy_user`）；
@@ -117,22 +124,23 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 
 ### 归一化与默认值：只有一个来源
 
-默认值（`listen.host = 127.0.0.1`、`rules = null`、`insecure_hosts = []`、`description = ""`、
-`proxy_user = null`、`proxy_password = null`）在 core 里定义**一次**。宿主配置只做映射，
-适配器**禁止**再写一份默认值。
+默认值（`listen.host = 127.0.0.1`、`rules = null`、`insecure_hosts = []`、
+`mitm_hosts = []`、`description = ""`、`proxy_user = null`、`proxy_password = null`）
+在 core 里定义**一次**。宿主配置只做映射，适配器**禁止**再写一份默认值。
 `environment.validate` 的输出即"归一化后的完整记录"，可直接持久化。
 
 ### 编辑已有环境（PATCH 语义）
 
 环境是**可改的**，不必删了重建。请求体是"要改的字段"的集合，没出现的字段一律不动
-（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 7 个，未知字段照样失败。
+（`environment.merge` 的 golden case 钉住了这条）；可改字段就是上表那 8 个，未知字段照样失败。
 
 `rules: null` 与"没给 `rules`"是**两件事**：前者是"解绑，回到不覆盖"，后者是"别动绑定"。
-`insecure_hosts: null` 与"没给"同理（前者 = 清空回 `[]`，回到全部严格校验）。
+`insecure_hosts: null` 与"没给"同理（前者 = 清空回 `[]`，回到全部严格校验）；
+`mitm_hosts: null` 同样（清空 = 回到"全部解密"）。
 
-`insecure_hosts` 与 `listen` 同款：**整体替换**，不是元素级合并 —— 列表的"部分修改"
-没有无歧义的语义，所以给出来的数组就是新值。凭据两个字段是逐字段的（合并后**重新校验**
-"同生共死"）。
+`insecure_hosts`、`mitm_hosts` 与 `listen` 同款：**整体替换**，不是元素级合并 —— 列表的
+"部分修改"没有无歧义的语义，所以给出来的数组就是新值。凭据两个字段是逐字段的
+（合并后**重新校验**"同生共死"）。
 
 哪些改动**要求环境处于停止状态**，由"运行中的实例会不会因此与配置分叉"裁决：
 
@@ -140,6 +148,7 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 |---|---|---|
 | `description` | ✅ 允许（热） | 纯展示字段，实例不读它 |
 | `insecure_hosts` | ✅ 允许（热） | 注入器轮询 `config.json`，一变就整份重读（见下节） |
+| `mitm_hosts` | ✅ 允许（热） | 判定在每连接的配置快照上做，换快照即生效，下一条 CONNECT 就走新名单 |
 | `rules` **绑定** | ✅ 允许（热） | 绑定由**固定名软链**承载：管理器原子换链 + 重写 `config.json`，注入器下一次轮询跟上；实例不必重启 |
 | 规则文件的**内容** | ✅ 允许（热） | 注入器按目标文件的 `(mtime, size)` 重读；绑定没变也不必重启 |
 | `upstream` **绑定** | ✅ 允许（热） | 上游连接每请求新建，绑定经同步 apply 换快照，下一请求即生效（v3：无注入器，装配即生效） |
@@ -153,7 +162,7 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 进程记录都跟着搬到新名字下，旧名字在账本里消失。改名**不搬日志文件** —— 日志按名字落盘，
 新名字从新文件开始（见 `instance.logs`）。
 
-改了 `listen`、`rules` 绑定、`insecure_hosts` 或凭据即作废**旧的失败标记**
+改了 `listen`、`rules` 绑定、`insecure_hosts`、`mitm_hosts` 或凭据即作废**旧的失败标记**
 （`port_conflict` / `config_mismatch`）并**重置收敛基准**：那两个标记陈述的是
 "上一个配置失败了"，留着它会让界面拿**新**配置报旧冲突（`config_mismatch` 尤其可能
 正是由某个凭据或放行清单引起的）；收敛基准不重置的话，新配置会继承旧窗口，
@@ -193,6 +202,53 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
   随 `options` 一起删除）。
 - 判定失败时**倾向严格**：注入器构造 context 出错只记一条 warn，不设置 `ssl_conn`，
   于是 core 走它自己的严格路径 —— 宁可连不上，也不能在出错时把校验静默关掉。
+
+## mitm_hosts（只解密这些域名）
+
+**问题**：装上本工具的 CA 之后，**所有** HTTPS 都会被解密。多数人只想让它碰
+手上的几个服务，其余流量（网银、公司内部系统、带证书固定的客户端）应该原样穿过去，
+连 CA 都不参与。全局关掉解密等于放弃全部能力，所以要一份**白名单**。
+
+**定义**：`mitm_hosts` 是完整域名（或 IP 字面量）集合，判定发生在 **CONNECT 的
+authority 主机名**上（此时还没解密，拿不到 SNI）：
+
+| 清单 | CONNECT 主机 | 结果 |
+|---|---|---|
+| `[]` | 任意 | 解密（默认：行为与引入本字段前一致） |
+| `["app.example.com"]` | `app.example.com` | 解密 |
+| `["app.example.com"]` | `other.example.com` | **直通**（盲隧道） |
+| `["example.com"]` | `app.example.com` | **直通**（不做子域继承） |
+
+- 匹配规则与 `insecure_hosts` **同一份实现**（归一化、精确相等、无通配符），
+  因为两者回答的是同一个问题"这个域名算不算在内"，只是答案的方向相反。
+- **直通 = 盲隧道**：`CONNECT` 应答 200 后 `copy_bidirectional` 双向抄字节，不 TLS
+  accept、不解密、不抓包、不记轨迹、不改写内容。
+- **鉴权仍必须在 CONNECT 上判**：隧道里看不到 HTTP，所以要求 CONNECT 自带
+  `Proxy-Authorization`，缺了或不对就 407。否则"名单外的域名"就成了绕过代理鉴权的通道。
+- **路由照旧**：白名单只管**解密**，不管**路由** —— hosts 规则仍会改写隧道要连的目标
+  地址。同一份规则在解密与不解密两种情形下连到不同的地方，用户无从预期；是否解密
+  是显式选择，连到哪不该跟着变。
+- **建连先于 200**：上游连不上就如实回 502，不让客户端拿到"已建立"之后才发现对面是死的。
+- 判定每连接读一次配置快照，所以**热生效**（换名单不必重启实例）。
+
+## 共享 CA（身份、轮换、按域名签发、信任库探测）
+
+- **身份是自己的**：CA 的 CN 是 `envboard`，落盘为 `shared/confdir/envboard-ca.pem`
+  （私钥 + 证书）与 `envboard-ca-cert.pem`（只含证书，客户端安装的就是它）。
+  同目录下的 `mitmproxy-ca.pem` / `mitmproxy-ca-cert.pem` **不再被读取或复用**：
+  借用别的工具的 CA 身份意味着"这个私钥是谁签的"永远说不清，也无法独立轮换。
+  旧文件**不删**（那是用户的文件），只在首次生成时给一条提示。
+- **轮换（重新签发）**：生成一张新 CA，覆盖上面两个文件，并把运行中实例的装配
+  换成新证书 —— `CaStore` 是引擎**每连接**读取的当前值，所以下一条 CONNECT 就用新
+  证书，**不必重启环境**。旧证书不从系统信任库移除：那是用户的决定，本工具不替他做。
+  轮换后客户端必须重新安装新证书，否则链校验失败（这是轮换的必然代价，界面明说）。
+- **按域名签发**：给定主机名，用当前 CA 现签一张叶子证书，返回证书 PEM 与私钥 PEM
+  （只经剪贴板交付，不落盘、不进视图日志）。用途是把某个服务固定到一张具体证书上，
+  而不是让代理每次现签。
+- **信任库探测是只读的**：枚举 `当前用户\ROOT` 与 `本机\ROOT` 两个系统存储，与当前
+  CA 的 DER **逐字节**比较（本仓只有 SHA-256，不做 SHA-1 哈希查找）；任一存储命中即
+  "已安装"。**检测，不安装也不卸载** —— 写系统存储会弹一次安全警告，那是用户的动作。
+  探测不到（非 Windows、或系统 API 失败）时如实说"不知道"，不猜"未安装"。
 
 ## 上游代理（chained proxy）
 
@@ -340,6 +396,44 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
 （`trajectories/<env>.jsonl`）的信封、词汇表、fail-closed 读契约与发射点纪律
 见 `spec/events.md`（唯一出处，这里不重复）。
 
+**两条路径互不牵扯**（这是布局层面的约定，不是运行时细节）：
+
+- 轨迹目录**固定**在 `<state_dir>/trajectories/`，与实例日志目录**平级**。轨迹是
+  数据面事件流（自己的字节偏移游标与生命周期），实例日志是诊断产物；让轨迹挂在
+  日志目录下，会让"改日志目录"顺带搬走轨迹 —— 一条与调用方意图无关的副作用。
+  两者现在都只有"跟随状态目录"这一种位置（改址的入口已随命令行参数出库）。
+- "**要不要落盘**"是日志与轨迹**共用**的开关（`ManagerConfig::log_dir` /
+  `trajectories_dir` 同时为 `None`）：数据面事件流不是可丢弃的诊断产物，
+  只关日志等于让请求轨迹凭空消失，所以两者只能一起关。
+
+## 状态目录布局
+
+`<state_dir>` 里能出现什么是**规范**（README 有同一棵树的图）：账本、界面偏好、
+单实例锁、规则物化目录、实例日志目录、事件文件、轨迹目录、共享 CA 目录。
+
+**实现只有一处**：`crates/manager/src/state.rs` 的 `layout` 模块登记全部路径
+字面量，其余任何文件都不得自己拼路径。门禁
+`tests/policy-tests/tests/state_layout.rs` 盯着这件事（布局字面量只许出现在
+`state.rs`；布局表本身必须登记齐全）。理由很朴素：路径规则有两份实现就必然漂移，
+而漂移的症状（"文件在、路径对，就是读不出来"）从外部几乎无法归因。
+
+状态目录**怎么定下来**（回退链，顺序不可换）：调用方直接给的目录 →
+`$ENVBOARD_STATE_DIR` → **便携模式**（exe 同目录存在 `<应用名>.portable` 标记时用
+`<exe 目录>/<应用名>-data`）→ 平台默认目录（Windows `%LOCALAPPDATA%\envboard`；macOS
+`~/Library/Application Support/envboard`；Linux `$XDG_STATE_HOME/envboard`，未设时
+`~/.local/state/envboard`）。平台默认位置都落在"机器相关的应用数据"那一档，
+且都套一层 `envboard` 目录（规范要求），**不在主目录根**。便携模式以**正在运行的
+exe** 为基准（不是进程 cwd）：数据在哪不能由启动方式决定。
+
+**命令行不暴露 `--state-dir`**：桌面客户端是这个二进制唯一的入口，用户换位置
+只有 `$ENVBOARD_STATE_DIR` 与便携标记两条路（组合根仍保留"调用方直接给目录"的能力，
+那是给测试与将来的第二个入口用的）。
+
+读到的值会被**规范化**：`~` 展开成用户主目录、相对路径补成绝对路径
+—— 路径不规范化时用户写的是"一个合法的目录名"，报出来的却是"文件名、目录名或卷标语法不正确"。
+环境变量另守两条：**空串等同未设置**（继续回退），**相对路径的
+`$XDG_STATE_HOME` 视为无效并忽略**（XDG 原文口径）。
+
 ## 实例日志（instance.logs）
 
 引擎在管理进程的**进程内**；日志链路的硬约束不变，载体换了：
@@ -349,9 +443,9 @@ v1 有 8 个字段，v2 收成 5 个，v2.1 增加到第 6 个 `proxy_auth`。**
   引擎在请求终点把单行摘要投递进**有界总线**（容量 1024 行），投递是
   try_send —— 满了就地**丢弃并计数**（EngineReport.log_drops 可见），专用泵线程把行落盘。
   请求路径上没有管道、没有同步磁盘 IO。
-- **文件形态**：每环境一份 <log_dir>/<env>.log（默认 <state_dir>/logs，--log-dir 可改，
-  --no-log-file 关闭）。每次启动写一行运行标记，追加不截断 —— 跨重启的历史要留着，
-  标记负责分段。
+- **文件形态**：每环境一份 `<state_dir>/logs/<env>.log`（位置跟随状态目录布局，
+  没有单独的改址入口；不落盘时整个目录不创建）。每次启动写一行运行标记，追加不截断
+  —— 跨重启的历史要留着，标记负责分段。
 - **体积必须封顶**：max_log_bytes（默认 8 MiB；0 = 不轮转；下限 64 KiB，低于它等于静默
   丢日志）。轮转**只能是 copytruncate**：尾部搬去 <env>.log.1，原文件截断为 0。
   **禁止 rename 轮转** —— 写方还持着旧 inode 的 fd，改名后新文件永远是空的。
@@ -369,7 +463,7 @@ v3 只有一种 core（进程内纯库引擎，`envboard-core`）。矩阵保留
 |---|---|---|
 | 监听 | bind listen.host:port；EADDRINUSE → `port_conflict`（不试绑、不换端口） | 引擎线程内 `TcpListener::bind`，绑定即 `running` |
 | 代理鉴权 | Basic 407；CONNECT 与 absolute-URI 同一条门；凭据不进 argv/状态文件/视图 | 引擎鉴权门，内存定长时间比对 |
-| TLS 中间人 | 加载/兼容既有 confdir CA；按 SNI 现签叶子证书；已装客户端零感知 | `ca::SharedCa` + `tls::SniResolver` |
+| TLS 中间人 | 自有共享 CA（`envboard`，不复用旧 `mitmproxy-ca*.pem`）；按 SNI 现签叶子证书；已装客户端零感知 | `ca::SharedCa` + `tls::SniResolver` |
 | 上游证书策略 | `insecure_hosts` 精确匹配语义不变：SNI 优先、无 SNI 回退上连地址、SNI 存在未命中不回退；无全局关校验 | `ConnectTarget.tls_policy` + 连接执行器两档位 |
 | 改写 | hosts 规则只改连接目标：不动请求内容、不动 Host 头、不动 SNI 基准 | 引擎 connect 路径直调（`hosts::apply` 修订 `resolved_addr`） |
 | 日志 | 文件直写 `<log_dir>/<env>.log`、copytruncate 轮转、有界尾读；**数据面永不阻塞在写日志上** | 请求终局日志 + 有界总线（丢弃计数入 `EngineReport.log_drops`） |

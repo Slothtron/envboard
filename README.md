@@ -22,19 +22,20 @@
 | 环境 CRUD / 编辑 / 启停 / 显式重分配端口 / 规则绑定与热重载 | ✅ |
 | **热应用同步生效**：写操作返回后的第一个请求就是新配置（无轮询、无收敛窗） | ✅ |
 | 按域名放宽上游证书校验（`insecure_hosts`：精确匹配，运行中改立即生效） | ✅ |
+| **MITM 白名单**（`mitm_hosts`：空 = 全部解密；非空 = 只解密列出的域名，其余 CONNECT 字节原样直通，鉴权仍在 CONNECT 上判） | ✅ |
 | 端口自动分配（区间内随机试绑，新建冲突自动重试一次） | ✅ |
 | **上游代理（二级代理）**：按名管理的代理账本 + 环境按名绑定（热字段）；TLS 目标走 CONNECT 隧道（内层 TLS 与 `insecure_hosts` 语义不变），明文 http 按 absolute-URI 转发；删除被引用的代理拒绝并点名 | ✅ |
 | 按 host 改写上连目标（hosts 规则，只改 `ConnectTarget.resolved_addr`） | ✅ |
 | CONNECT 隧道 + MITM 按 SNI 现签 + HTTP/1.1 缓冲转发；absolute-URI 正向代理；101 透传 | ✅ |
 | 代理访问鉴权（`proxy_user` / `proxy_password` → 407 门；**凭据只在内存**，不进 argv / 视图 / 日志） | ✅ |
-| 共享 CA（所有实例一张；兼容加载 mitmproxy 形状的同名 CA 文件，已装证书的客户端零感知） | ✅ |
+| 自有共享 CA（所有实例一张，`envboard` 为 CN；**不复用**同目录下 `mitmproxy-ca*.pem`，只提示它们还在） | ✅ |
 | 规则库账本（`state.json` 的 `rules[]` 是唯一真相；物化文件可再生；启动对账回填） | ✅ |
 | 期望状态 reconcile（引擎线程 panic → `failed` → 按 desired 自动重启 = 崩溃自愈） | ✅ |
 | 单实例锁、状态原子写 + 0600 | ✅ |
-| **桌面工作台**：环境列表（搜索 / 状态过滤 / 排序 / 启停 / 删除 / 新建）、详情面板（概览 / 配置 / 规则三页签）、规则集目录（搜索 / 引用反查 / 查看原文 / 导入 / 删除）、上游代理目录（引用反查 / 新建 / 编辑 / 删除） | ✅ |
-| **调试 / 抓包**：目标环境单例会话、实时记录表（时间 UTC / 方法 / 主机 / 路径 / 状态 / 大小）、请求与响应详情（头 + 正文）、清空 / 停止 | ✅ |
-| **CA 屏**：共享根证书摘要（主体 / 有效期 / 算法 / 指纹）、证书文件路径、复制路径 / 复制 PEM、装证书步骤（**私钥不进界面**） | ✅ |
-| **设置**：主题三档（浅色 / 深色 / 系统，存 `<state_dir>/ui.json`）+ 关于（版本、引擎、状态目录、端口区间、装配警告） | ✅ |
+| **桌面工作台**：环境列表（搜索 / 状态过滤 / 排序 / 启停 / 删除 / 新建）、底部状态栏聚合（运行中 / 需处理 / 抓包 / 规则 / 上游 / 证书信任；F6 聚焦后 ←/→ 走查、Enter 跳转）、详情面板（概览 / 配置 / 规则三页签）、规则集目录（搜索 / 引用反查 / 查看原文 / 导入 / 删除）、上游代理目录（引用反查 / 新建 / 编辑 / 删除） | ✅ |
+| **调试 / 抓包**：目标环境单例会话、实时记录表（时间 UTC / 方法 / 主机 / 路径 / 状态 / 耗时 / 大小；↑/↓ 选行、Enter 看详情）、方法·状态档·主机三维筛选（可收起）、请求与响应详情（头 + 正文）、清空 / 停止 | ✅ |
+| **CA 屏**：证书摘要（主体 / 有效期 / 算法 / 指纹）、**系统信任库探测**（当前用户 / 本机 ROOT，只读）、证书文件路径、复制路径 / 复制 PEM、**重新签发**（对运行中实例下一次 CONNECT 即生效）、**按域名签发叶子证书**（证书 + 私钥，只经剪贴板交付）、装证书步骤（**CA 私钥不进界面**） | ✅ |
+| **设置**：主题三档（浅色 / 深色 / 系统，存 `<state_dir>/ui.json`）+ 关于（引擎、版本、装配警告） | ✅ |
 | 请求轨迹页、HAR 导入会话、活动审计、跨环境对比 | ⏳ 引擎与管理器侧**已实现**，界面属于 P2 剩余部分 |
 | 环境监听 `0.0.0.0`（对外服务） | ✅ 引擎侧能力，工作台「配置」里有开关 |
 | HTTP/2 客户端（gRPC 等） | ❌ 数据面只实现 HTTP/1.1，见「已知限制」 |
@@ -112,6 +113,8 @@ desktop 的全部源码）只认识管理器的公开 API、不认识引擎装�
 于是换引擎实现不动界面，加界面形态只接 Admin 门面、不动协议
 （见 docs/adr-002-composition-root-in-envboard-host.md）。
 GUI 框架另有体积守卫：`gpui-kit` 只允许出现在 `crates/desktop`（第 11 条）。
+反向还有一条：**产物依赖里不许出现命令行解析库**（第 12 条，清单是封闭的）——
+产品不解析参数，想加开关得先说服评审它为什么不该进设置屏。
 
 ```
 <state_dir>/
@@ -122,8 +125,29 @@ GUI 框架另有体积守卫：`gpui-kit` 只允许出现在 `crates/desktop`（
 ├── logs/<env>.log    实例日志（copytruncate 轮转，保留一份 .1）
 ├── events.jsonl      控制面审计事件（权威仍是 state.json；8 MiB 轮转，见 spec/events.md）
 ├── trajectories/<env>.jsonl  请求轨迹（append-only 事件流，见 spec/events.md）
-└── shared/confdir/   共享 CA（mitmproxy-ca.pem / mitmproxy-ca-cert.pem）
+└── shared/confdir/   共享 CA（envboard-ca.pem 私钥+证书 / envboard-ca-cert.pem 只含证书）
 ```
+
+这张树是**规范**，实现只有一处：`crates/manager/src/state.rs` 的 `layout` 模块
+（路径字面量全部登记在那里，别的文件不许自己拼 —— 门禁
+`tests/policy-tests/tests/state_layout.rs` 盯着）。两份路径实现必然漂移，而漂移的
+症状是"文件在、路径对，就是读不出来"，从外部几乎无法归因。
+
+两处**位置**上的讲究：
+
+- **请求轨迹固定在 `<state_dir>/trajectories/`**：轨迹是数据面事件流（自己的字节偏移
+  游标与生命周期），不是实例日志，两者不该有从属关系。
+- **`logs/` 与 `trajectories/` 平级**：它们是两件事。
+
+还有一处**只清不建**的遗留路径：`<state_dir>/agent/<env>/`（v2 注入器时代的工件）。
+v3 永不创建它，只在删环境 / 改环境名时顺手清掉残留（`ManagerConfig::legacy_agent_dir`）
+—— 残留不清就永远留在那儿，占地方还误导人。
+
+**状态目录之外，envboard 不写任何位置**：没有注册表项、没有 `%ProgramFiles%`、
+没有 `/etc`、没有系统级目录。要换位置有两条路：`$ENVBOARD_STATE_DIR`（整套一起换），
+或者用**便携模式**（exe 同目录的 `envboard.portable` 标记，数据落在 exe 旁边的
+`envboard-data/`，打包方式见「打包与分发」）。两条路都是"整套一起换"，
+所以"备份它 / 删掉它 / 挪走它"这三个动作都有确定含义。
 
 ## 构建与快速开始
 
@@ -136,8 +160,14 @@ cargo build --release --locked --offline      # 产物：target/release/envboard
 export PATH="$PWD/target/release:$PATH"
 
 # 1) 起工作台 —— 二进制的唯一行为（界面 + 管理器 + 进程内引擎，全在一个进程里）
-envboard --state-dir ~/.envboard
+envboard
+#    不带参数时用平台默认状态目录（Windows：%LOCALAPPDATA%\envboard；
+#    macOS：~/Library/Application Support/envboard；
+#    Linux：$XDG_STATE_HOME/envboard，未设时 ~/.local/state/envboard）。
 #    界面直接出来，没有"再开浏览器"这一步；状态目录被另一个实例占用时响亮失败。
+#    要换目录：ENVBOARD_STATE_DIR=./scratch-state envboard（`~` 与相对路径都会被规范化）
+#    绿色版用 exe 同目录的 envboard.portable 标记，见「打包与分发」
+#    二进制本身不接命令行参数，见「配置 → 没有启动参数」。
 
 # 2) 导入规则 + 建环境：侧栏「规则」→「导入规则集」，再回「环境」→「新建环境」，
 #    在详情面板的「配置」页签里把规则绑上（绑定是热字段，不用重启环境）
@@ -172,28 +202,130 @@ curl https://api.example.com/
 - 热应用被拒时环境标 `failed`/`unhealthy` 并给原因，**界面在每次写操作后都补取一次
   快照**，所以"改了但没生效"看得见（`crates/desktop` 的取数纪律）。
 
+## 打包与分发
+
+发布物只有一个：桌面 GUI 二进制 `envboard`。
+
+### 单文件 exe
+
+```bash
+cargo build --release --locked --offline      # target/release/envboard.exe（约 34 MB）
+```
+
+这个 exe 是**自足**的：界面图标资产在编译期内嵌，运行时不读任何随附资源目录、
+配置文件或脚本。运行时依赖只有系统 DLL（`user32` / `d3d11` / `dwrite` / `dcomp` /
+`icuuc` 等，Windows 10 1903 起随系统）与 MSVC 运行库 `VCRUNTIME140.dll` —— 目标机器
+没有时装一次 Microsoft Visual C++ 2015-2022 可再发行组件，或者改用下面
+`--static-crt` 打一份静态 CRT 的包（实测只剩系统 DLL）。
+
+**双击不会弹出控制台黑框**：release 构建在 Windows 上声明为 GUI 子系统
+（`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`，见
+`crates/desktop/src/main.rs` 首行）。debug 构建保留控制台 —— `cargo run` 时日志与
+panic 回溯要看得到。代价是 GUI 子系统没有 stderr 接收者，所以启动失败靠原生对话框
+呈现（见「启动错误输出」一段）。
+
+只发 exe 也是合法的分发形态：免安装、不写注册表，状态照常落在
+`%LOCALAPPDATA%\envboard`（即「配置」里那张平台默认表）。
+
+### 绿色免安装压缩版
+
+```bash
+mise run package-portable        # 等价于：python scripts/package.py
+# 产物：dist/envboard-<版本>-<平台>-portable.zip
+
+python scripts/package.py --static-crt
+# 静态链接 CRT：去掉 VCRUNTIME140.dll 依赖（产物名多一个 -static，
+# 用独立目标目录 target/crt-static 构建；实测 +174 KB、首次多 3~4 分钟）
+```
+
+解压后的目录（Windows 版）：
+
+```
+envboard-0.3.0-windows-x64-portable/
+├── envboard.exe          单文件二进制
+├── envboard.portable     便携标记：它在，数据就放 exe 旁边
+└── README.txt            分发说明（双击前先看）
+```
+
+首次运行后多出 `envboard-data/`（就是「配置」里那棵 `<state_dir>` 树：账本、日志、
+轨迹、CA、单实例锁）。约定：
+
+- **整个目录可以整体搬走**：拷到 U 盘、换机器、改名都行，数据跟着走；
+- **删目录 = 卸载**：没有注册表项、没有 `%ProgramFiles%`、没有系统级残留；
+- **一个副本只能开一个实例**（锁在 `envboard-data/lock`）；不同目录的两个副本
+  互不影响，各自的锁与账本；
+- 想临时换数据位置仍可 `set ENVBOARD_STATE_DIR=D:\somewhere` —— 环境变量压过标记。
+
+打包脚本只做三件事：`cargo build --release --locked --offline`、按平台与版本号组装
+目录、打包成 zip。不签名、不写注册表、不改 PATH。
+
+### 分发前要知道的两件事
+
+- **没有代码签名**：未签名 exe 第一次运行会撞 SmartScreen（"Windows 已保护你的
+  电脑"），点「更多信息 → 仍要运行」。去掉提示只能买证书签名。
+- **杀软误报**：单文件 Rust 二进制偶发被启发式引擎标记，加白或上报即可。发行包里
+  不放启动器脚本——便携标记是数据文件，双击的就是 exe 本身，启动链路越短越稳。
+
 ## 配置
 
-### 启动参数
+### 没有启动参数
 
-| 参数 | 默认 | 说明 |
+环境变量之外，产品**不解析任何命令行参数**。这是从启动器/程序坞点开的 GUI，
+参数等于"藏在看不见的地方的配置"：用户永远拿不到，却要为它维护一套解析与帮助
+文本。所以端口区间、抓包预算、日志目录全部退回代码里的默认值：
+
+| 项目 | 固定值 | 想改怎么办 |
 |---|---|---|
-| `--state-dir <DIR>` | `$ENVBOARD_STATE_DIR`，其次 `~/.envboard` | 账本、锁、规则库、日志、共享 CA 都在它下面 |
-| `--port-range <MIN>-<MAX>` | `16000-16999` | 随机分配区间（避开常见服务端口与系统临时端口段） |
-| `--capture-budget <N>` | 256 MiB | 每环境抓包缓冲预算（`0` = 引擎默认） |
-| `--log-dir <DIR>` | `<state_dir>/logs` | 实例日志目录 |
-| `--no-log-file` | 关 | 实例日志不落盘（只在有界内存缓冲），日志面板读不到尾部；丢弃量经 `log_drops` 上报告 |
-| `--max-log-bytes <N>` | 8 MiB | 单环境日志上限，超过 copytruncate 轮转（保留一份 `.1`）；`0` = 不轮转；下限 64 KiB |
+| 新建环境的端口分配区间 | `16000-16999` | 单个环境端口冲突时在界面里改那一个环境的端口；区间本身是域常量（`engine::domain::DEFAULT_PORT_RANGE`） |
+| 抓包缓冲预算 | 256 MiB / 环境（引擎默认） | 待设置屏 |
+| 实例日志 | `<state_dir>/logs/<env>.log` | 位置跟随状态目录布局；路径信息计划在设置屏展示（本期未做） |
+| 单环境日志轮转上限 | 8 MiB（copytruncate，保留一份 `.1`） | 待设置屏 |
+
+带参数启动不会报错（可能只是从一个带参的快捷方式点开），但会在 stderr 给一行
+"不接受命令行参数（已忽略）"的提示——静默忽略会让人以为生效了。
+
+**外部输入只有两种**：`$ENVBOARD_STATE_DIR`（其次平台默认目录、便携标记，见下）。
+读到的值会被
+**规范化**后再用：`~` 展开成用户主目录（环境变量里的 `~` 不会被 shell 展开，
+`ENVBOARD_STATE_DIR=~/.envboard` 直接传进程序会得到一个字面目录名 `~`），
+相对路径补成绝对路径（否则"相对谁"取决于进程 cwd）。变量设成空串等同未设置
+（继续走平台默认）—— `ENVBOARD_STATE_DIR=${SOME_UNSET}` 这类写法很常见。
+环境变量**压过**便携标记：绿色包里想临时把数据指到别处，设一个变量就够，
+不用去动发行包里的标记文件。
+
+三个平台默认位置是**各平台自己的约定**，共同点是都在"机器相关的应用数据"那一档
+（`<基础目录>/envboard`，规范要求必须套一层自己的目录名）：
+
+| 平台 | 默认 | 为什么是这儿 |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\envboard` | `LocalAppData` 的定义就是 **nonroaming**；状态里含端口分配与单实例锁，跟着域账号漫游只会让两台机器互相打架，CA 私钥更没有漫游的理由 |
+| macOS | `~/Library/Application Support/envboard` | macOS 只有这一档：`FileManager.SearchPathDirectory` 里既没有 `state` 也没有 `logs`，配置与数据本来就同住 `Application Support` |
+| Linux | `$XDG_STATE_HOME/envboard` → `~/.local/state/envboard` | XDG 的 state 语义是"跨重启留存、但不够重要到进 `$XDG_DATA_HOME`"，与 Windows 的 nonroaming 是同一条轴 |
+
+**不放在主目录根**（`~/.envboard` 那种）：Windows 明文禁止
+（`CSIDL_PROFILE`：applications should not create files or folders at this level），
+macOS 要求自动生成的文件进 `Library`，Linux 要求进 `.config`/`.local/*`/`.cache`。
+
+读这三个环境变量时守两条规范纪律：**空串等同未设置**（继续往下回退，否则会拼出
+相对路径、把状态写进进程 cwd）；**`$XDG_STATE_HOME` 是相对路径时视为无效并忽略**
+（XDG 原文 `should consider the path invalid and ignore it`）。
 
 曾经的 `--listen` / `--token` 随 web 形态出库：桌面形态不起 HTTP 服务，
-也就没有"监听哪儿、要不要 token"这两件事。
+也就没有"监听哪儿、要不要 token"这两件事。其余开关（端口区间、抓包预算、日志目录）
+也一并出库——理由见上面「没有启动参数」。
 
-按域名放宽上游证书校验（`insecure_hosts`）与代理凭据的唯一入口是工作台的「配置」表单
-—— 它们是安全控制，做成"随便填个键值对"的文本框会让"配置说开了、引擎其实没收到"
-这种分叉无从排除。
+按域名放宽上游证书校验（`insecure_hosts`）、MITM 白名单（`mitm_hosts`）与代理凭据的
+唯一入口是工作台的「配置」表单 —— 它们是安全控制，做成"随便填个键值对"的文本框会让
+"配置说开了、引擎其实没收到"这种分叉无从排除。
 
 启动错误输出为 `envboard: <错误码>: <消息>`（带字段路径时附 `(field: …)`）；
 不可重试错误退出码 2，其余 1。非法配置**加载即失败**并给出字段路径。
+
+**双击启动时错误也看得见**：本二进制是 GUI 子系统进程，双击既不开控制台、也没有
+stderr 接收者，早年表现是"窗口（或一个黑框）一闪就没了"。现在这类启动（以及 `cmd start`
+那样句柄指向别处控制台的情况）会用原生对话框把同一句错误显示出来，`state_dir`
+相关失败还附一句"怎么换目录"。**终端里跑或输出被重定向时不弹**——那行 stderr 有人读，
+弹窗只会打断脚本与 CI。线程 panic（如开窗失败）同样会落到这个对话框。
 
 ### 凭据与对外服务
 
@@ -211,7 +343,8 @@ curl https://api.example.com/
   （自动分配只支持默认监听地址）。这是**代理端口**对外，不是工作台对外 ——
   工作台没有网络面可暴露了。
 - **密码输入打码**：桌面没有浏览器的 `type=password`，密码框靠显式声明
-  `InputState::masked(true)`（打码同时把值挡在剪贴板选择之外）。
+  `InputState::masked(true)`（打码同时把值挡在剪贴板选择之外），并给掩码切换钮
+  与 `Password` 内容类型（无障碍读作密码框）。
 
 ### 控制面入口
 
@@ -284,7 +417,7 @@ cargo test -p envboard-contract-tests          # fixture 形状 + 能力注册�
 桌面形态的界面纪律不是"设计规范"，而是**行为对账**：spec/desktop-parity.md 逐屏写明
 web 形态原来有什么、桌面现在有什么、差在哪、差的那部分怎么处置。视觉语汇由 GPUI 主题
 令牌承担（`cx.theme()`，界面不许写死色值），不再有机检规范 —— 曾经服务 SPA 的
-`spec/ui.md` / `spec/design.md` 与 `ui_style` 门禁随形态一起出库。 <!-- doc-scope-lint: allow -->
+`spec/ui.md` / `spec/design.md` 与 `ui_style` 门禁随形态一起出库。 <!-- doc-scope-lint: allow -->
 
 ## 健康与错误码
 
@@ -305,6 +438,14 @@ web 形态原来有什么、桌面现在有什么、差在哪、差的那部分�
 `port_range_exhausted` / `store_failure` / `internal_error` —— 语义与
 可重试性以 spec/errors.md 为准（HTTP 状态映射随传输面出库）。
 
+`store_failure` 的文案**一定带它动的是哪个路径**（`cannot create the CA directory
+<path>: …`）。看到 `cannot … <path>: 拒绝访问。 (os error 5)` 先查**进程权限**，
+不要查代码。Windows 上最隐蔽的一种是 **exe 所在目录被打了 Low 完整性标签**：
+进程于是继承 Low 完整性，`%LOCALAPPDATA%` 这类 Medium 位置**读得通、写不通**，
+症状正是启动即 `store_failure`。判据：`icacls <exe>` 看 `Mandatory Label`，
+或者把同一份 exe 拷到用户主目录下再跑一次 —— 行为翻转就说明是标签，用
+`icacls <目录> /setintegritylevel (OI)(CI)M` 修（新文件的标签跟着目录走）。
+
 ## 已知限制
 
 这一节**是契约的一部分**，不是免责声明：
@@ -324,6 +465,15 @@ web 形态原来有什么、桌面现在有什么、差在哪、差的那部分�
   匹配），写入时拒绝 `*` / `?` 通配符。无 SNI 时才退回按上连地址判定；SNI 存在但没
   命中**不**退回。放宽只降校验档，不改写 SNI —— 那台机器根本没有该域名的证书时，
   进名单也救不了。**没有"整个环境全关校验"的开关**。
+- **`mitm_hosts` 只解密点名的域名**：非空时名单外的 CONNECT 是盲隧道（不解密、不抓包、
+  不改写内容），但**路由照旧**（hosts 规则仍改写目标地址），鉴权也照旧要在 CONNECT 上判。
+  按域名签发叶子证书与 MITM 白名单是两件事：前者给某个服务一张固定证书，后者决定
+  "哪些流量被接管"。
+- **CA 身份是自己的**：签发链的根是 `envboard`（`<state_dir>/shared/confdir/` 下
+  `envboard-ca.pem` / `envboard-ca-cert.pem`）。从旧版本升级过来时，之前装的
+  `mitmproxy` CA 对新链路无效 —— 客户端要重装一次 `envboard-ca-cert.pem`。
+  「重新签发」只换证书，**不会**从系统信任库移除旧证书（那需要管理员权限与一次安全
+  警告，本工具只做只读探测：装没装，你自己看得到）。
 - **上游连接不复用**（一问一答）：热改规则 / 名单不会被连接池里的旧策略穿越。代价是
   被覆盖域名每个请求新建一次上连（多一次 TLS 握手）。"只改连到哪"的固有代价，正确性优先。
 - **请求 / 响应体默认缓冲**，`max_buffered_body` 上限 8 MiB（快照字段）：超限返回

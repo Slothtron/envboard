@@ -253,6 +253,7 @@ mod tests {
         EngineSpec {
             listen: envboard_engine::Listen::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
             insecure_hosts: Vec::new(),
+            mitm_hosts: Vec::new(),
             proxy_user: None,
             proxy_password: None,
             upstream: None,

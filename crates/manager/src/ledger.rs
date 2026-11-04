@@ -84,6 +84,7 @@ impl Manager {
         EngineSpec {
             listen: environment.listen(),
             insecure_hosts: environment.insecure_hosts().to_vec(),
+            mitm_hosts: environment.mitm_hosts().to_vec(),
             proxy_user: environment.proxy_user().map(str::to_string),
             proxy_password: environment.proxy_password().map(str::to_string),
             upstream,

@@ -11,23 +11,28 @@
 //! 补一次快照 —— 用户不该等下一拍才看到按钮灰下去。在途的环境名记在 delegate 里
 //! （按钮转圈 + 禁用，防连点），所以"哪一行在等回执"也只有一处真相。
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Disableable;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariant, ButtonVariants};
+use gpui_kit::component::button::{
+    Button, ButtonCustomVariant, ButtonGroup, ButtonVariant, ButtonVariants,
+};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::table::{
     Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::{Icon, IconName, Selectable, Sizable, WindowExt};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
     Window, div, px,
 };
@@ -37,13 +42,18 @@ use envboard_engine::Error;
 use envboard_protocol::{Desired, EnvView};
 
 use crate::display::{Tone, health_label, health_tone, listen_address, needs_attention};
+use crate::errors::{Action, Notice};
 use crate::host::{Host, hop};
 use crate::views::detail::Detail;
+use crate::views::{empty_state, empty_state_with_action, error_banner, text_tooltip};
 
 /// 一帧快照：`(账本代次, 全量环境视图)` —— 与 `AdminService::snapshot()` 同形。
-pub type Snapshot = Result<(u64, Vec<EnvView>), String>;
+///
+/// 失败一侧是 [`Notice`] 而不是字符串：错误码、英文原文、中文主句要在跨线程之前
+/// 就装好，界面这一侧只管显示（映射规则见 `crate::errors`）。
+pub type Snapshot = Result<(u64, Vec<EnvView>), Notice>;
 
-/// 状态过滤（单一入口：chips 就是唯一筛选面，不与别处叠加）。
+/// 状态过滤（单一入口：分段控件就是唯一筛选面，不与别处叠加）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
     All,
@@ -62,6 +72,9 @@ impl Filter {
         }
     }
 
+    /// 四档顺序：工具条按它画、分组回调按索引取档、计数也按它算。
+    pub const ALL: [Self; 4] = [Self::All, Self::Running, Self::Stopped, Self::Attention];
+
     fn matches(self, env: &EnvView) -> bool {
         match self {
             Self::All => true,
@@ -78,22 +91,34 @@ const HEALTH: usize = 1;
 const LISTEN: usize = 2;
 const RULES: usize = 3;
 const UPSTREAM: usize = 4;
-const DESCRIPTION: usize = 5;
-const ACTIONS: usize = 6;
+// 操作列排在说明**之前**：表格按从左到右裁切，说明是唯一可牺牲的列。
+// 若把操作列放在最后，窄窗口下先被裁掉的恰恰是启停/重启/删除这些唯一入口。
+const ACTIONS: usize = 5;
+const DESCRIPTION: usize = 6;
 const COLUMN_COUNT: usize = 7;
 
-/// 固定列合计 + 说明列下限 + 操作列必须容得下最小窗口的内容区
-/// （1192 逻辑宽 − 侧栏 ≈ 930），否则最后一列被裁出视口（P0.3 截图实测踩过）。
+/// 列宽预算，按两个宽度同时成立来排：
+///
+/// * **最小窗口**（1000）：内容区 = 1000 − 侧栏 248 − 内边距 32 = 720。
+///   前六列合计 596 ≤ 720 —— 操作列（启停/重启/删除的唯一入口）必须在视口内；
+/// * **默认窗口**（1180）：内容区 900，七列合计 896，右侧不留空列。
+///
+/// 说明列给固定 300 而不是弹性：这套表格没有"拉伸填满"的开关，弹性列只会塌到
+/// 下限、把剩余宽度留成一条空白列。代价是窄窗口下说明列被裁掉一截 —— 它是唯一
+/// 可以牺牲的列，所以排在最后。
+///
+/// 这条预算曾经按"默认宽度 1192 − 侧栏 ≈ 930"算过 —— 那个数在最小窗口下不成立，
+/// 操作列会被整个裁出视口（P0.3 之后复发的同一类问题）。
 fn columns() -> Vec<Column> {
     [
-        ("name", "环境", Some(170.), true),
-        ("health", "健康", Some(100.), true),
-        ("listen", "监听", Some(140.), true),
-        ("rules", "规则", Some(120.), true),
-        ("upstream", "上游", Some(110.), true),
-        ("description", "说明", None, true),
+        ("name", "环境", Some(126.), true),
+        ("health", "健康", Some(84.), true),
+        ("listen", "监听", Some(124.), true),
+        ("rules", "规则", Some(108.), true),
+        ("upstream", "上游", Some(90.), true),
         // 操作列不参与排序：给它排序箭头是骗人的（P0.4 截图里发现了这个多余的东西）。
-        ("actions", "操作", Some(130.), false),
+        ("actions", "操作", Some(104.), false),
+        ("description", "说明", Some(300.), true),
     ]
     .into_iter()
     .map(|(key, name, width, sortable)| {
@@ -105,6 +130,24 @@ fn columns() -> Vec<Column> {
         }
     })
     .collect()
+}
+
+/// 状态栏聚合要的数（全部从当前快照派生，不额外取数）。
+///
+/// 与过滤档的计数同源（[`Filter::matches`] / [`needs_attention`]），
+/// 所以卡片上的数字和点进过滤档看到的行数永远一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Overview {
+    pub total: usize,
+    pub running: usize,
+    pub stopped: usize,
+    pub attention: usize,
+    /// 开着抓包的环境数（`capture=true`，与调试会话共用同一字段）。
+    pub capture: usize,
+    /// 绑了规则集的环境数（含规则集已缺失的：绑定关系仍是事实）。
+    pub rules_bound: usize,
+    /// 经上游代理的环境数（直连不算）。
+    pub upstream: usize,
 }
 
 /// 环境表的 delegate：全量快照 + 过滤后的可见行 + 在途写操作。
@@ -119,7 +162,14 @@ pub struct EnvTable {
     filter: Filter,
     generation: u64,
     loading: bool,
-    error: Option<SharedString>,
+    error: Option<Notice>,
+    /// 这条错误来自**取数**还是**写操作**。
+    ///
+    /// 两种失败的收场方式不同：取数失败在下一次成功快照时自然消失（数据回来了，
+    /// 那句话就不成立了）；写操作失败不能这样收场 —— 随后那次快照成功只说明
+    /// "读得到"，并不说明刚才那次写成功了。曾经两种一律清掉，于是「删除失败」
+    /// 在错误条上只闪一帧，用户根本读不到原因。
+    error_from_load: bool,
     view: WeakEntity<Environments>,
 }
 
@@ -136,6 +186,7 @@ impl EnvTable {
             generation: 0,
             loading: true,
             error: None,
+            error_from_load: false,
             view,
         }
     }
@@ -148,7 +199,11 @@ impl EnvTable {
                 self.generation = generation;
                 self.rows = rows;
                 self.loading = false;
-                self.error = None;
+                // 取数成功只撤掉"取数失败"那句话，不动写操作的失败（见字段注释）。
+                if self.error_from_load {
+                    self.error = None;
+                    self.error_from_load = false;
+                }
                 // 已被删除的环境不该继续在途表里挂着（否则名字会被幽灵占住）。
                 self.pending
                     .retain(|name| self.rows.iter().any(|env| env.name == *name));
@@ -156,14 +211,25 @@ impl EnvTable {
                 changed
             }
             // 取数失败**不清空已有行**：界面继续显示上一次的事实，另说一句错误。
-            Err(message) => self.set_error(message),
+            Err(notice) => self.set_error(notice),
         }
     }
 
-    /// 把一条错误写进表（错误条渲染在视图层，但状态归表持有，避免两处真相）。
-    pub fn set_error(&mut self, message: String) -> bool {
-        let changed = self.error.as_deref() != Some(message.as_str());
-        self.error = Some(message.into());
+    /// 取数失败：下一次成功快照会把这句撤掉。
+    fn set_error(&mut self, notice: Notice) -> bool {
+        let changed = self.error.as_ref() != Some(&notice);
+        self.error = Some(notice);
+        self.error_from_load = true;
+        self.loading = false;
+        changed
+    }
+
+    /// 写操作失败：**不随快照撤掉**（一次读成功证明不了刚才那次写成功）。
+    /// 下一次写操作开始时由调用方决定是否清场 —— 现在不清，后一次失败会直接替换它。
+    pub fn set_write_error(&mut self, notice: Notice) -> bool {
+        let changed = self.error.as_ref() != Some(&notice);
+        self.error = Some(notice);
+        self.error_from_load = false;
         self.loading = false;
         changed
     }
@@ -230,24 +296,26 @@ impl EnvTable {
         self.visible.get(row_ix).map(|&index| &self.rows[index])
     }
 
+    /// 账本里的环境总数（不受过滤与搜索影响）。
+    pub fn total(&self) -> usize {
+        self.rows.len()
+    }
+
     /// 过滤后没命中，但账本里确实有环境 —— 空态要说"没有匹配"而不是"没有环境"。
     pub fn filtered_out(&self) -> bool {
         !self.rows.is_empty() && self.visible.is_empty()
     }
 
-    /// `(总数, 运行中, 需处理)`：过滤 chips 上的计数用它。
-    pub fn counts(&self) -> (usize, usize, usize) {
-        (
-            self.rows.len(),
-            self.rows
-                .iter()
-                .filter(|env| env.health == "running")
-                .count(),
-            self.rows.iter().filter(|env| needs_attention(env)).count(),
-        )
+    /// 每一档的计数，**与过滤用同一个判据**（[`Filter::matches`]）。
+    ///
+    /// 不能写成"总数 − 运行中"这类推导式：那样失败 / 启动中 / 端口冲突都会被
+    /// 算进"已停止"，控件的数字与点出来的行数对不上（实测：chip 写 2、点开 1 行）。
+    /// 数字是用户决定"点不点"的依据，它必须等于点下去的结果。
+    pub fn tier_counts(&self) -> [usize; Filter::ALL.len()] {
+        Filter::ALL.map(|filter| self.rows.iter().filter(|env| filter.matches(env)).count())
     }
 
-    pub fn error(&self) -> Option<SharedString> {
+    pub fn error(&self) -> Option<Notice> {
         self.error.clone()
     }
 
@@ -292,6 +360,11 @@ impl EnvTable {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// 环境聚合（状态栏显示）：与过滤档计数用同一判据（数字必须等于点下去的行数）。
+    pub fn overview(&self) -> Overview {
+        overview_of(&self.rows)
     }
 }
 
@@ -353,15 +426,27 @@ impl TableDelegate for EnvTable {
         match col_ix {
             NAME => cell(
                 div()
+                    // 行高回归断言的锚点：L0 量相邻两行的原点差，必须一致。
+                    .debug_selector(move || format!("env-row-{row_ix}"))
                     .truncate()
                     .font_weight(FontWeight::BOLD)
                     .child(env.name.clone()),
             ),
             HEALTH => cell(
+                // 健康状态**不能只靠颜色**（色觉障碍与灰度打印都读不出来）：
+                // 前面加一个同色的圆点做形状标记，文字仍写中文标签。
                 div()
-                    .truncate()
-                    .text_color(tone_color(health_tone(&env.health), cx))
-                    .child(health_label(&env.health)),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .size_2()
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(tone_color(health_tone(&env.health), cx)),
+                    )
+                    .child(div().truncate().child(health_label(&env.health))),
             ),
             LISTEN => cell(div().truncate().child(listen_address(&env))),
             RULES => cell(
@@ -379,18 +464,59 @@ impl TableDelegate for EnvTable {
                 Some(name) => name.clone(),
                 None => "直连".to_string(),
             })),
+            // 「说明」是用户写的备注，不是系统状态：它恒定用次要色。
+            // 把"需处理"染在这里等于借一个语义无关的通道 —— 用户会以为这段备注
+            // 有问题，而空说明的环境又完全得不到提示。状态归健康列。
             DESCRIPTION => cell(
                 div()
+                    // 说明列是唯一会被裁切的可变长文本：hover 给出全文，
+                    // 否则被截掉的部分再也读不到。
+                    .id(SharedString::from(format!("env-desc-{row_ix}")))
+                    .tooltip(text_tooltip(env.description.clone()))
                     .truncate()
-                    .text_color(if needs_attention(&env) {
-                        warning
-                    } else {
-                        muted
-                    })
+                    .text_color(muted)
                     .child(env.description.clone()),
             ),
             ACTIONS => self.render_actions(row_ix, &env, cx),
             _ => div().into_any_element(),
+        }
+    }
+
+    /// 空态：区分"一个环境都没有"与"过滤/搜索后没匹配"。
+    ///
+    /// 两种空态的下一步不一样：前者该去「新建环境」，后者该改搜索词或换过滤档。
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        if self.filtered_out() {
+            empty_state(
+                cx,
+                "env-empty-filtered",
+                "没有匹配的环境",
+                "换个关键词，或把过滤切回「全部」。",
+            )
+        } else {
+            // 空账本是**首次使用**的那一屏：话说到"下一步做什么"还不够，
+            // 把那个按钮就地放一份 —— 文字指路（"点右上角")要让用户先跑一趟。
+            let view = self.view.clone();
+            empty_state_with_action(
+                cx,
+                "env-empty-ledger",
+                "还没有环境",
+                "一个环境 = 一个进程内引擎实例 = 一个监听端口。",
+                Some(
+                    Button::new("empty-create-env")
+                        .xsmall()
+                        .icon(Icon::new(IconName::Plus))
+                        .label("新建环境")
+                        .on_click(move |_, window, cx| {
+                            let _ = view.update(cx, |view, cx| view.open_create_dialog(window, cx));
+                        })
+                        .into_any_element(),
+                ),
+            )
         }
     }
 }
@@ -437,6 +563,8 @@ impl EnvTable {
                     )
                     .disabled(pending)
                     .loading(pending)
+                    // tooltip 与无障碍名**都说清对象**：只看图标分不出是哪一行。
+                    .tooltip(format!("{toggle_label} {name}"))
                     .accessibility_label(format!("{toggle_label} {name}"))
                     .on_click(move |_, window, cx| {
                         let name = name.clone();
@@ -461,6 +589,7 @@ impl EnvTable {
                         cx,
                     )
                     .disabled(pending)
+                    .tooltip(format!("重启 {name}"))
                     .accessibility_label(format!("重启 {name}"))
                     .on_click(move |_, window, cx| {
                         let name = name.clone();
@@ -470,20 +599,33 @@ impl EnvTable {
                 .child({
                     let name = name.clone();
                     let view = view.clone();
+                    // 「删除」不摆在行里：它是**不可逆**动作，和重启挤在一起时
+                    // 一次误点就是删环境。收进「更多」菜单，多一步确认换一次误触。
                     row_icon_button(
-                        ("delete", row_ix),
-                        IconName::Delete,
-                        "删除",
+                        ("more", row_ix),
+                        IconName::Ellipsis,
+                        "更多操作",
                         hover,
                         active,
                         cx,
                     )
-                    .text_color(theme.danger)
                     .disabled(pending)
-                    .accessibility_label(format!("删除 {name}"))
-                    .on_click(move |_, window, cx| {
+                    .tooltip("更多操作")
+                    .accessibility_label(format!("{name} 的更多操作"))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        let view = view.clone();
                         let name = name.clone();
-                        let _ = view.update(cx, |view, cx| view.confirm_delete(name, window, cx));
+                        menu = menu.item(
+                            PopupMenuItem::new(SharedString::from(format!("删除 {name}")))
+                                .icon(Icon::new(IconName::Delete))
+                                .on_click(move |_, window, cx| {
+                                    let name = name.clone();
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.confirm_delete(name, window, cx)
+                                    });
+                                }),
+                        );
+                        menu
                     })
                 }),
         )
@@ -602,12 +744,16 @@ impl Environments {
                 let TableEvent::SelectRow(row_ix) = event else {
                     return;
                 };
+                // 「选中」与「打开详情」不是一回事：↑/↓ 也会 emit SelectRow。
+                // 键盘移动只改高亮（面板不抢焦点），鼠标单击仍然点即开；
+                // 键盘打开详情走 Enter（见 `render` 里的 on_key_down）。
+                let keyboard = window.last_input_was_keyboard();
                 let name = table.read(cx).delegate().name_at(*row_ix);
                 if this.selected != name {
                     this.selected = name.clone();
                     cx.notify();
                 }
-                if let Some(name) = name {
+                if let (false, Some(name)) = (keyboard, name) {
                     this.open_detail(name, window, cx);
                 }
             }
@@ -637,7 +783,9 @@ impl Environments {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tick.tick().await;
-                let frame = admin.snapshot().map_err(|error| error.message);
+                let frame = admin
+                    .snapshot()
+                    .map_err(|error| Notice::from_error(Action::LoadSnapshot, None, &error));
                 if sender.try_send(frame).is_err() {
                     continue;
                 }
@@ -662,9 +810,25 @@ impl Environments {
         });
     }
 
-    /// 环境表实体：规则目录要从**同一份**快照派生"被哪些环境引用"，不另拉一次。
+    /// 当前环境表实体：规则目录要从**同一份**快照派生"被哪些环境引用"，不另拉一次。
     pub fn table(&self) -> &Entity<TableState<EnvTable>> {
         &self.table
+    }
+
+    /// 当前过滤档（只读）。给无头 UI 测试断言用 —— 视图层的状态本来就该可观察。
+    pub fn filter(&self) -> Filter {
+        self.filter
+    }
+
+    /// 当前选中的环境名（只读）。键盘 ↑/↓ 只改这个，不打开面板。
+    pub fn selected(&self) -> Option<SharedString> {
+        self.selected.clone()
+    }
+
+    /// 把焦点交给表格。给无头测试用：Tab 顺序在无头上下文里不会自己发生。
+    pub fn focus_table(&self, window: &mut Window, cx: &mut App) {
+        use gpui_kit::Focusable as _;
+        self.table.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     /// 立刻补一次快照：写操作回执后不让用户等下一拍（详情面板保存后也走这里）。
@@ -674,7 +838,11 @@ impl Environments {
         let task = hop(
             window,
             cx,
-            async move { admin.snapshot().map_err(|error| error.message) },
+            async move {
+                admin
+                    .snapshot()
+                    .map_err(|error| Notice::from_error(Action::LoadSnapshot, None, &error))
+            },
             move |this, frame, _, cx| {
                 table.update(cx, |state, cx| {
                     if state.delegate_mut().apply(frame) {
@@ -689,28 +857,40 @@ impl Environments {
     }
 
     pub fn start(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.dispatch(name, "启动", window, cx, |admin, name| async move {
-            admin.start(name.as_str()).await
-        });
+        self.dispatch(
+            name,
+            Action::StartEnvironment,
+            window,
+            cx,
+            |admin, name| async move { admin.start(name.as_str()).await },
+        );
     }
 
     pub fn stop(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.dispatch(name, "停止", window, cx, |admin, name| async move {
-            admin.stop(name.as_str()).await
-        });
+        self.dispatch(
+            name,
+            Action::StopEnvironment,
+            window,
+            cx,
+            |admin, name| async move { admin.stop(name.as_str()).await },
+        );
     }
 
     pub fn restart(&mut self, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.dispatch(name, "重启", window, cx, |admin, name| async move {
-            admin.restart(name.as_str()).await
-        });
+        self.dispatch(
+            name,
+            Action::RestartEnvironment,
+            window,
+            cx,
+            |admin, name| async move { admin.restart(name.as_str()).await },
+        );
     }
 
     /// 启停/重启共用一条路：标在途 → tokio 跑用例 → 回执后清标记并补一次快照。
     fn dispatch<Run, Fut>(
         &mut self,
         name: SharedString,
-        verb: &'static str,
+        action: Action,
         window: &mut Window,
         cx: &mut Context<Self>,
         run: Run,
@@ -734,7 +914,7 @@ impl Environments {
                     state.refresh(cx);
                 });
                 if let Err(error) = outcome {
-                    this.report(format!("{verb} {name} 失败：{}", error.message), cx);
+                    this.report(Notice::from_error(action, Some(&name), &error), cx);
                 }
                 this.refresh_now(window, cx);
             },
@@ -785,7 +965,10 @@ impl Environments {
                     state.refresh(cx);
                 });
                 if let Err(error) = outcome {
-                    this.report(format!("删除 {name} 失败：{}", error.message), cx);
+                    this.report(
+                        Notice::from_error(Action::DeleteEnvironment, Some(&name), &error),
+                        cx,
+                    );
                 }
                 // 删掉的正是被选中的那个 → 选中态自动收起（详情面板跟着关）。
                 if this.selected.as_deref() == Some(name.as_ref()) {
@@ -805,10 +988,16 @@ impl Environments {
                 .placeholder("beta")
                 .clean_on_escape()
         });
+        // 校验失败的原因写在**弹窗里**：弹窗是模态，表格上方的错误条被它挡住，
+        // 写到那儿等于没人看见（这条是走查抓出来的真缺陷）。
+        let problem: Rc<RefCell<Option<SharedString>>> = Rc::new(RefCell::new(None));
         window.open_dialog(cx, move |dialog, _, cx| {
             let view = view.clone();
             let name_input = name_input.clone();
+            let problem = problem.clone();
             let hint_color = cx.theme().muted_foreground;
+            // 先把可能存在的校验原因取出来（借用在表达式内结束，不与闭包抢 cx）。
+            let invalid = problem.borrow().clone();
             dialog
                 .title("新建环境")
                 .child(
@@ -833,6 +1022,16 @@ impl Environments {
                                 .child("小写字母开头，可含数字、下划线与短横线；端口随机分配。"),
                         ),
                 )
+                // 校验失败时的原因行（只在有问题时出现）。
+                .children(invalid.map(|message| {
+                    div()
+                        .id("create-error")
+                        .test_support()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(message)
+                        .into_any_element()
+                }))
                 // 普通 Dialog 不画按钮：页脚不给，弹窗就只有「关闭」，谁都提交不了。
                 .footer(
                     DialogFooter::new()
@@ -845,15 +1044,14 @@ impl Environments {
                 .on_ok(move |_, window, cx| {
                     let raw = name_input.read(cx).value().to_string();
                     if !valid_env_name(&raw) {
-                        // 校验不过就让弹窗开着，并把原因写进错误条（不静默关）。
-                        let _ = view.update(cx, |view, cx| {
-                            view.report(
-                                "环境名不合法：小写字母开头，只允许 a-z 0-9 _ -".to_string(),
-                                cx,
-                            )
-                        });
+                        // 校验不过就让弹窗开着，并把原因写进弹窗里的错误行（不静默关）。
+                        *problem.borrow_mut() =
+                            Some("环境名不合法：小写字母开头，只允许 a-z 0-9 _ -".into());
+                        // 弹窗层要重画一帧才会带上这行错误。
+                        window.refresh();
                         return false;
                     }
+                    *problem.borrow_mut() = None;
                     let _ = view.update(cx, |view, cx| view.create(raw, window, cx));
                     true
                 })
@@ -862,13 +1060,19 @@ impl Environments {
 
     fn create(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
+        // 名字要同时进请求体与失败主句：两个闭包各持一份（async 块按值拿走 `name`，
+        // 回调再引用它就是借用已移动的值）。
+        let subject = name.clone();
         let task = hop(
             window,
             cx,
             async move { admin.create(&serde_json::json!({ "name": name })) },
             move |this, outcome, window, cx| {
                 if let Err(error) = outcome {
-                    this.report(format!("新建失败：{}", error.message), cx);
+                    this.report(
+                        Notice::from_error(Action::CreateEnvironment, Some(&subject), &error),
+                        cx,
+                    );
                 }
                 this.refresh_now(window, cx);
             },
@@ -876,11 +1080,11 @@ impl Environments {
         self.inflight.push(task);
     }
 
-    /// 取数/写操作的失败说明：显示在表格上方的错误条里。
-    fn report(&mut self, message: String, cx: &mut Context<Self>) {
+    /// 写操作的失败说明：显示在表格上方的错误条里。
+    fn report(&mut self, notice: Notice, cx: &mut Context<Self>) {
         let table = self.table.clone();
         table.update(cx, |state, cx| {
-            if state.delegate_mut().set_error(message) {
+            if state.delegate_mut().set_write_error(notice) {
                 state.refresh(cx);
             }
         });
@@ -932,7 +1136,8 @@ impl Environments {
         }
     }
 
-    fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+    /// 切过滤档（工具条的芯片与状态栏的聚合都走这一条路：**一个入口，一处真相**）。
+    pub(crate) fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         self.filter = filter;
         let table = self.table.clone();
         table.update(cx, |state, cx| {
@@ -944,44 +1149,62 @@ impl Environments {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (total, running, attention) = self.table.read(cx).delegate().counts();
-        let stopped = total.saturating_sub(running);
-        let counts = [
-            (Filter::All, total),
-            (Filter::Running, running),
-            (Filter::Stopped, stopped),
-            (Filter::Attention, attention),
-        ];
+        let counts = self.table.read(cx).delegate().tier_counts();
         let view = cx.weak_entity();
 
+        // 四档过滤是**分段控件**：一个轮廓、一条分隔，选中档靠自己的填充说话
+        // （不再用四枚彼此独立的 ghost 钮 —— 它们看上去像四个可随手点的标签，
+        // 而不是"从四档里选一档"）。
+        let filters = ButtonGroup::new("env-filters")
+            .outline()
+            .xsmall()
+            .children(Filter::ALL.into_iter().zip(counts).map(|(filter, count)| {
+                let label = format!("{} ({})", filter.label(), count);
+                let active = self.filter == filter;
+                Button::new(SharedString::from(format!("filter-{}", filter.label())))
+                    .label(label.clone())
+                    .accessibility_label(label)
+                    .selected(active)
+                    // 组件给选中档的填充很浅（暗色下几乎看不出）：再加一处**不靠颜色**
+                    // 的编码。字重是唯一不会被组件覆盖的通道（bg/fg 由 selected 样式定）。
+                    .font_weight(if active {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .tooltip("按状态筛选")
+            }))
+            .on_click({
+                let view = view.clone();
+                move |clicks, _, cx| {
+                    // 单选：分组回调给的是"点中的那一档"（索引）。
+                    let Some(ix) = clicks.first().copied() else {
+                        return;
+                    };
+                    let Some(filter) = Filter::ALL.get(ix).copied() else {
+                        return;
+                    };
+                    let _ = view.update(cx, |view, cx| view.apply_filter(filter, cx));
+                }
+            });
         div()
             .id("env-toolbar")
             .flex()
             .items_center()
             .gap_2()
             .child(div().w_64().child(Input::new(&self.search)))
-            .children(counts.into_iter().map(|(filter, count)| {
-                let label = format!("{} ({})", filter.label(), count);
-                let active = self.filter == filter;
-                let view = view.clone();
-                Button::new(SharedString::from(format!("filter-{}", filter.label())))
-                    .xsmall()
-                    .ghost()
-                    .selected(active)
-                    .label(label.clone())
-                    .accessibility_label(label)
-                    .tooltip("按状态筛选")
-                    .on_click(move |_, window, cx| {
-                        let _ = view.update(cx, |view, cx| view.apply_filter(filter, cx));
-                        let _ = window;
-                    })
-            }))
+            .child(
+                // 给无头测试留的定位锚点：分段控件是组件库画的，不注册 selector，
+                // 只能靠外层这个 div 拿到它的矩形，再按偏移点某一档。
+                div()
+                    .debug_selector(|| "env-filters".to_string())
+                    .child(filters),
+            )
             // 每屏只一个主操作，放在最右（ml-auto 的等价写法：前面吃掉剩余空间）。
             .child(div().flex_1())
             .child(
                 Button::new("create-env")
                     .xsmall()
-                    .primary()
                     .icon(Icon::new(IconName::Plus))
                     .label("新建环境")
                     .tooltip("新建环境")
@@ -991,6 +1214,35 @@ impl Environments {
             )
             .into_any_element()
     }
+}
+
+/// 概览聚合（纯函数：与过滤档共用同一组判据，便于单测）。
+fn overview_of(rows: &[EnvView]) -> Overview {
+    let mut overview = Overview {
+        total: rows.len(),
+        ..Overview::default()
+    };
+    for env in rows {
+        if env.health == "running" {
+            overview.running += 1;
+        }
+        if env.health == "stopped" {
+            overview.stopped += 1;
+        }
+        if needs_attention(env) {
+            overview.attention += 1;
+        }
+        if env.capture {
+            overview.capture += 1;
+        }
+        if env.rules.is_some() {
+            overview.rules_bound += 1;
+        }
+        if env.upstream.is_some() {
+            overview.upstream += 1;
+        }
+    }
+    overview
 }
 
 /// 环境名的形状规则（与服务端 `domain::validate_name` 同一判据；服务端仍是裁决方）。
@@ -1009,11 +1261,26 @@ impl Render for Environments {
         let error = delegate.error();
         let filtered_out = delegate.filtered_out();
         let rows = delegate.rows_count(cx);
-        let status = match (&self.selected, filtered_out) {
-            (Some(name), _) => format!("{rows} 个环境 · 选中 {name}"),
-            (None, true) => format!("{rows} 个环境 · 无匹配项"),
-            (None, false) => format!("{rows} 个环境"),
-        };
+        let total = delegate.total();
+        // 这行只说**过滤后多出来的事实**：可见条数与选中项。总数已经在工具条
+        // 的四档计数里（「全部 (3)」），再说一遍"3 个环境"是同一件事说两遍。
+        // 没有要说的就留空行 —— 行本身保留，选中时表格不会跳一下。
+        let mut status = String::new();
+        if rows != total {
+            status.push_str(&format!("显示 {rows} / {total} 个环境"));
+        }
+        if filtered_out {
+            if !status.is_empty() {
+                status.push_str(" · ");
+            }
+            status.push_str("无匹配项");
+        }
+        if let Some(name) = &self.selected {
+            if !status.is_empty() {
+                status.push_str(" · ");
+            }
+            status.push_str(&format!("选中 {name}"));
+        }
         let toolbar = self.render_toolbar(cx);
 
         div()
@@ -1034,17 +1301,32 @@ impl Render for Environments {
                     .text_color(cx.theme().muted_foreground)
                     .child(status),
             )
-            .children(error.map(|message| {
-                div()
-                    .id("env-error")
-                    .test_support()
-                    .aria_label(message.clone())
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(message)
-            }))
+            .children(error.map(|message| error_banner("env-error", message)))
             // DataTable 自己画满容器（内部 size_full），所以容器要给足高度。
-            .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
+            .child(
+                div()
+                    .id("env-table")
+                    .flex_1()
+                    .min_h_0()
+                    // 键盘打开详情：↑/↓ 只移动高亮（见订阅里的 `keyboard` 判断），
+                    // Enter 才真正打开当前行。
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key != "enter" {
+                            return;
+                        }
+                        let name = {
+                            let table = this.table.read(cx);
+                            table
+                                .selected_row()
+                                .and_then(|row| table.delegate().name_at(row))
+                        };
+                        if let Some(name) = name {
+                            this.open_detail(name, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(DataTable::new(&self.table)),
+            )
     }
 }
 
@@ -1062,6 +1344,7 @@ mod tests {
             rules: None,
             upstream: None,
             insecure_hosts: Vec::new(),
+            mitm_hosts: Vec::new(),
             description: String::new(),
             desired,
             health: health.into(),
@@ -1084,6 +1367,44 @@ mod tests {
         assert!(!valid_env_name("-beta"));
         assert!(!valid_env_name("be ta"));
         assert!(!valid_env_name("beta:8080"));
+    }
+
+    #[test]
+    fn overview_aggregates_use_the_same_predicates_as_the_filters() {
+        let mut rows = [
+            env("a", "running", Desired::Running),
+            env("b", "stopped", Desired::Stopped),
+            env("c", "failed", Desired::Running),
+            env("d", "running", Desired::Running),
+        ];
+        rows[0].capture = true;
+        rows[1].rules = Some("corp".into());
+        rows[2].upstream = Some("office".into());
+        rows[3].rules = Some("corp".into());
+        rows[3].capture = true;
+
+        let overview = overview_of(&rows);
+        assert_eq!(overview.total, 4);
+        assert_eq!(overview.running, 2);
+        assert_eq!(overview.stopped, 1);
+        // 只有 c（failed 且期望运行）需处理；b 期望停止、实际停止，不算。
+        assert_eq!(overview.attention, 1);
+        assert_eq!(overview.capture, 2);
+        assert_eq!(overview.rules_bound, 2);
+        assert_eq!(overview.upstream, 1);
+        // 卡片数字必须等于点进对应过滤档看到的行数。
+        assert_eq!(
+            rows.iter()
+                .filter(|env| Filter::Running.matches(env))
+                .count(),
+            overview.running
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|env| Filter::Attention.matches(env))
+                .count(),
+            overview.attention
+        );
     }
 
     #[test]

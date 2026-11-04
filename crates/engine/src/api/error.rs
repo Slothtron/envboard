@@ -4,6 +4,8 @@
 //! `{"error": {"code", "message", "field"}}`，不重新判定；错误码字面量与
 //! `spec/errors.md` 的表一一对应，改动即 breaking。
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// 统一错误码。`serde` 的 snake_case 名字就是对外契约里的字面量。
@@ -120,6 +122,19 @@ impl Error {
 
     pub fn invalid_config(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::at(ErrorCode::InvalidConfig, field, message)
+    }
+
+    /// 文件系统失败的**带路径**形态。
+    ///
+    /// 走 `From<std::io::Error>` 只能得到裸的 `io error: 拒绝访问。 (os error 5)` ——
+    /// 里面没有路径，而"哪个目录被拒"恰恰是排障的唯一线索（状态目录、CA 材料、
+    /// 单实例锁都可能在启动时写不进去）。状态目录相关的 IO 一律用这个构造，
+    /// 让错误自己说清楚它动的是哪个文件。
+    pub fn io_at(operation: &str, path: &Path, error: std::io::Error) -> Self {
+        Self::new(
+            ErrorCode::StoreFailure,
+            format!("cannot {operation} {}: {error}", path.display()),
+        )
     }
 }
 

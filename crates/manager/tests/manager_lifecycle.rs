@@ -716,6 +716,50 @@ async fn insecure_hosts_are_persisted_and_hot_editable() {
 }
 
 #[tokio::test]
+async fn mitm_hosts_are_persisted_and_hot_editable() {
+    let harness = Harness::new();
+    let created = create_beta_with(
+        &harness,
+        serde_json::json!({"mitm_hosts": ["api.example.com"]}),
+    );
+    assert_eq!(created.mitm_hosts, ["api.example.com"]);
+
+    let started = harness.manager.start("beta").await.unwrap();
+    assert_eq!(started.health.as_str(), "running");
+    let hash_before = harness.engine().config_hash_of("beta").unwrap();
+
+    // 白名单也是热字段：运行中改，下一次同步 apply 即生效（不必重启）。
+    let updated = harness
+        .manager
+        .update(
+            "beta",
+            &serde_json::json!({"mitm_hosts": ["Web.Example.NET", "api.example.com"]}),
+        )
+        .unwrap();
+    assert_eq!(updated.mitm_hosts, ["api.example.com", "web.example.net"]);
+    assert_eq!(updated.health.as_str(), "running");
+    let hash_after = harness.engine().config_hash_of("beta").unwrap();
+    assert_ne!(
+        hash_before, hash_after,
+        "白名单变更必须真的装配进引擎，而不是只落盘"
+    );
+
+    assert_eq!(
+        harness.saved().find("beta").unwrap()["mitm_hosts"],
+        serde_json::json!(["api.example.com", "web.example.net"])
+    );
+
+    // 显式 null = 回到默认（全部解密）。
+    let cleared = harness
+        .manager
+        .update("beta", &serde_json::json!({"mitm_hosts": null}))
+        .unwrap();
+    assert!(cleared.mitm_hosts.is_empty());
+
+    harness.manager.stop("beta").await.unwrap();
+}
+
+#[tokio::test]
 async fn description_and_the_rules_binding_are_hot() {
     let harness = Harness::new();
     harness
@@ -907,7 +951,7 @@ fn removing_an_environment_sweeps_v2_residue_but_never_the_rules_library() {
         .unwrap();
 
     // 模拟 v2 遗留的 agent 目录（config.json + 软链的残骸）。
-    let agent_dir = harness.manager.config().env_agent_dir("beta");
+    let agent_dir = harness.manager.config().legacy_agent_dir("beta");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("config.json"), "{}").unwrap();
 
@@ -1072,6 +1116,7 @@ fn create_probes_only_until_the_first_free_port() {
     config.port_range = (window, window + 39);
     let probe = Arc::new(CountingProbe::default());
     let clock: Arc<dyn ClockPort> = Arc::new(envboard_engine::ManualClock::new(1_000));
+    let state_file = config.state_file();
     let manager = Manager::new(
         config,
         Arc::new(FakeEngine::new()) as Arc<dyn ProxyEngine>,
@@ -1079,7 +1124,7 @@ fn create_probes_only_until_the_first_free_port() {
         Arc::new(RealFiles),
         Arc::clone(&clock),
         Arc::new(NullLogger) as Arc<dyn LoggerPort>,
-        Arc::new(JsonFileStateRepo::new(directory.join("state.json"))) as Arc<dyn StateRepo>,
+        Arc::new(JsonFileStateRepo::new(state_file)) as Arc<dyn StateRepo>,
         false,
     )
     .unwrap();

@@ -23,6 +23,8 @@ pub struct EngineSpec {
     pub listen: Listen,
     /// 已归一化的完整域名清单（空 = 全部严格校验）。
     pub insecure_hosts: Vec<String>,
+    /// MITM 白名单（已归一化；空 = 全部解密，非空 = 只解密名单内的域名）。
+    pub mitm_hosts: Vec<String>,
     pub proxy_user: Option<String>,
     pub proxy_password: Option<String>,
     /// 上游二级代理绑定（None = 直连）。凭据由管理面校验后下发。
@@ -72,6 +74,7 @@ impl EngineSpec {
         struct Shape<'a> {
             listen: &'a Listen,
             insecure_hosts: &'a [String],
+            mitm_hosts: &'a [String],
             user: Option<&'a str>,
             secret_digest: Option<String>,
             upstream: Option<UpstreamShape<'a>>,
@@ -80,6 +83,7 @@ impl EngineSpec {
         let shape = Shape {
             listen: &self.listen,
             insecure_hosts: &self.insecure_hosts,
+            mitm_hosts: &self.mitm_hosts,
             user: self.proxy_user.as_deref(),
             secret_digest: self
                 .proxy_password

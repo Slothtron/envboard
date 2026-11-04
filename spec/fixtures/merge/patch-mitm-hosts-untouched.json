@@ -1,0 +1,25 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 没提到 mitm_hosts 时它保持不变（与『显式 null 清空 = 回到全部解密』是两件事）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 16600
+      },
+      "mitm_hosts": [
+        "a.example.com"
+      ]
+    },
+    "patch": {
+      "description": "只改说明"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "mitm_hosts": [
+      "a.example.com"
+    ]
+  }
+}

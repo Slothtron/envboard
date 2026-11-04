@@ -31,7 +31,7 @@ envboard-engine.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 # 写操作的请求体是 JSON 形状（与 admin-api 的类型化 DTO 同一份），界面不拼领域对象。
 serde_json.workspace = true
-clap.workspace = true
+# 没有 clap：本二进制不解析命令行参数（理由见 src/main.rs 的模块文档）。
 
 [dev-dependencies]
 envboard-engine-fake.workspace = true

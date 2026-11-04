@@ -1,9 +1,11 @@
 //! 调试屏：工作区级抓包会话的**看**与**控**。
 //!
 //! 主任务只有一个：*让某个环境上的请求现形，并能读一条的请求与响应*。
-//! 界面因此是「工具条 + 记录表 + 停靠详情面板」：
+//! 界面因此是「工具条 + 筛选条 + 记录表 + 停靠详情面板」：
 //!
-//! * 记录表：时间（UTC）/ 方法 / 主机 / 路径 / 状态 / 大小；
+//! * 记录表：时间（UTC）/ 方法 / 主机 / 路径 / 状态 / 耗时 / 大小；
+//! * 筛选条：方法 / 状态档 / 主机三个维度可叠加，只筛视图不动会话缓冲
+//!   （与快照无关的纯本地计算，过滤选项也从当前记录派生）；
 //! * 详情：选中一行打开 `Sheet`，请求 / 响应两页签各给起始行、头、正文。
 //!
 //! 语义完全来自门面（见 spec/admin-api.md 与 spec/events.md「会话双轨」）：
@@ -31,16 +33,20 @@ use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, T
 use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Font, FontWeight, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, Window, div, px,
+    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, Task, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
 use envboard_protocol::{CaptureDelta, DebugView};
 
 use crate::display::format_bytes;
+use crate::display::format_duration;
+use crate::errors::{Action, Notice};
 use crate::host::{Host, hop};
 use crate::views::environments::EnvTable;
+use crate::views::error_banner;
+use crate::views::text_tooltip;
 
 /// 增量轮询的节拍（与 web 形态调试实时流同一档）。
 const POLL: Duration = Duration::from_millis(500);
@@ -56,7 +62,8 @@ const COL_METHOD: usize = 1;
 const COL_AUTHORITY: usize = 2;
 const COL_PATH: usize = 3;
 const COL_STATUS: usize = 4;
-const COL_SIZE: usize = 5;
+const COL_DURATION: usize = 5;
+const COL_SIZE: usize = 6;
 
 // --------------------------------------------------------------------------- #
 // 记录：把抓包 JSON 解析成展示字段（解析一次，渲染多次）
@@ -71,6 +78,9 @@ struct Record {
     authority: String,
     path: String,
     status: u16,
+    /// 上游交换耗时（请求行到达 → 响应体收齐）；老记录与手工构造的 JSON
+    /// 没有这个字段时按 0（显示「—」）。
+    duration_ms: u64,
     bytes: u64,
     raw: Value,
 }
@@ -97,10 +107,41 @@ impl Record {
                 .and_then(Value::as_u64)
                 .and_then(|status| u16::try_from(status).ok())
                 .unwrap_or(0),
+            duration_ms: raw.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
             bytes: body_size(request).saturating_add(body_size(response)),
             raw: raw.clone(),
         })
     }
+
+    /// 有没有拿到响应：没响应就没有"耗时"可言（0 是个合法耗时，不能拿它当哨兵）。
+    fn has_response(&self) -> bool {
+        self.status != 0 || self.raw.get("response").is_some_and(|r| !r.is_null())
+    }
+}
+
+/// unix 毫秒 → `YYYY-MM-DD HH:MM:SS.mmm`（UTC）。
+///
+/// 表里只给时分秒（列宽宝贵），完整日期放在悬停提示与详情面板的 meta 上 ——
+/// 跨天的长会话不该出现"两条 09:15 分不清是哪天"。
+fn utc_datetime(ms: u64) -> String {
+    let (year, month, day) = utc_ymd(ms);
+    format!("{year:04}-{month:02}-{day:02} {}", utc_hms(ms))
+}
+
+/// unix 毫秒 → `(年, 月, 日)`（UTC）。Howard Hinnant 的 `civil_from_days`：
+/// 自己算是刻意的（见 [`utc_hms`]），换成时区库只为一个日期不值当。
+fn utc_ymd(ms: u64) -> (i64, u64, u64) {
+    let days = (ms / 86_400_000) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (year + i64::from(month <= 2), month, day)
 }
 
 /// 记录一侧（请求或响应）的正文字节数：`{"size": N, …}`，省略时按 0。
@@ -130,29 +171,120 @@ fn utc_hms(ms: u64) -> String {
 // 记录表
 // --------------------------------------------------------------------------- #
 
+/// 状态档（筛选用）。"无响应"单列一档：**还没回来**与**回了个 5xx** 是两件事，
+/// 混进「其他」只会让筛选结果说不清。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusClass {
+    Pending,
+    Class2xx,
+    Class3xx,
+    Class4xx,
+    Class5xx,
+    Other,
+}
+
+impl StatusClass {
+    const ALL: [Self; 6] = [
+        Self::Pending,
+        Self::Class2xx,
+        Self::Class3xx,
+        Self::Class4xx,
+        Self::Class5xx,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "无响应",
+            Self::Class2xx => "2xx",
+            Self::Class3xx => "3xx",
+            Self::Class4xx => "4xx",
+            Self::Class5xx => "5xx",
+            Self::Other => "其他",
+        }
+    }
+
+    fn of(status: u16) -> Self {
+        match status {
+            0 => Self::Pending,
+            200..=299 => Self::Class2xx,
+            300..=399 => Self::Class3xx,
+            400..=499 => Self::Class4xx,
+            500..=599 => Self::Class5xx,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// 记录筛选：三个维度可叠加，默认全空 = 不过滤。
+///
+/// 只筛**视图**：会话缓冲、游标与已捕获计数都不动 —— 调筛选不该让任何人
+/// 以为记录被清掉了。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RecordFilter {
+    method: Option<String>,
+    status: Option<StatusClass>,
+    authority: Option<String>,
+}
+
+impl RecordFilter {
+    fn is_empty(&self) -> bool {
+        self.method.is_none() && self.status.is_none() && self.authority.is_none()
+    }
+
+    fn matches(&self, record: &Record) -> bool {
+        self.method
+            .as_deref()
+            .is_none_or(|method| record.method == method)
+            && self
+                .status
+                .is_none_or(|status| status == StatusClass::of(record.status))
+            && self
+                .authority
+                .as_deref()
+                .is_none_or(|authority| record.authority == authority)
+    }
+}
+
 /// 记录表：只负责"有什么、怎么画"，会话状态在 [`DebugScreen`] 上。
 struct RecordsTable {
     columns: Vec<Column>,
     rows: Vec<Record>,
-    error: Option<SharedString>,
+    /// `rows` 的下标（筛选后的顺序）。表只渲染可见行，行下标也指这里 ——
+    /// 选中行 → 记录必须经这张表换算，不能直接拿 `rows[row_ix]`。
+    visible: Vec<usize>,
+    filter: RecordFilter,
+    error: Option<Notice>,
 }
 
 impl RecordsTable {
     fn new() -> Self {
-        let columns = [
-            ("time", "时间 (UTC)", 118.),
-            ("method", "方法", 72.),
-            ("authority", "主机", 186.),
-            ("path", "路径", 520.),
-            ("status", "状态", 68.),
-            ("size", "大小", 96.),
-        ]
-        .into_iter()
-        .map(|(key, name, width)| Column::new(key, name).resizable(true).width(px(width)))
-        .collect();
+        // 列宽合计 900 = 1180 窗口的内容区（1180 − 侧栏 248 − 内边距 32），
+        // 右端不会剩一条空白列。
+        //
+        // 除了「路径」，其余六列在**最小窗口**（1000，内容区 720）下也都放得下：
+        // 110 + 64 + 170 + 60 + 64 + 80 = 548。路径是唯一会被裁的那一列，它也是
+        // 唯一能安全截断的列（详情面板里有全文）。
+        let columns = vec![
+            Column::new("time", "时间 (UTC)")
+                .resizable(true)
+                .width(px(110.)),
+            Column::new("method", "方法").resizable(true).width(px(64.)),
+            Column::new("authority", "主机")
+                .resizable(true)
+                .width(px(170.)),
+            Column::new("path", "路径").resizable(true).width(px(352.)),
+            Column::new("status", "状态").resizable(true).width(px(60.)),
+            Column::new("duration", "耗时")
+                .resizable(true)
+                .width(px(64.)),
+            Column::new("size", "大小").resizable(true).width(px(80.)),
+        ];
         Self {
             columns,
             rows: Vec::new(),
+            visible: Vec::new(),
+            filter: RecordFilter::default(),
             error: None,
         }
     }
@@ -175,38 +307,94 @@ impl RecordsTable {
             let overflow = self.rows.len() - MAX_ROWS;
             self.rows.drain(..overflow);
         }
+        if changed {
+            self.rebuild_visible();
+        }
         changed
     }
 
     fn clear(&mut self) -> bool {
         let changed = !self.rows.is_empty() || self.error.is_some();
         self.rows.clear();
+        self.visible.clear();
+        // 记录都没了，筛选选项也就没意义；留着只会是一组指向空结果的条件。
+        self.filter = RecordFilter::default();
         self.error = None;
         changed
     }
 
-    fn set_error(&mut self, message: String) -> bool {
-        let changed = self.error.as_deref() != Some(message.as_str());
-        self.error = Some(message.into());
+    fn set_filter(&mut self, filter: RecordFilter) -> bool {
+        if self.filter == filter {
+            return false;
+        }
+        self.filter = filter;
+        self.rebuild_visible();
+        true
+    }
+
+    fn filter(&self) -> &RecordFilter {
+        &self.filter
+    }
+
+    /// 筛选下拉的选项：从**当前记录**派生（方法去重排序、主机去重排序）。
+    /// 不从协议或配置猜：会话里没出现过的方法不该出现在菜单里。
+    fn filter_options(&self) -> (Vec<String>, Vec<String>) {
+        let mut methods: Vec<String> = Vec::new();
+        let mut authorities: Vec<String> = Vec::new();
+        for record in &self.rows {
+            if !methods.contains(&record.method) {
+                methods.push(record.method.clone());
+            }
+            if !authorities.contains(&record.authority) {
+                authorities.push(record.authority.clone());
+            }
+        }
+        methods.sort();
+        authorities.sort();
+        (methods, authorities)
+    }
+
+    fn rebuild_visible(&mut self) {
+        self.visible = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| self.filter.matches(record))
+            .map(|(index, _)| index)
+            .collect();
+    }
+
+    fn set_error(&mut self, notice: Notice) -> bool {
+        let changed = self.error.as_ref() != Some(&notice);
+        self.error = Some(notice);
         changed
     }
 
-    pub fn error(&self) -> Option<SharedString> {
+    pub fn error(&self) -> Option<Notice> {
         self.error.clone()
     }
 
+    /// 会话缓冲里的总条数（不受筛选影响）。
+    fn total(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn visible_count(&self) -> usize {
+        self.visible.len()
+    }
+
     fn record_at(&self, row_ix: usize) -> Option<&Record> {
-        self.rows.get(row_ix)
+        self.visible.get(row_ix).map(|&index| &self.rows[index])
     }
 }
 
 impl TableDelegate for RecordsTable {
     fn columns_count(&self, _: &App) -> usize {
-        6
+        7
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
+        self.visible.len()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -220,7 +408,7 @@ impl TableDelegate for RecordsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(record) = self.rows.get(row_ix) else {
+        let Some(record) = self.record_at(row_ix) else {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
@@ -235,7 +423,19 @@ impl TableDelegate for RecordsTable {
                 .child(SharedString::from(text))
         };
         match col_ix {
-            COL_TIME => cell(mono(utc_hms(record.time_ms)).text_color(muted)),
+            COL_TIME => cell(
+                div()
+                    // 列里只放时分秒；完整日期（跨天会话要靠它）在悬停提示上。
+                    .id(SharedString::from(format!(
+                        "debug-time-{}",
+                        record.request_id
+                    )))
+                    .tooltip(text_tooltip(format!(
+                        "{} UTC",
+                        utc_datetime(record.time_ms)
+                    )))
+                    .child(mono(utc_hms(record.time_ms)).text_color(muted)),
+            ),
             COL_METHOD => cell(mono(record.method.clone()).font_weight(FontWeight::SEMIBOLD)),
             COL_AUTHORITY => cell(mono(record.authority.clone())),
             COL_PATH => cell(mono(record.path.clone())),
@@ -246,6 +446,16 @@ impl TableDelegate for RecordsTable {
                     record.status.to_string()
                 };
                 cell(mono(label).text_color(status_color(record.status, cx)))
+            }
+            COL_DURATION => {
+                // 没有响应就还没有耗时：显示「—」而不是「0 ms」，
+                // 后者会被读成"秒回"。
+                let label = if record.has_response() {
+                    format_duration(record.duration_ms)
+                } else {
+                    "—".to_string()
+                };
+                cell(mono(label).text_color(muted))
             }
             COL_SIZE => cell(
                 div()
@@ -264,19 +474,30 @@ impl TableDelegate for RecordsTable {
     ) -> impl IntoElement {
         // 空态说明"下一步做什么"，而不是留一块白。
         let muted = cx.theme().muted_foreground;
+        // 有记录但都被筛掉了：这不是"还没有记录"，说错会让人以为抓包没开始。
+        let filtered = !self.rows.is_empty();
+        let (title, hint) = if filtered {
+            (
+                "没有匹配的记录",
+                "调整或清除上面的筛选条件；会话缓冲里的记录没有被删除。",
+            )
+        } else {
+            (
+                "还没有记录",
+                "开始调试后，把客户端的代理指到该环境的端口走一遍请求，记录会出现在这里。",
+            )
+        };
         div()
             .id("debug-empty")
             .flex()
             .flex_col()
+            .size_full()
             .items_center()
+            .justify_center()
             .gap_2()
-            .py_8()
-            .child(div().text_sm().child("还没有记录"))
-            .child(
-                div().text_xs().text_color(muted).child(
-                    "开始调试后，把客户端的代理指到该环境的端口走一遍请求，记录会出现在这里。",
-                ),
-            )
+            .p_6()
+            .child(div().text_sm().child(title))
+            .child(div().text_xs().text_color(muted).child(hint))
             .into_any_element()
     }
 }
@@ -300,6 +521,22 @@ fn cell(child: impl IntoElement) -> AnyElement {
         .items_center()
         .child(child)
         .into_any_element()
+}
+
+/// 一条筛选菜单项：点下去把整份筛选条件换成 `filter`（三个维度一次写完，
+/// 不依赖"当前条件是谁给的"——菜单项构造时就把结果算定）。
+fn filter_menu_item(
+    label: impl Into<SharedString>,
+    checked: bool,
+    filter: RecordFilter,
+    view: WeakEntity<DebugScreen>,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label)
+        .checked(checked)
+        .on_click(move |_, _, cx| {
+            let filter = filter.clone();
+            let _ = view.update(cx, |view, cx| view.set_filter(filter, cx));
+        })
 }
 
 // --------------------------------------------------------------------------- #
@@ -518,7 +755,10 @@ impl Render for CaptureDetail {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(SharedString::from(format!("#{}", self.record.request_id)))
-            .child(SharedString::from(utc_hms(self.record.time_ms)))
+            .child(SharedString::from(format!(
+                "{} UTC",
+                utc_datetime(self.record.time_ms)
+            )))
             .child(SharedString::from(format_bytes(self.record.bytes)));
         let body = self.render_body(cx);
         div()
@@ -552,6 +792,9 @@ pub struct DebugScreen {
     dropped: u64,
     /// 增量游标：记录身份（`request_id`），不是行号。
     cursor: Arc<AtomicU64>,
+    /// 筛选条是否展开。默认收起：不筛的时候它只是一行占地方的控件；
+    /// 已经有筛选条件时无论展开与否都显示（否则条件没入口可改回）。
+    filters_open: bool,
     poll: Option<Task<()>>,
     inflight: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -572,6 +815,12 @@ impl DebugScreen {
                 let TableEvent::SelectRow(row_ix) = event else {
                     return;
                 };
+                // 键盘 ↑/↓ 也会 emit SelectRow：那只是**移动高亮**，不该每移一行
+                // 就重开/换一次详情面板（面板会抢焦点，键盘浏览立刻断掉）。
+                // 键盘打开当前行走 Enter（见 `render` 里的 on_key_down）。
+                if window.last_input_was_keyboard() {
+                    return;
+                }
                 let Some(record) = table.read(cx).delegate().record_at(*row_ix).cloned() else {
                     return;
                 };
@@ -588,6 +837,7 @@ impl DebugScreen {
             captured: 0,
             dropped: 0,
             cursor: Arc::new(AtomicU64::new(0)),
+            filters_open: false,
             poll: None,
             inflight: Vec::new(),
             _subscriptions: vec![table_sub],
@@ -595,10 +845,21 @@ impl DebugScreen {
     }
 
     /// 错误只有一条通道：表上的错误条（与目录屏同一手法）。
-    fn report(&mut self, message: String, cx: &mut Context<Self>) {
+    fn report(&mut self, notice: Notice, cx: &mut Context<Self>) {
         let table = self.table.clone();
         table.update(cx, |state, cx| {
-            if state.delegate_mut().set_error(message) {
+            if state.delegate_mut().set_error(notice) {
+                state.refresh(cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// 改筛选：只重算可见行，**不动会话缓冲与游标**（筛选不该看起来像清空）。
+    fn set_filter(&mut self, filter: RecordFilter, cx: &mut Context<Self>) {
+        let table = self.table.clone();
+        table.update(cx, |state, cx| {
+            if state.delegate_mut().set_filter(filter) {
                 state.refresh(cx);
             }
         });
@@ -643,12 +904,16 @@ impl DebugScreen {
         let task = hop(
             window,
             cx,
-            async move { admin.start_debug(&body).map_err(|error| error.message) },
+            async move { admin.start_debug(&body) },
             move |this, outcome, window, cx| match outcome {
                 Ok(view) => this.adopt(view, window, cx),
-                Err(message) => {
-                    this.target = Some(name);
-                    this.report(message, cx);
+                Err(error) => {
+                    // 失败不留"已选"的幽灵状态：按钮回到「选择环境」，原因进错误条。
+                    this.target = None;
+                    this.report(
+                        Notice::from_error(Action::StartDebug, Some(&name), &error),
+                        cx,
+                    );
                 }
             },
         );
@@ -685,10 +950,10 @@ impl DebugScreen {
         let task = hop(
             window,
             cx,
-            async move { admin.stop_debug().map_err(|error| error.message) },
+            async move { admin.stop_debug() },
             move |this, outcome, window, cx| {
-                if let Err(message) = outcome {
-                    this.report(message, cx);
+                if let Err(error) = outcome {
+                    this.report(Notice::from_error(Action::StopDebug, None, &error), cx);
                     return;
                 }
                 this.reset_session(window, cx);
@@ -703,10 +968,11 @@ impl DebugScreen {
         };
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
+        let subject = target.clone();
         let task = hop(
             window,
             cx,
-            async move { admin.clear_capture(&target).map_err(|error| error.message) },
+            async move { admin.clear_capture(&target) },
             move |this, outcome, _, cx| match outcome {
                 Ok(_) => {
                     table.update(cx, |state, cx| {
@@ -719,7 +985,10 @@ impl DebugScreen {
                     this.cursor.store(0, Ordering::Relaxed);
                     cx.notify();
                 }
-                Err(message) => this.report(message, cx),
+                Err(error) => this.report(
+                    Notice::from_error(Action::ClearCapture, Some(&subject), &error),
+                    cx,
+                ),
             },
         );
         self.inflight.push(task);
@@ -782,7 +1051,9 @@ impl DebugScreen {
                         this.target = None;
                         this.session_id = None;
                         this.report(
-                            "调试会话已失效：目标环境不在运行，或会话已被停止".to_string(),
+                            // 这条不是门面错误：会话消失是轮询自己观察到的，
+                            // 没有错误码也没有英文原文，只给一句中文。
+                            Notice::plain("调试会话已失效：目标环境不在运行，或会话已被停止"),
                             cx,
                         );
                     });
@@ -836,6 +1107,191 @@ impl DebugScreen {
         }
     }
 
+    /// 筛选条：方法 / 状态档 / 主机三个维度可叠加。
+    ///
+    /// 选项从**当前记录**派生（会话里没出现过的方法不列），选中即生效；
+    /// 右端显示命中数/总数，并给「清除筛选」。筛的是视图，会话不受影响。
+    fn render_filters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let (filter, methods, authorities, total, shown) = {
+            let delegate = self.table.read(cx).delegate();
+            let (methods, authorities) = delegate.filter_options();
+            (
+                delegate.filter().clone(),
+                methods,
+                authorities,
+                delegate.total(),
+                delegate.visible_count(),
+            )
+        };
+        let view = cx.weak_entity();
+
+        // 方法
+        let method = {
+            let this = view.clone();
+            let base = filter.clone();
+            let methods = methods.clone();
+            let active = base.method.is_some();
+            let button = Button::new("debug-filter-method")
+                .xsmall()
+                .label(match &base.method {
+                    Some(method) => format!("方法：{method}"),
+                    None => "方法：全部".to_string(),
+                })
+                .tooltip("按请求方法筛选");
+            let button = if active {
+                button.outline()
+            } else {
+                button.ghost()
+            };
+            button
+                .disabled(total == 0)
+                .dropdown_menu(move |mut menu, _, _| {
+                    let this = this.clone();
+                    let base = base.clone();
+                    // 「全部方法」= 清掉这一维，其余两维保持不变。
+                    let mut cleared = base.clone();
+                    cleared.method = None;
+                    menu = menu.item(filter_menu_item(
+                        "全部方法",
+                        base.method.is_none(),
+                        cleared,
+                        this.clone(),
+                    ));
+                    for method in methods.clone() {
+                        let mut next = base.clone();
+                        next.method = Some(method.clone());
+                        let checked = base.method.as_deref() == Some(method.as_str());
+                        menu = menu.item(filter_menu_item(method, checked, next, this.clone()));
+                    }
+                    menu
+                })
+        };
+
+        // 状态档（2xx / 3xx / 4xx / 5xx / 无响应 / 其他）
+        let status = {
+            let this = view.clone();
+            let base = filter.clone();
+            let active = base.status.is_some();
+            let button = Button::new("debug-filter-status")
+                .xsmall()
+                .label(match base.status {
+                    Some(status) => format!("状态：{}", status.label()),
+                    None => "状态：全部".to_string(),
+                })
+                .tooltip("按响应状态档筛选");
+            let button = if active {
+                button.outline()
+            } else {
+                button.ghost()
+            };
+            button
+                .disabled(total == 0)
+                .dropdown_menu(move |mut menu, _, _| {
+                    let this = this.clone();
+                    let base = base.clone();
+                    let mut cleared = base.clone();
+                    cleared.status = None;
+                    menu = menu.item(filter_menu_item(
+                        "全部状态",
+                        base.status.is_none(),
+                        cleared,
+                        this.clone(),
+                    ));
+                    for status in StatusClass::ALL {
+                        let mut next = base.clone();
+                        next.status = Some(status);
+                        menu = menu.item(filter_menu_item(
+                            status.label(),
+                            base.status == Some(status),
+                            next,
+                            this.clone(),
+                        ));
+                    }
+                    menu
+                })
+        };
+
+        // 主机（去重排序；会话里出现几个就列几个）
+        let authority = {
+            let this = view.clone();
+            let base = filter.clone();
+            let authorities = authorities.clone();
+            let active = base.authority.is_some();
+            let button = Button::new("debug-filter-authority")
+                .xsmall()
+                .label(match &base.authority {
+                    Some(authority) => format!("主机：{authority}"),
+                    None => "主机：全部".to_string(),
+                })
+                .tooltip("按目标主机筛选");
+            let button = if active {
+                button.outline()
+            } else {
+                button.ghost()
+            };
+            button
+                .disabled(total == 0)
+                .dropdown_menu(move |mut menu, _, _| {
+                    let this = this.clone();
+                    let base = base.clone();
+                    let mut cleared = base.clone();
+                    cleared.authority = None;
+                    menu = menu.item(filter_menu_item(
+                        "全部主机",
+                        base.authority.is_none(),
+                        cleared,
+                        this.clone(),
+                    ));
+                    for authority in authorities.clone() {
+                        let mut next = base.clone();
+                        next.authority = Some(authority.clone());
+                        let checked = base.authority.as_deref() == Some(authority.as_str());
+                        menu = menu.item(filter_menu_item(authority, checked, next, this.clone()));
+                    }
+                    menu
+                })
+        };
+
+        let summary = if filter.is_empty() {
+            format!("{total} 条记录")
+        } else {
+            format!("筛选命中 {shown} / {total} 条")
+        };
+        let clear = (!filter.is_empty()).then(|| {
+            let this = view.clone();
+            Button::new("debug-filter-clear")
+                .xsmall()
+                .ghost()
+                .icon(Icon::new(IconName::Close))
+                .label("清除筛选")
+                .on_click(move |_, _, cx| {
+                    let _ =
+                        this.update(cx, |view, cx| view.set_filter(RecordFilter::default(), cx));
+                })
+                .into_any_element()
+        });
+
+        div()
+            .id("debug-filters")
+            .flex()
+            .items_center()
+            .gap_2()
+            // 固定宽度：标签文字随命中值变化，宽度跟着跳会让整行在打字时抖动。
+            .child(div().w(px(170.)).min_w_0().child(method))
+            .child(div().w(px(110.)).min_w_0().child(status))
+            .child(div().w(px(230.)).min_w_0().child(authority))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(summary)),
+            )
+            .children(clear)
+            .into_any_element()
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let view = cx.weak_entity();
@@ -848,10 +1304,17 @@ impl DebugScreen {
         let picker = {
             let this = view.clone();
             let current = current.clone();
-            Button::new("debug-target")
+            let button = Button::new("debug-target")
                 .xsmall()
-                .outline()
-                .icon(Icon::new(IconName::Network))
+                .icon(Icon::new(IconName::Network));
+            // 没会话时「选择环境」就是这一屏唯一的主操作（按下即开始调试），
+            // 用 primary 把它从工具条里抬出来；有会话时它只是切换目标的手段。
+            let button = if has_session {
+                button.outline()
+            } else {
+                button.primary()
+            };
+            button
                 .label(match &current {
                     Some(target) => format!("目标：{target}"),
                     None => "选择环境".to_string(),
@@ -885,6 +1348,14 @@ impl DebugScreen {
                 })
         };
 
+        // 筛选条的开关：收起时不占那一行（条件本身有筛选时会强制显示）。
+        let active_dims = {
+            let filter = self.table.read(cx).delegate().filter();
+            usize::from(filter.method.is_some())
+                + usize::from(filter.status.is_some())
+                + usize::from(filter.authority.is_some())
+        };
+
         div()
             .id("debug-toolbar")
             .flex()
@@ -898,12 +1369,33 @@ impl DebugScreen {
                     .child(SharedString::from(self.status_line())),
             )
             .child(div().flex_1())
+            .child({
+                let this = view.clone();
+                let label = if active_dims == 0 {
+                    "筛选".to_string()
+                } else {
+                    format!("筛选 ({active_dims})")
+                };
+                Button::new("debug-filter-toggle")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(gpui_kit::assets::IconName::Funnel))
+                    .label(label)
+                    .tooltip("按方法 / 状态档 / 主机筛选记录")
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |view, cx| {
+                            view.filters_open = !view.filters_open;
+                            cx.notify();
+                        });
+                    })
+            })
             .child(
+                // 「清空」不配垃圾桶图标：垃圾桶读起来是"删除这些记录"，
+                // 而这里清的是**会话缓冲**，服务端那份账本不受影响。
                 Button::new("debug-clear")
                     .xsmall()
                     .ghost()
-                    .icon(Icon::new(IconName::Delete))
-                    .label("清空")
+                    .label("清空记录")
                     .tooltip("清空当前会话已捕获的记录")
                     .disabled(!has_session)
                     .on_click({
@@ -927,15 +1419,18 @@ impl DebugScreen {
                         }
                     })
                     .into_any_element()
+            } else if has_live {
+                // 有可调试的环境时不再说话：左侧状态行已经写了"未开始：选一个
+                // 运行中的环境"，主操作就是左边那个已高亮的按钮。同一句话
+                // 在一行里说两遍，只会让两处都不可信。
+                div().into_any_element()
             } else {
+                // 一个能跑的环境都没有 —— 这是**另一件事**，要说出来，
+                // 而且要说清去哪儿解决。
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(if has_live {
-                        "从「选择环境」开始调试"
-                    } else {
-                        "先到「环境」把一个环境跑起来"
-                    })
+                    .child("先到「环境」把一个环境跑起来")
                     .into_any_element()
             })
             .into_any_element()
@@ -945,7 +1440,16 @@ impl DebugScreen {
 impl Render for DebugScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let error = self.table.read(cx).delegate().error();
+        let has_records = self.table.read(cx).delegate().total() > 0;
+        let filter_active = !self.table.read(cx).delegate().filter().is_empty();
         let toolbar = self.render_toolbar(cx);
+        // 没有会话也没有记录时不摆三条筛不了任何东西的下拉：那条筛选条只会
+        // 让"还没开始"看起来像"没有匹配"。收起态同理 —— 只有真有条件时
+        // 才强制显示，否则条件没有入口可改回。
+        let filters = (self.session_id.is_some() || has_records)
+            .then_some(())
+            .filter(|_| self.filters_open || filter_active)
+            .map(|_| self.render_filters(cx));
 
         div()
             .flex()
@@ -956,21 +1460,116 @@ impl Render for DebugScreen {
             .gap_2()
             .p_4()
             .child(toolbar)
-            .children(error.map(|message| {
+            .children(filters)
+            .children(error.map(|message| error_banner("debug-error", message)))
+            .child(
                 div()
-                    .id("debug-error")
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(message)
-            }))
-            .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
+                    .id("debug-table")
+                    .flex_1()
+                    .min_h_0()
+                    // Enter 打开当前选中行的详情（↑/↓ 只移动高亮）。
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key != "enter" {
+                            return;
+                        }
+                        let record = {
+                            let table = this.table.read(cx);
+                            table
+                                .selected_row()
+                                .and_then(|row| table.delegate().record_at(row).cloned())
+                        };
+                        if let Some(record) = record {
+                            this.open_detail(record, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(DataTable::new(&self.table)),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Record, body_lines, utc_hms};
+    use super::{
+        Record, RecordFilter, RecordsTable, StatusClass, body_lines, utc_datetime, utc_hms,
+    };
     use serde_json::json;
+
+    fn record(id: u64, method: &str, authority: &str, status: u16) -> Record {
+        Record::parse(&json!({
+            "request_id": id,
+            "time": 0,
+            "duration_ms": 12,
+            "request": {"method": method, "path": "/x", "authority": authority},
+            "response": {"status": status, "headers": [], "body": {"size": 0}}
+        }))
+        .expect("测试构造的记录必须能解析")
+    }
+
+    #[test]
+    fn filters_combine_over_the_visible_projection() {
+        let mut table = RecordsTable::new();
+        table.append([
+            record(1, "GET", "a.test", 200),
+            record(2, "POST", "a.test", 500),
+            record(3, "GET", "b.test", 404),
+        ]);
+        assert_eq!(table.visible_count(), 3);
+        assert_eq!(table.total(), 3);
+
+        let mut filter = RecordFilter {
+            method: Some("GET".into()),
+            ..RecordFilter::default()
+        };
+        assert!(table.set_filter(filter.clone()));
+        assert_eq!(table.visible_count(), 2);
+        // 行下标指可见行：第 0 行是 #1，不是被筛掉的 #2。
+        assert_eq!(table.record_at(0).map(|r| r.request_id), Some(1));
+        assert_eq!(table.record_at(1).map(|r| r.request_id), Some(3));
+
+        // 叠加状态档：GET ∩ 4xx → 只剩 #3。
+        filter.status = Some(StatusClass::Class4xx);
+        assert!(table.set_filter(filter));
+        assert_eq!(table.visible_count(), 1);
+        assert_eq!(table.record_at(0).map(|r| r.request_id), Some(3));
+
+        // 再叠加主机：条件互斥 → 空结果，但不删任何记录。
+        let mut filter = table.filter().clone();
+        filter.authority = Some("a.test".into());
+        assert!(table.set_filter(filter));
+        assert_eq!(table.visible_count(), 0);
+        assert_eq!(table.total(), 3);
+        assert!(table.record_at(0).is_none());
+
+        // 清空缓冲连带清掉筛选条件（选项已经指向空结果了）。
+        table.clear();
+        assert!(table.filter().is_empty());
+        assert_eq!(table.total(), 0);
+    }
+
+    #[test]
+    fn status_classes_partition_every_status_including_pending() {
+        assert_eq!(StatusClass::of(0), StatusClass::Pending);
+        assert_eq!(StatusClass::of(201), StatusClass::Class2xx);
+        assert_eq!(StatusClass::of(304), StatusClass::Class3xx);
+        assert_eq!(StatusClass::of(404), StatusClass::Class4xx);
+        assert_eq!(StatusClass::of(502), StatusClass::Class5xx);
+        // 1xx 与 600+ 落在「其他」，不被悄悄并入任何一档。
+        assert_eq!(StatusClass::of(101), StatusClass::Other);
+        assert_eq!(StatusClass::of(700), StatusClass::Other);
+    }
+
+    #[test]
+    fn dates_come_from_the_civil_calendar_not_a_fixed_offset() {
+        assert_eq!(utc_datetime(0), "1970-01-01 00:00:00.000");
+        // 跨日：1970-01-02（上面 UTC 时间格式的用例只覆盖时分秒）。
+        assert_eq!(utc_datetime(86_400_000), "1970-01-02 00:00:00.000");
+        assert_eq!(utc_datetime(1_700_000_000_123), "2023-11-14 22:13:20.123");
+        // 闰日：2024-02-29 是真实存在的一天，不能被算成 03-01。
+        assert_eq!(utc_datetime(1_709_164_800_000), "2024-02-29 00:00:00.000");
+        // 世纪闰：2000-02-29（1900 不是闰年，这条能抓住"百年不闰"的漏算）。
+        assert_eq!(utc_datetime(951_782_400_000), "2000-02-29 00:00:00.000");
+    }
 
     #[test]
     fn times_are_formatted_as_utc_wall_clock() {
@@ -992,6 +1591,7 @@ mod tests {
             "session": 7,
             "request_id": 128,
             "time": 1_700_000_000_123u64,
+            "duration_ms": 87,
             "request": {
                 "method": "GET",
                 "path": "/api/items?q=1",
@@ -1012,6 +1612,7 @@ mod tests {
         assert_eq!(record.authority, "api.example.com");
         assert_eq!(record.path, "/api/items?q=1");
         assert_eq!(record.status, 200);
+        assert_eq!(record.duration_ms, 87);
         assert_eq!(record.bytes, 12);
     }
 

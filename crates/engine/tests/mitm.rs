@@ -3,10 +3,11 @@
 //!
 //! 三件核心事实在这里钉死：
 //!
-//! 1. **mitmproxy 格式兼容**：tests/fixtures/mitmproxy-compat/ 是一张用 openssl
-//!    按 mitmproxy 的写盘形状生成的 RSA CA（-ca.pem = PKCS#1 私钥 + 证书拼接，
-//!    CN=mitmproxy），fixture 里的密钥是纯测试假值。加载它、并用这把 RSA 私钥
-//!    现场签发叶子证书完成一次 rustls 握手 —— 这就是已装客户端零感证的判据。
+//! 1. **PEM 形状兼容**：tests/fixtures/mitmproxy-compat/ 是一张用 openssl 按
+//!    mitmproxy 的写盘形状生成的 RSA CA（-ca.pem = PKCS#1 私钥 + 证书拼接，
+//!    CN=mitmproxy），fixture 里的密钥是纯测试假值。`SharedCa::load` 仍吃得下这种
+//!    形状（PKCS#1 RSA + 拼接顺序），但 `load_or_create` **不再自动复用**它 ——
+//!    本工具的 CA 身份是自己的（见 `crates/engine/src/ca.rs`）。
 //! 2. **配对与坏 CA 处置**：私钥与证书公钥不一致 → 拒绝加载；load_or_create
 //!    对坏 CA 删除重新物化，并把原因作为可见结论交回上层。
 //! 3. **生成分支**：confdir 为空时物化新 CA（ECDSA），文件权限 0600，重载指纹
@@ -35,6 +36,14 @@ fn read_pair(dir: &Path) -> (Vec<u8>, Vec<u8>) {
     (
         std::fs::read(dir.join("mitmproxy-ca.pem")).unwrap(),
         std::fs::read(dir.join("mitmproxy-ca-cert.pem")).unwrap(),
+    )
+}
+
+/// 生成分支的落盘文件名（本工具的 CA 身份，不再是 mitmproxy 的同名文件）。
+fn generated_pair(dir: &Path) -> (Vec<u8>, Vec<u8>) {
+    (
+        std::fs::read(dir.join("envboard-ca.pem")).unwrap(),
+        std::fs::read(dir.join("envboard-ca-cert.pem")).unwrap(),
     )
 }
 
@@ -95,16 +104,21 @@ async fn generated_ca_materializes_files_and_serves_handshakes() {
         ca.fingerprint(),
         "the outcome must report the same CA that was returned"
     );
-    // 文件形态与 mitmproxy 一致（同名、拼接顺序一致由加载侧反证：能重新加载）。
-    let reloaded_bytes = read_pair(&dir);
+    // 文件形态：本工具自己的名字（envboard-ca*），拼接顺序一致由加载侧反证。
+    let reloaded_bytes = generated_pair(&dir);
     let reloaded =
         SharedCa::load(&reloaded_bytes.0, &reloaded_bytes.1).expect("generated files must reload");
     assert_eq!(reloaded.fingerprint(), ca.fingerprint());
+    assert_eq!(
+        envboard_engine::der::cert_subject_cn(reloaded.ca_cert_der()).unwrap(),
+        "envboard",
+        "生成的 CA 必须是本工具自己的身份"
+    );
     // 私钥文件必须 0600（凭据面纪律）。
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.join("mitmproxy-ca.pem"))
+        let mode = std::fs::metadata(dir.join("envboard-ca.pem"))
             .unwrap()
             .permissions()
             .mode();
@@ -119,11 +133,11 @@ async fn corrupt_ca_is_rematerialised_with_a_visible_reason() {
     let dir = temp_dir("envboard-m1-corrupt");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("mitmproxy-ca.pem"),
+        dir.join("envboard-ca.pem"),
         b"-----BEGIN RSA PRIVATE KEY-----\nbroken\n",
     )
     .unwrap();
-    std::fs::write(dir.join("mitmproxy-ca-cert.pem"), b"garbage\n").unwrap();
+    std::fs::write(dir.join("envboard-ca-cert.pem"), b"garbage\n").unwrap();
     let (ca, outcome) = SharedCa::load_or_create(&dir).unwrap();
     let reason = match outcome {
         envboard_engine::CaOutcome::Regenerated { reason, .. } => reason,

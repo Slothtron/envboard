@@ -1,15 +1,20 @@
-//! 共享 CA：加载既有证书、必要时生成新证书、按 SNI 现签叶子证书并缓存。
+//! 共享 CA：加载 envboard 自己的根证书、必要时生成、按 SNI 现签叶子证书并缓存。
 //!
-//! 兼容判据（已装证书的客户端零感知的前提）：mitmproxy 写下的 confdir 里，
-//! mitmproxy-ca.pem 是「PKCS#1 RSA 私钥 + 证书」的拼接，客户端装的是
-//! mitmproxy-ca-cert.pem（mitmproxy/certs.py:563 的 create_store，私钥用
-//! TraditionalOpenSSL 即 PKCS#1）。v3 读同一条路径、同一对文件，判据沿用 v2：
+//! **身份是自己的**：文件叫 `envboard-ca.pem` / `envboard-ca-cert.pem`，
+//! Subject 是 `O=envboard, CN=envboard`。v3 早期为了"已装 mitmproxy 证书的客户端
+//! 零感知"沿用了 mitmproxy 的文件名与 Subject —— 那个决定的代价是**继承别人的
+//! 信任**，已废弃（见 [`LEGACY_CA_BASENAME`]）：旧文件既不加载也不删除，只在
+//! 装配时上报一句"旧 CA 已不再使用，客户端需要重装"。
 //!
-//! 1. 两个文件都在 → 加载：从私钥提出公钥字节，与证书 SPKI 逐字节配对；
-//!    证书必须是 CA 且未过期；-ca.pem 内嵌的证书必须与 -ca-cert.pem 一致。
-//! 2. 任一不满足 → 删除这两个文件并重新生成（幂等）。带着坏 CA 继续运行的
-//!    症状是"客户端随机证书错误"，响亮重做优于静默带病服务。
-//! 3. 文件本来就缺 → 生成新 CA 并按同样的文件名写回。
+//! 加载判据（有一对文件就要过全关）：
+//!
+//! 1. 从私钥提出公钥字节，与证书 SPKI 逐字节配对；
+//! 2. 证书必须是 CA 且未过期；
+//! 3. `-ca.pem` 内嵌的证书（若有）必须与 `-ca-cert.pem` 一致。
+//!
+//! 任一不满足 → 删除这一对文件并重新生成（幂等）。带着坏 CA 继续运行的症状是
+//! "客户端随机证书错误"，响亮重做优于静默带病服务。文件本来就缺 → 生成新 CA
+//! 并按同样的文件名写回。
 //!
 //! 新生成的 CA 用 ECDSA P-256：签发库的 ring 后端不支持生成 RSA 密钥
 //! （rcgen 0.14 文档明示只有 aws-lc-rs 能生成），加载既有 RSA CA 不受影响。
@@ -40,12 +45,23 @@ use crate::sha256;
 use crate::text::parse_ip_literal;
 use crate::{Error, ErrorCode};
 
-/// CA 文件名前缀：与 v2 一致写死 mitmproxy（共享 CA 的契约要求已装客户端
-/// 零感知，改名等于换 CA）。
-pub const CA_BASENAME: &str = "mitmproxy";
+/// CA 文件名前缀。**自己的名字**：envboard 签发自己的根证书，不再借用
+/// mitmproxy 的文件名与 Subject —— 借用意味着「系统里已装 mitmproxy 证书的
+/// 机器会自动信任本工具」，那是别人的信任决定，不该由我们继承。
+pub const CA_BASENAME: &str = "envboard";
+
+/// v3 之前沿用的 mitmproxy 文件名。**只读不认**：`load_or_create` 不再加载它们，
+/// 也不删除（那是别人可能仍在用的材料）；发现它们时按「旧 CA 已失效」上报，
+/// 让用户知道客户端需要重装证书。
+pub const LEGACY_CA_BASENAME: &str = "mitmproxy";
 
 fn key_path(confdir: &Path) -> PathBuf {
     confdir.join(format!("{CA_BASENAME}-ca.pem"))
+}
+
+/// v2/v3 早期写下的私钥文件（只用于判断"旧 CA 还在不在"）。
+fn legacy_key_path(confdir: &Path) -> PathBuf {
+    confdir.join(format!("{LEGACY_CA_BASENAME}-ca.pem"))
 }
 
 /// 客户端要安装的那张证书的路径（只含证书，不含私钥）。
@@ -54,6 +70,11 @@ fn key_path(confdir: &Path) -> PathBuf {
 /// 界面不许自己拼文件名。
 pub fn cert_path(confdir: &Path) -> PathBuf {
     confdir.join(format!("{CA_BASENAME}-ca-cert.pem"))
+}
+
+/// v2/v3 早期写下的证书文件（同上，只用于判断）。
+fn legacy_cert_path(confdir: &Path) -> PathBuf {
+    confdir.join(format!("{LEGACY_CA_BASENAME}-ca-cert.pem"))
 }
 
 /// 生成路径的 CA 有效期（年）。
@@ -120,15 +141,56 @@ struct SniCache {
     entries: BTreeMap<String, CachedLeaf>,
 }
 
+/// 共享 CA 的**可变所有权**：引擎按连接读取当前值，重新签发 = 整体换入。
+///
+/// 为什么不把 `Arc<SharedCa>` 直接塞进引擎：重新签发要求**正在跑的实例立刻
+/// 换新证书**，否则客户端装的是新 CA、拿到的却是旧叶子证书（握手失败）。
+/// 每个 CONNECT 取一次当前值，旋转就不需要重启环境 —— 代价是每条 CONNECT
+/// 重建一次 `ServerConfig`（几十微秒，和 TLS 握手本身比可以忽略）。
+#[derive(Clone)]
+pub struct CaStore {
+    inner: Arc<arc_swap::ArcSwap<SharedCa>>,
+}
+
+impl CaStore {
+    pub fn new(ca: Arc<SharedCa>) -> Self {
+        Self {
+            inner: Arc::new(arc_swap::ArcSwap::from(ca)),
+        }
+    }
+
+    /// 当前生效的 CA。拿到的是快照：调用方在一次握手里看到的是同一张证书。
+    pub fn current(&self) -> Arc<SharedCa> {
+        self.inner.load_full()
+    }
+
+    /// 整体换入新 CA（生效于下一次 CONNECT）。
+    pub fn replace(&self, ca: Arc<SharedCa>) {
+        self.inner.store(ca);
+    }
+}
+
+impl fmt::Debug for CaStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CaStore").finish_non_exhaustive()
+    }
+}
+
 impl SharedCa {
     /// 就绪一个共享 CA：能加载就加载，不能就重新物化（判据见模块文档）。
+    ///
+    /// **只认自己的文件**。旧 mitmproxy 文件存在时本次会生成新 CA，并带回一条
+    /// `Regenerated` —— 已安装旧证书的客户端因此需要重装，这件事不允许静默。
     pub fn load_or_create(confdir: &Path) -> Result<(Arc<SharedCa>, CaOutcome), Error> {
-        std::fs::create_dir_all(confdir)?;
+        std::fs::create_dir_all(confdir)
+            .map_err(|e| Error::io_at("create the CA directory", confdir, e))?;
         let key_file = key_path(confdir);
         let cert_file = cert_path(confdir);
         if key_file.exists() && cert_file.exists() {
-            let key_pem = std::fs::read(&key_file)?;
-            let cert_pem = std::fs::read(&cert_file)?;
+            let key_pem = std::fs::read(&key_file)
+                .map_err(|e| Error::io_at("read the CA key", &key_file, e))?;
+            let cert_pem = std::fs::read(&cert_file)
+                .map_err(|e| Error::io_at("read the CA certificate", &cert_file, e))?;
             match Self::load(&key_pem, &cert_pem) {
                 Ok(ca) => {
                     let fingerprint = ca.fingerprint.clone();
@@ -151,7 +213,38 @@ impl SharedCa {
         }
         let ca = Self::generate_into(confdir)?;
         let fingerprint = ca.fingerprint.clone();
+        // 旧文件还在 = 这是从"沿用 mitmproxy CA"升级上来的机器：旧证书装过的
+        // 客户端从此不认我们的新叶子证书，必须让上层把话说出来。
+        if legacy_key_path(confdir).exists() || legacy_cert_path(confdir).exists() {
+            return Ok((
+                Arc::new(ca),
+                CaOutcome::Regenerated {
+                    fingerprint,
+                    reason: format!(
+                        "legacy {LEGACY_CA_BASENAME} CA is no longer reused; envboard now issues its own CA"
+                    ),
+                },
+            ));
+        }
         Ok((Arc::new(ca), CaOutcome::Loaded { fingerprint }))
+    }
+
+    /// **重新签发**：换一张全新的自签根证书，覆盖状态目录里的两个文件。
+    ///
+    /// 调用方负责让客户端知道要重装（指纹变了）。旧证书不会被删除 —— 它可能还
+    /// 躺在系统信任库里，本工具不替用户决定什么时候清理别人的信任。
+    pub fn rotate(confdir: &Path) -> Result<(Arc<SharedCa>, CaOutcome), Error> {
+        std::fs::create_dir_all(confdir)
+            .map_err(|e| Error::io_at("create the CA directory", confdir, e))?;
+        let ca = Self::generate_into(confdir)?;
+        let fingerprint = ca.fingerprint.clone();
+        Ok((
+            Arc::new(ca),
+            CaOutcome::Regenerated {
+                fingerprint,
+                reason: "rotated on request".to_string(),
+            },
+        ))
     }
 
     /// 只加载、不生成（测试与诊断入口）。输入是两份 PEM 的原始字节。
@@ -192,13 +285,14 @@ impl SharedCa {
         })
     }
 
-    /// 生成新 CA（ECDSA P-256，理由见模块文档）并按 mitmproxy 的文件形态写盘：
-    /// 私钥 pem + 证书 pem 拼进 -ca.pem，证书 pem 单独进 -ca-cert.pem。
+    /// 生成新 CA（ECDSA P-256，理由见模块文档）并写盘：私钥 pem + 证书 pem 拼进
+    /// `-ca.pem`，证书 pem 单独进 `-ca-cert.pem`（沿用 mitmproxy 的拼接形态，
+    /// 只为让"既有的解析路径"与手工排查习惯继续成立；文件名与 Subject 都是自己的）。
     fn generate_into(confdir: &Path) -> Result<SharedCa, Error> {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .map_err(|e| internal(format!("cannot generate the CA key: {e}")))?;
         let mut params = ca_params();
-        params.distinguished_name = mitmproxy_subject();
+        params.distinguished_name = envboard_subject();
         let cert = params
             .self_signed(&key)
             .map_err(|e| internal(format!("cannot self-sign the CA certificate: {e}")))?;
@@ -217,7 +311,9 @@ impl SharedCa {
             fingerprint: String::new(),
             cache: Mutex::new(SniCache::default()),
         };
-        std::fs::write(cert_path(confdir), cert_only.as_bytes())?;
+        let cert_file = cert_path(confdir);
+        std::fs::write(&cert_file, cert_only.as_bytes())
+            .map_err(|e| Error::io_at("write the CA certificate", &cert_file, e))?;
         let mut ca = ca;
         ca.fingerprint = der::cert_public_key_octets(&ca.ca_cert_der)
             .map(|public| sha256::hex(&public))
@@ -259,18 +355,7 @@ impl SharedCa {
         }
         let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .map_err(|e| internal(format!("cannot generate the leaf key: {e}")))?;
-        let mut params = CertificateParams::default();
-        params.distinguished_name = {
-            let mut dn = DistinguishedName::new();
-            dn.push(DnType::CommonName, host);
-            dn
-        };
-        params.subject_alt_names = vec![san_for(host)?];
-        params.is_ca = IsCa::NoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.not_before = now - time::Duration::days(BACKDATING_DAYS);
-        params.not_after = now + time::Duration::days(LEAF_DAYS);
+        let params = leaf_params(host)?;
         let not_after = yyyymmdd(params.not_after);
         let cert = params
             .signed_by(&leaf_key, &self.issuer)
@@ -293,6 +378,47 @@ impl SharedCa {
         );
         Ok(certified)
     }
+
+    /// 为指定域名**签发一张可导出的叶子证书**（证书 PEM + 私钥 PEM）。
+    ///
+    /// 与 [`SharedCa::issue`] 的分工：那条路径服务 MITM 握手、私钥永不外流；
+    /// 这一条是用户显式下达的动作，产物就是交给用户的（验证签发链、装进别的
+    /// 程序、手工排查）。**不复用 SNI 缓存** —— 显式签一张就该是独立的一张，
+    /// 每次给新的密钥对。
+    pub fn issue_pem(&self, host: &str) -> Result<(String, String), Error> {
+        let host = host.trim();
+        if host.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidConfig,
+                "leaf host must not be empty".to_string(),
+            ));
+        }
+        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+            .map_err(|e| internal(format!("cannot generate the leaf key: {e}")))?;
+        let params = leaf_params(host)?;
+        let cert = params
+            .signed_by(&leaf_key, &self.issuer)
+            .map_err(|e| internal(format!("cannot sign the leaf certificate: {e}")))?;
+        Ok((cert.pem(), leaf_key.serialize_pem()))
+    }
+}
+
+/// 叶子证书的参数：CN=host、单个 SAN（IP 字面量走 iPAddress），服务端认证用途。
+fn leaf_params(host: &str) -> Result<CertificateParams, Error> {
+    let now = OffsetDateTime::now_utc();
+    let mut params = CertificateParams::default();
+    params.distinguished_name = {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, host);
+        dn
+    };
+    params.subject_alt_names = vec![san_for(host)?];
+    params.is_ca = IsCa::NoCa;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.not_before = now - time::Duration::days(BACKDATING_DAYS);
+    params.not_after = now + time::Duration::days(LEAF_DAYS);
+    Ok(params)
 }
 
 /// host → SAN：IP 字面量走 iPAddress，其余按 DNS 名（校验交给签发库）。
@@ -326,8 +452,8 @@ fn ca_params() -> CertificateParams {
     params
 }
 
-/// 与 mitmproxy 生成路径一致的 Subject（O=mitmproxy, CN=mitmproxy）。
-fn mitmproxy_subject() -> DistinguishedName {
+/// 自己的 Subject（O=envboard, CN=envboard）。改它等于换 CA 身份，客户端全部要重装。
+fn envboard_subject() -> DistinguishedName {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::OrganizationName, CA_BASENAME);
     dn.push(DnType::CommonName, CA_BASENAME);
@@ -474,13 +600,15 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(path)?;
-        file.write_all(bytes)?;
+            .open(path)
+            .map_err(|e| Error::io_at("write the CA key", path, e))?;
+        file.write_all(bytes)
+            .map_err(|e| Error::io_at("write the CA key", path, e))?;
         Ok(())
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, bytes)?;
+        std::fs::write(path, bytes).map_err(|e| Error::io_at("write the CA key", path, e))?;
         Ok(())
     }
 }
@@ -563,6 +691,135 @@ mod tests {
             !info.common_name.unwrap_or_default().is_empty(),
             "fixture CA 必须有 CN"
         );
+    }
+
+    /// 测试用临时 confdir：建在**测试二进制自己所在目录**（`target/…/deps/`）下。
+    /// 不用 `temp_dir()`：Windows 上它读 `TMP`，Git Bash 传下来的是 `/tmp`
+    /// （被解释成 `C:\tmp`，写它要管理员）。
+    fn scratch_confdir(tag: &str) -> PathBuf {
+        let exe = std::env::current_exe().expect("test binary path");
+        let dir = exe
+            .parent()
+            .expect("test binary has a parent")
+            .join(format!("ca-test-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        dir
+    }
+
+    fn legacy_fixture_bytes() -> (Vec<u8>, Vec<u8>) {
+        let key = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mitmproxy-compat/mitmproxy-ca.pem"
+        ))
+        .expect("测试资产 mitmproxy-ca.pem 不在仓库里");
+        let cert = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mitmproxy-compat/mitmproxy-ca-cert.pem"
+        ))
+        .expect("测试资产 mitmproxy-ca-cert.pem 不在仓库里");
+        (key, cert)
+    }
+
+    /// 新 confdir：生成的是**自己的**文件与 Subject，不是 mitmproxy 的那一套。
+    #[test]
+    fn a_fresh_confdir_gets_an_envboard_named_ca() {
+        let dir = scratch_confdir("fresh");
+        let (ca, outcome) = SharedCa::load_or_create(&dir).expect("fresh CA");
+        assert!(matches!(outcome, CaOutcome::Loaded { .. }), "{outcome:?}");
+        assert!(
+            dir.join("envboard-ca.pem").exists(),
+            "私钥文件名必须是自己的"
+        );
+        assert!(dir.join("envboard-ca-cert.pem").exists());
+        assert!(
+            !dir.join("mitmproxy-ca.pem").exists(),
+            "不该再写 mitmproxy 名字"
+        );
+        let info = ca.info().expect("CA 摘要");
+        assert_eq!(info.common_name.as_deref(), Some("envboard"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 旧 mitmproxy 文件**不加载也不删除**，并且要上报"旧 CA 已不再使用"。
+    #[test]
+    fn legacy_mitmproxy_files_are_ignored_not_reused() {
+        let dir = scratch_confdir("legacy");
+        let (key, cert) = legacy_fixture_bytes();
+        std::fs::write(dir.join("mitmproxy-ca.pem"), &key).unwrap();
+        std::fs::write(dir.join("mitmproxy-ca-cert.pem"), &cert).unwrap();
+
+        let (ca, outcome) = SharedCa::load_or_create(&dir).expect("legacy CA");
+        match &outcome {
+            CaOutcome::Regenerated { reason, .. } => {
+                assert!(reason.contains("legacy"), "理由必须点明旧 CA：{reason}");
+            }
+            other => panic!("旧 CA 存在时必须如实上报重新生成，实际 {other:?}"),
+        }
+        assert_eq!(
+            ca.info().and_then(|info| info.common_name).as_deref(),
+            Some("envboard")
+        );
+        assert!(dir.join("mitmproxy-ca.pem").exists(), "别人的文件不许删");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 重新签发：换一张新 CA 并覆盖文件，重新加载拿到的是新的那张。
+    #[test]
+    fn rotate_replaces_the_ca_and_its_files() {
+        let dir = scratch_confdir("rotate");
+        let (first, _) = SharedCa::load_or_create(&dir).expect("first CA");
+        let first_fingerprint = first.fingerprint().to_string();
+
+        let (rotated, outcome) = SharedCa::rotate(&dir).expect("rotate");
+        assert!(
+            matches!(outcome, CaOutcome::Regenerated { .. }),
+            "{outcome:?}"
+        );
+        assert_ne!(rotated.fingerprint(), first_fingerprint, "指纹必须变");
+
+        let (reloaded, _) = SharedCa::load_or_create(&dir).expect("reload");
+        assert_eq!(
+            reloaded.fingerprint(),
+            rotated.fingerprint(),
+            "文件必须被新 CA 覆盖"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 指定域名签发：产出一张可导出的叶子证书，CN/SAN 是请求的域名，
+    /// 私钥与证书配对，且不是 CA。
+    #[test]
+    fn issue_pem_signs_a_leaf_for_the_requested_host() {
+        let dir = scratch_confdir("leaf");
+        let (ca, _) = SharedCa::load_or_create(&dir).expect("CA");
+        let (cert_pem, key_pem) = ca.issue_pem("api.example.com").expect("leaf");
+
+        assert!(cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(key_pem.contains("PRIVATE KEY"));
+
+        let leaf_der = single_cert(cert_pem.as_bytes()).expect("leaf cert DER");
+        let info = crate::der::cert_info(&leaf_der).expect("leaf info");
+        // `CertInfo` 的 DN 字段取的是**颁发者**（自签 CA 上它等于主体），所以这里的
+        // CN 是 envboard；域名要看 SAN。
+        assert_eq!(info.common_name.as_deref(), Some("envboard"));
+        assert!(
+            info.san.iter().any(|name| name == "api.example.com"),
+            "SAN 必须带上请求的域名：{:?}",
+            info.san
+        );
+        assert!(!info.is_ca);
+
+        // 配对由签发路径保证（同一把 `KeyPair` 生成证书），这里只钉"确实给了私钥"。
+        assert!(
+            key_pem.starts_with("-----BEGIN ") && key_pem.contains("PRIVATE KEY-----"),
+            "导出必须带私钥：{}",
+            key_pem.lines().next().unwrap_or("")
+        );
+
+        // IP 字面量走 iPAddress SAN，不能当成 DNS 名。
+        assert!(ca.issue_pem("127.0.0.1").is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// PEM 载荷的形状：BEGIN/END 成对、正文行不超过 64 字符（RFC 7468 惯例）。

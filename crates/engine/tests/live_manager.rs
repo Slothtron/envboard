@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use envboard_engine::EngineBackend;
-use envboard_engine::ca::{CaOutcome, SharedCa};
+use envboard_engine::ca::{CaOutcome, CaStore, SharedCa};
 use envboard_engine::{
     EngineHandle, EngineReport, EngineSpec, InstanceState, Listen, ProxyEngine, sha256,
 };
@@ -62,8 +62,8 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// openssl 造一张 mitmproxy 形状的 CA：-ca.pem = 私钥+证书拼接。返回拼接字节。
-fn preseed_mitmproxy_ca(confdir: &Path) -> Vec<u8> {
+/// openssl 造一张本工具形状的 CA：`envboard-ca.pem` = 私钥+证书拼接。返回拼接字节。
+fn preseed_envboard_ca(confdir: &Path) -> Vec<u8> {
     std::fs::create_dir_all(confdir).unwrap();
     let key = confdir.join("preca.key");
     let crt = confdir.join("preca.crt");
@@ -87,7 +87,7 @@ fn preseed_mitmproxy_ca(confdir: &Path) -> Vec<u8> {
             "-days",
             "825",
             "-subj",
-            "/O=mitmproxy/CN=envboard-livemgr-ca",
+            "/O=envboard/CN=envboard-livemgr-ca",
             "-addext",
             "basicConstraints=critical,CA:TRUE",
             "-addext",
@@ -104,8 +104,8 @@ fn preseed_mitmproxy_ca(confdir: &Path) -> Vec<u8> {
         std::fs::read_to_string(&key).unwrap(),
         std::fs::read_to_string(&crt).unwrap()
     );
-    std::fs::write(confdir.join("mitmproxy-ca.pem"), &bundle).unwrap();
-    std::fs::copy(&crt, confdir.join("mitmproxy-ca-cert.pem")).unwrap();
+    std::fs::write(confdir.join("envboard-ca.pem"), &bundle).unwrap();
+    std::fs::copy(&crt, confdir.join("envboard-ca-cert.pem")).unwrap();
     std::fs::remove_file(&key).ok();
     std::fs::remove_file(&crt).ok();
     bundle.into_bytes()
@@ -236,6 +236,7 @@ fn spec(port: u16, rules: Option<&str>, insecure: &[&str]) -> EngineSpec {
     EngineSpec {
         listen: Listen::new("127.0.0.1".parse::<IpAddr>().unwrap(), port),
         insecure_hosts: insecure.iter().map(|host| host.to_string()).collect(),
+        mitm_hosts: Vec::new(),
         proxy_user: None,
         proxy_password: None,
         upstream: None,
@@ -264,8 +265,10 @@ async fn settle(backend: &EngineBackend, handle: &EngineHandle) -> EngineReport 
 async fn engine_drives_preseeded_ca_with_honest_receipts() {
     require_tools();
     let dir = work_dir("ca");
-    let confdir = dir.join("shared").join("confdir");
-    let bundle = preseed_mitmproxy_ca(&confdir);
+    // 引擎只认"一个 CA 材料目录"，不认状态目录的布局（那是 manager 的事，
+    // 而 engine 在依赖方向上**低于** manager —— 它不知道状态目录长什么样）。
+    let confdir = dir.join("ca-material"); // state-layout-lint: allow（引擎不认识状态目录布局）
+    let bundle = preseed_envboard_ca(&confdir);
 
     let (ca, outcome) = SharedCa::load_or_create(&confdir).unwrap();
     match &outcome {
@@ -278,12 +281,12 @@ async fn engine_drives_preseeded_ca_with_honest_receipts() {
         }
     }
     assert_eq!(
-        std::fs::read(confdir.join("mitmproxy-ca.pem")).unwrap(),
+        std::fs::read(confdir.join("envboard-ca.pem")).unwrap(),
         bundle,
         "confdir 的既有条目必须逐字节不变"
     );
 
-    let backend = EngineBackend::new(Arc::clone(&ca));
+    let backend = EngineBackend::new(CaStore::new(Arc::clone(&ca)));
     let (tls_port, mut upstream) = spawn_tls_upstream(&dir, "svc.test");
     let proxy = free_port();
     let rules = "127.0.0.1 svc.test\n";
@@ -305,7 +308,7 @@ async fn engine_drives_preseeded_ca_with_honest_receipts() {
     let code = curl_code(
         proxy,
         &format!("https://svc.test:{tls_port}/"),
-        Some(&confdir.join("mitmproxy-ca-cert.pem")),
+        Some(&confdir.join("envboard-ca-cert.pem")),
     );
     assert_eq!(code, 200, "预放 CA 的链必须被 curl 仅凭该 CA 验过");
 
@@ -321,7 +324,7 @@ async fn injected_failure_is_visible_ports_release_and_restart_works() {
     require_tools();
     let dir = work_dir("fault");
     let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
-    let backend = EngineBackend::new(Arc::clone(&ca));
+    let backend = EngineBackend::new(CaStore::new(Arc::clone(&ca)));
     let proxy = free_port();
     let handle = backend
         .start("beta".into(), spec(proxy, None, &[]))
@@ -361,7 +364,7 @@ async fn insecure_hosts_hot_flip_takes_effect_on_the_first_request() {
     require_tools();
     let dir = work_dir("insecure");
     let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
-    let backend = EngineBackend::new(Arc::clone(&ca));
+    let backend = EngineBackend::new(CaStore::new(Arc::clone(&ca)));
     let (tls_port, mut upstream) = spawn_tls_upstream(&dir, "relaxed.test");
     let proxy = free_port();
     let rules = "127.0.0.1 relaxed.test\n127.0.0.1 strict.test\n";

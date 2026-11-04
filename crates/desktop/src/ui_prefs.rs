@@ -16,13 +16,17 @@
 //!   Light/Dark 两档，"系统"（跟随 Windows 外观）是界面的偏好语义 —— 它由
 //!   [`Theme::sync_system_appearance`] 落实，并在窗口外观变化时重新解析。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Global, Window};
 
 /// 偏好文件名（落在状态目录下，与 `state.json` 平级但彼此无关）。
-pub const FILE_NAME: &str = "ui.json";
+///
+/// 字面量取自状态目录的**布局表**（`envboard_manager::layout`，经组合根转出）——
+/// 那张表是全仓唯一的一份，这里不再自己拼一个（两份实现必然漂移，而漂移的症状
+/// 是"界面写的和界面读的不是同一个文件"，从外部几乎无法归因）。
+pub const FILE_NAME: &str = envboard_host::layout::UI_PREFS_FILE;
 
 /// 主题偏好：界面自己的三档，比 `ThemeMode` 多一档"跟随系统"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,17 +108,21 @@ impl UiPrefs {
     }
 
     /// 读偏好：文件不存在 / 读失败 / 内容坏 → 默认（跟随系统）。**永不拦启动**。
-    pub fn load(state_dir: &Path) -> Self {
-        std::fs::read_to_string(path(state_dir))
+    ///
+    /// 入参是**文件路径**而不是状态目录：路径规则归组合根（`envboard-host` 把它
+    /// 算好交过来），界面这一侧不再自己拼 `state_dir.join("ui.json")` ——
+    /// 那正是第二份路径实现，两份必然漂移。
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
             .map(|raw| Self::parse(&raw))
             .unwrap_or_default()
     }
 
     /// 写偏好：先写临时文件再改名（半截文件不会成为下次启动的输入）。
-    pub fn save(self, state_dir: &Path) -> std::io::Result<()> {
-        let tmp = state_dir.join(format!("{FILE_NAME}.tmp"));
+    pub fn save(self, path: &Path) -> std::io::Result<()> {
+        let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, self.body())?;
-        std::fs::rename(&tmp, path(state_dir))
+        std::fs::rename(&tmp, path)
     }
 
     /// 当前生效的偏好（设置屏与窗口外观观察器共用这一处）。
@@ -136,10 +144,6 @@ impl UiPrefs {
         apply(theme, window, cx);
         next
     }
-}
-
-fn path(state_dir: &Path) -> PathBuf {
-    state_dir.join(FILE_NAME)
 }
 
 /// 把偏好落实成实际主题。

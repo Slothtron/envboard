@@ -6,6 +6,395 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added（工作台可用性补强：状态栏聚合 / 记录筛选 / 耗时列）
+
+- **状态栏环境聚合（可点）**：底部状态栏左段常驻显示运行中/总数、需处理、抓包、
+  规则、上游、证书信任。数字由当前快照聚合，与四档过滤**同一判据**（计数 = 点下去
+  的行数）；「需处理」与「证书未安装」用警告色。**每一项都是入口**：运行中/需处理
+  进环境屏并切到对应档，抓包 → 调试，规则 → 规则屏，上游 → 代理屏，证书 → CA 屏。
+  聚合只在**数字变化**时触发根视图重绘 —— 环境屏每秒 notify 不会把其他屏（如 CA 屏
+  的信任探测）拖进每一拍。
+- **截断文本可悬停读全文**：环境「说明」、规则「被引用」、代理「被引用」三列被裁时
+  给完整内容的 tooltip（`views::text_tooltip`，普通 `div` 的统一写法）。
+- **调试屏记录筛选**：方法 / 状态档 / 主机三个维度可叠加，选项从当前记录派生
+  （方法去重排序、主机去重排序），右端给命中数与「清除筛选」。只筛**视图**：
+  会话缓冲、`request_id` 游标与已捕获计数都不动；空态区分"没有记录"与"没有匹配"。
+- **抓包耗时列**：引擎在抓包记录里写入 `duration_ms`（请求行到达 → 响应体收齐，
+  与轨迹/日志同一起点、终点略早一档：抓包在写回客户端之前就落）；HAR 导入取 entry
+  的 `time`。表里新增「耗时」列（<1s 显示毫秒，往上进位到秒），没有响应的记录显示
+  「—」而不是 0 ms。
+
+### Changed（设置屏只剩"可以改的东西"）
+
+- 「关于」不再列状态目录、端口区间、界面偏好路径：这些是提问/排障才用得上的本机
+  信息，摆在设置页只会把唯一可改的那一项（主题）淹掉；装配警告照旧保留（它是
+  "这份宿主跑得不对"的信号）。设置屏的复制路径动作随之移除。
+- 状态目录路径也不再占状态栏左段（那一格给了环境聚合）：报错时错误条本来就会点名
+  路径，端口区间在侧栏页脚。状态栏右段只保留「装配警告（有才显示）· 当前屏」，
+  当前主题不再重复 —— 它是设置页里改的东西。
+
+### Changed（走查后的版面收口）
+
+- **键盘可达：状态栏是一个 Tab 落点**。F6 把焦点交给状态栏（根视图首帧落焦点，
+  F6 才能在"没有焦点"时也生效），←/→ 在六项聚合之间走查并在两端夹住，
+  Enter/Space 触发与点击相同的导航，Esc 回到根焦点。整条工具栏带
+  `Role::Toolbar` / `tab_group` / 每项 `aria_label`，焦点环只在键盘聚焦时出现。
+- **表格"选中"与"打开详情"拆开**：↑/↓ 只移动高亮（不再每移一行就重开详情面板、
+  把焦点抢走），Enter 才打开当前行；鼠标单击仍是点即开。判据是
+  `Window::last_input_was_keyboard()`，两个表（环境 / 抓包）同一套。
+- **行高回归断言**：L0 给环境表前三行注册 `debug_selector`，量相邻两行的原点差
+  （真实行高）并断言一致 —— 行内加东西导致某一行变高时，这条会先红。
+- **CA 屏动作按钮不再被拉成整行横条**：`GroupBox` 内容区是 `v_flex`，子项沿交叉轴
+  stretch，按钮包一层行容器后回到自己的宽度。
+- **CA 屏两列**：窗口 ≥1160 时「摘要 / 文件 / 签发」与「信任 / 轮换 / 如何使用」并成
+  两列，六个分组一屏看全；窄窗口仍是单列。两列暴露的"步骤文本不换行被裁"一并修掉
+  （文本要包一层吃剩余宽度的容器）。
+- **环境屏状态行不再重复计数**：工具条四档计数已经给出总数，状态行只在过滤/选中时
+  说话（`显示 x / y 个环境`、`选中 …`）。
+- **规则 / 代理屏的计数并进工具条**（搜索 → 弹性 → 计数 → 主操作），各屏省一行给表格。
+- **规则 / 代理空账本给就地动作**：空态里直接放「导入规则集」/「新建上游代理」，
+  与环境屏空态同一写法（不再只指向右上角）。
+- **调试屏筛选条可收起**：工具条新增「筛选 (n)」开关，默认收起、不占一行；已有条件时
+  强制显示（否则条件没有入口可改回）。筛选只在方法 / 状态档 / 主机任一非空时计数。
+- **抓包时间可看日期**：表里仍只放时分秒（列宽宝贵），悬停给 `YYYY-MM-DD HH:MM:SS.mmm UTC`；
+  详情面板 meta 直接给完整日期 —— 跨天长会话不再"两条 09:15 分不清哪天"。
+- **环境删除收进「更多」**：删除是不可逆动作，不再与重启并排成一个图标；行末 `…`
+  菜单里一项「删除 <env>」，仍走确认弹窗。
+- **代理地址列改等宽**：`host:port` 与监听列、抓包表同一读法。
+
+### Added（CA 有了自己的身份：轮换、按域名签发、系统信任库只读探测）
+
+- **不再借用 mitmproxy 的 CA**：`crates/engine/src/ca.rs` 只读写
+  `envboard-ca.pem`（私钥+证书）与 `envboard-ca-cert.pem`（只含证书），CN = `envboard`。
+  同目录下的 `mitmproxy-ca*.pem` **不再被复用**：借用别的工具的 CA 身份意味着
+  "这个私钥是谁签的"永远说不清，也没法独立轮换。旧文件**不删**（那是用户的文件），
+  首次生成时回一条 `Regenerated { reason: "legacy mitmproxy CA is no longer reused" }`
+  的结果。
+- **重新签发（轮换）**：`SharedCa::rotate` 生成新 CA、覆盖两个文件，并经
+  `CaStore`（`arc_swap`）换入运行中实例 —— 引擎每连接读一次当前 CA，所以**下一条
+  CONNECT 就用新证书，不必重启环境**。旧证书不从系统信任库移除：那是用户的决定。
+- **按域名签发**：`CaControl::issue_pem(host)` 用当前 CA 现签一张叶子证书，返回
+  证书与私钥 PEM（界面只经剪贴板交付，不落盘、不进日志）。用途是把某个服务固定到
+  一张具体证书上。
+- **系统信任库探测（只读）**：`crates/host/src/trust_store.rs` 用 crypt32 的直接声明
+  （`CertOpenStore` / `CertEnumCertificatesInStore`，不引 `windows-sys`）枚举
+  `当前用户\ROOT` 与 `本机\ROOT`，与当前 CA 的 DER **逐字节**比较；任一命中即
+  "已安装"。**只检测，不安装也不卸载** —— 写系统存储会弹安全警告，那是用户的动作。
+  探测不了（非 Windows / API 失败）时如实说"不知道"，不猜"未安装"。
+- **CA 屏重做**：证书摘要 / 系统信任（两行存储状态）/ 证书文件 / 按域名签发 / 重新签发
+  （确认弹窗 → 轮换 → toast 出新指纹）/ 如何使用。**CA 私钥不进界面**：界面上出现的
+  只有 `envboard-ca-cert.pem` 与它对应的 PEM。
+- 用例：`ca` 四个单测（新目录拿到 envboard 命名的 CA、legacy 文件只忽略不复用、
+  轮换替换 CA 与文件、按域名签发签出请求主机的叶子）+ `trust_store` 两条状态判据。
+
+### Added（MITM 白名单 `mitm_hosts`：只解密点名的域名）
+
+- 新环境字段 `mitm_hosts`（第 9 个字段）：**空 = 全部解密**（与引入它之前完全一致），
+  非空 = 只有列出的域名被解密，其余 `CONNECT` 走**盲隧道**（`copy_bidirectional`
+  原样抄字节：不解密、不抓包、不记轨迹、不改写内容）。
+- 归一化/校验/去重排序与 `insecure_hosts` **同一份实现**（精确相等、拒绝通配符、
+  ≤200 条），因为两者回答的是同一个问题"这个域名算不算在内"，只是方向相反。
+- **鉴权仍必须在 CONNECT 上判**：隧道里看不到 HTTP，所以 CONNECT 没带正确的
+  `Proxy-Authorization` 就 407 —— 否则名单外的域名成了绕过代理鉴权的通道。
+- **白名单只管解密，不管路由**：hosts 规则照旧改写隧道要连的目标地址。同一份规则在
+  解密/不解密两种情形下连到不同的地方，用户无从预期；是否解密是显式选择，连到哪
+  不该跟着变。
+- 热字段：判定在每连接的配置快照上做，换名单下一条 CONNECT 即生效；`config_hash`
+  的输入形状也加上了它（否则"只改白名单"的 apply 在自身幂等判据里看不见）。
+- 打通整条链：domain（`KNOWN_FIELDS` / merge / JSON）→ `EngineSpec` → 管理器投影与
+  热/停机矩阵（`mitm_hosts` 进热字段集合与审计 `fields`）→ 协议 DTO（`EnvView` /
+  create / patch）→ 桌面「配置 → 高级配置」表单。
+- 用例：引擎 `mitm_allowlist_decrypts_only_listed_hosts`（名单内走完 MITM、名单外
+  明文直通证明没解密、缺凭据 407、带凭据放行）、管理器热改 + 落盘 + 清空、
+  契约 fixture 5 枚（环境校验 3、merge 2）。
+
+### Changed（CA 换了身份：已装证书的客户端必须重装）
+
+- 这是本次唯一的**破坏性**变化：以前客户端信任的是借用来的 mitmproxy CA，现在签发
+  链的根换成了 `envboard`。旧证书继续留在系统信任库里（我们不删），但对新链路无效，
+  客户端会报链校验失败 —— 重新安装 `envboard-ca-cert.pem` 即可。
+- `shared/confdir/` 下因此会同时存在两套文件；`mitmproxy-ca*.pem` 从此不再被读取。
+
+### Fixed（按住标题栏拖不动窗口）
+
+- **根因是标题栏里那层"吞掉按下事件"的拦截**：`crates/desktop/src/app.rs` 的
+  `render_title_bar` 在内层 div 上挂了 `on_mouse_down` + `cx.stop_propagation()`
+  （当初是为了标题栏里的深色开关；开关搬进「设置」后它就成了残留）。而自绘标题栏
+  在 Windows 上靠系统的 `HTCAPTION` 拖动：`WM_NCLBUTTONDOWN` **先**交给应用的输入
+  处理器，一旦 `propagate = false`，gpui-pre-windows 的 `handle_nc_mouse_down_msg`
+  直接返回 `Some(0)`，`DefWindowProc` 收不到这条消息，拖动根本不会开始。
+  gpui-pre 0.3.9 的 `start_window_move` 在 Windows 上是空实现，所以"应用自己拖"
+  这条退路也不存在 —— 拦掉系统那条就等于完全拖不动。
+- **改法**：删掉拦截与那个 handler；标题栏里只留文字，纯展示元素不该吞事件。
+  将来要往栏里放可点控件，才需要控件自己吞按下（否则系统会开始拖窗口，控件只能
+  收到按下、收不到抬起）—— 这条纪律写进了 `app.rs` 的模块文档。
+- **证据边界**：远端会话当前是锁屏状态（`SetForegroundWindow` 返回 false、前台是
+  "Windows 默认锁屏界面"），合成鼠标输入全部落在锁屏上，**没做成端到端拖动验证**。
+  做成的两项：①`WM_NCHITTEST` 在标题栏（client 300,17）返回 `HTCAPTION`、内容区返回
+  `HTCLIENT`；②对照实验里旧包（`dist/` 里修复前那份）与修复后的
+  `WM_NCLBUTTONDOWN` 都会在 10ms 内返回（无真实按键时移动循环立即退出），这条判据
+  分辨不出差别，所以不作为结论。真实拖动需要解锁后在界面上按一次确认。
+
+### Fixed（双击启动不再附带一个控制台黑框）
+
+- **release 二进制原来是 CONSOLE 子系统**：从资源管理器双击时 Windows 会为它分配一个
+  控制台窗口（一闪而过，或一直挂着），一个窗口应用看起来像个命令行工具。现在
+  `crates/desktop/src/main.rs` 首行声明 `#![cfg_attr(not(debug_assertions),
+  windows_subsystem = "windows")]`：release（也就是打包分发的那份）是 GUI 子系统，
+  双击没有黑框；debug 保留控制台，`cargo run` 的日志与 panic 回溯照旧可见。
+- 实测：release 产物 PE `Subsystem = 2 (GUI)`；launch 后只有 `envboard` 一个带窗口的
+  进程；重定向到文件时 stderr 仍能收到错误文本；无 stderr 接收者时启动失败对话框照常
+  弹出（GUI 子系统不改变那条判据）。
+
+### Fixed（双击启动的失败不再"闪退"成谜）
+
+- **GUI 子系统没有控制台，双击启动时的致命错误只写进虚空**：从资源管理器双击运行
+  `envboard.exe`，启动失败（状态目录不可写、锁被占、开窗失败）表现为"窗口一闪就
+  没了"，错误文本谁也没看到。现在 `crates/desktop/src/main.rs` 在**stderr 没人读**
+  时用 `MessageBoxW` 把同一句错误弹出来（`state_dir` 类失败再附一句换目录的办法），
+  并装了 panic 钩子覆盖 `open_window` 之类的崩溃路径。
+- **判据是"有没有人读"，不是"句柄在不在"**：附着控制台（`GetConsoleMode` 成功）
+  或输出被重定向到文件/管道（`GetFileType` 为 disk/pipe）时不弹 —— 否则一条无人
+  应答的模态框会把 CI 与脚本卡死。`cmd start` 那种继承来的、但进程并未附着的控制台
+  句柄，归入"要弹"这一侧。
+- 只为一次 `MessageBoxW` 用 `#[link]` 直接声明了 `GetStdHandle` / `GetConsoleMode` /
+  `GetFileType` / `MessageBoxW` 四个符号，没有引入 `windows-sys` 直接依赖（不牵动
+  依赖门禁与锁文件）。
+
+### Added（绿色免安装分发：便携模式 + 打包入口）
+
+- **便携模式**：exe 同目录存在 `<应用名>.portable` 标记时，状态目录取同目录的
+  `<应用名>-data`（`crates/host/src/options.rs` 的 `portable_state_dir`）。判据是
+  **标记文件**而不是目录是否存在 —— 目录由应用首次运行时自己创建，拿它当判据在
+  首次运行之前永远不成立。基准是 `current_exe()` 而不是进程 cwd：数据在哪不能由
+  启动方式决定。回退链因此变四级：调用方给的目录 → `$ENVBOARD_STATE_DIR` →
+  便携标记 → 平台默认；**环境变量压过标记**，绿色包里想临时换位置不必去动发行包。
+- **`scripts/package.py`**（`mise run package-portable`）：`cargo build --release
+  --locked --offline` → 组装 `<exe> + <exe>.portable + README.txt` → 打成
+  `dist/envboard-<版本>-<平台>-portable.zip`。33.0 MiB 的 exe 压出来 11.3 MB。
+  数据目录**不预建**，脚本不签名、不写注册表、不改 PATH。
+- **`--static-crt`**：静态链接 CRT 的变体（独立目标目录 `target/crt-static`，
+  产物名多一个 `-static`）。实测去掉 `VCRUNTIME140.dll` 依赖、只多 174 KB，
+  代价是首次多 3~4 分钟构建 —— 给"目标机器没装 VC++ 运行库"的场景兜底。
+- README 新增「打包与分发」：单文件 exe 的运行时依赖（系统 DLL + `VCRUNTIME140.dll`）、
+  压缩版的目录形态与"整个目录搬走 / 删目录即卸载 / 一个副本一个实例"的语义、
+  SmartScreen 与杀软误报的现实。
+
+### Changed（错误呈现统一为"错误码 + 英文 msg + 中文提示"）
+
+- **错误条不再只显示服务端英文**：多处调用点原来把 `Error` 拍平成 `error.message`
+  直接扔进界面，用户看到的是 `debug session vanished immediately` 这种句子混在
+  一整屏中文里（走查 F10）。现在统一走 `crate::errors::Notice`：
+  - 第一行是**中文主句** `{动作}{对象} 失败：{该错误码的中文结论}`
+    （`启动 dev 失败：端口已被其他程序占用`），由 `ErrorCode` 穷尽映射；
+  - 第二行是**契约错误码 + 服务端原文**（`[port_conflict] port 8080 already in use
+    · field: environment.listen.port`），原样保留 —— 端口号、路径、占用人只在这句里。
+  - 契约新增一节「界面呈现」（`spec/errors.md`），把三层分工与四条硬要求写死：
+    不得只显示英文、不得只显示中文、码不翻译、动作要点名。
+- **写操作的失败不再被下一帧快照抹掉**：取数成功原本会无条件清空错误条，而写操作
+  失败后紧跟着的那次 `refresh_now()` 正好是一次成功取数 —— 于是「删除失败」只闪一帧。
+  现在区分来源（`error_from_load`）：取数失败在下次成功取数时消失，写操作失败保留，
+  直到下一次写操作替换它。这条直接决定上一条修完之后用户**看不看得见**。
+- **错误只有一种长相**：详情面板的「读取规则失败」原本是页面里的一行红字，
+  现在与表格上的错误条同一个组件、同一个两行结构。
+
+### Fixed（图标静默画空白：资产源只注册了默认的 106 个）
+
+- **代理屏的「编辑」按钮是一枚看不见的幽灵**：按钮在、点击区在，但图标是空白的 ——
+  铅笔用的是 `gpui_kit::assets::IconName::Pencil`，而入口注册的是
+  `gpui_kit::assets::Assets`（组件默认的 **106 个**图标），**完整目录里才有铅笔**。
+  GPUI 对不在资产源里的名字不报错、不占位，只画一个空白 svg —— 于是"编辑上游代理"
+  唯一入口从界面上消失，只剩删除。入口与截图夹具一并改用 `AllAssets`（完整目录，
+  1830 个，嵌入 +2.8 MB）：漏图标的缺陷从"看起来少了个按钮"变成不可能发生。
+  夹具也跟着改 —— 夹具与产品注册不同的资产源，L1 就查不出这类缺陷（此前正是如此）。
+
+### Fixed（代理设置命令从 URL 中间折断）
+
+- 详情面板的 `export https_proxy=http://… http_proxy=http://…` 按字符折行，
+  断点落在 `http://` 与 `/127.0.0.1:17103` 之间，读起来像两条命令。
+  现在按**赋值边界**拆成多行（`display::command_lines`，纯函数 + 单测），
+  行内不折行；复制按钮改成图标钮，把宽度让给命令本身（带文字时最后几位端口会被挤出去）。
+
+### Changed（最小窗口宽度 880 → 1000：旧值是用不满的界面量出来的）
+
+- 环境表的固定列合计 596、说明列下限 100，加侧栏 248 与内边距 32 得 976 —— 也就是
+  **最小窗口必须容得下"操作列"这唯一入口**。880 时「删除」会被裁出视口（启停与重启
+  只露出半个），最小尺寸等于没有约束。取 1000 留 24 余量；`--size 1000x560`
+  的 L1 截图已复测三枚操作图标全部可见。
+
+### Fixed（`--state-dir` 在 Windows 上必失败：回退链断在 `$HOME`）
+
+- **Windows 上不给 `--state-dir` 就起不来**，报
+  `invalid_config: cannot determine a state dir; pass --state-dir`。
+  根因是回退链的第 3 级写死了 `$HOME/.envboard`，而 **`HOME` 不是 Windows 的
+  约定** —— 原生进程通常根本没有这个变量（本机实测：`cmd /c set HOME` 只有
+  `HOMEDRIVE`/`HOMEPATH`，没有 `HOME`）。于是链在 Windows 上直接断掉：用户明明
+  在 Windows 上，程序却要求他显式传路径。
+  修法：第 3 级改为**平台默认目录** —— Windows `%LOCALAPPDATA%\envboard`
+  （本机应用数据的约定位置），其它平台 `$XDG_STATE_HOME/envboard`，未设时回落
+  `~/.local/state/envboard`（XDG 基础目录规范）。取不到就取不到（响亮失败），
+  不猜一个猜错的目录 —— 猜错的后果是账本写到别处，症状是"环境列表空了"。
+- **`--state-dir` 的值不再原样使用**：新增**规范化**（`normalize_state_dir`）——
+  `~` 展开成用户主目录、相对路径补成绝对路径、空串按非法配置拒掉。
+  三条各自对应一类真实报障：`~` 是 **shell** 的展开规则不是路径规则（直接传进
+  程序会得到一个字面目录名 `~`，本仓仓库根真的躺过一个 `~` 目录）；相对路径的
+  基准取决于进程 cwd（换个启动方式就指到别处）；空路径不是"默认"而是"没给"。
+- **`--state-dir` 的错误文案**补上了第二条出路（`or set ENVBOARD_STATE_DIR`）。
+- **`store_failure` 不再是一条没有路径的裸 IO 错**：新增 `Error::io_at`，状态目录
+  相关的每一步（建目录、读写 CA、单实例锁、读写账本）都写明它动的是哪个文件。
+  原来只打印 `store_failure: io error: 拒绝访问。 (os error 5)` —— 没有路径，
+  而"哪个目录被拒"正是排障的唯一线索（本机实测：`icacls <exe>` 显示 exe 所在
+  目录带 **Low 完整性标签**，进程继承 Low 完整性后写 `%LOCALAPPDATA%` 一律被拒，
+  读却正常）。现在同一情形报
+  `cannot create the CA directory C:\…\shared\confdir: 拒绝访问`。
+
+### Removed（命令行参数全部出库：产品是 GUI，不解析参数）
+
+- **`clap` 与全部命令行参数出库**：`--state-dir`、`--port-range`、`--capture-budget`、
+  `--log-dir`、`--no-log-file`、`--max-log-bytes` 一并去掉，连同 `--help` / `--version`。
+  判据是**删掉之后能力有没有损失**，而不是"入口有几个"：
+  - `--state-dir` 删了不损失 —— 平台约定兜底，用户想换还有 `$ENVBOARD_STATE_DIR`。
+    它本来就是同一件事的第二种说法（web 宿主与桌面宿主共用一个目录的时代留下的）。
+  - `--port-range` 删了也不损失 —— 区间只负责**给新建环境随机分配端口**；某个环境
+    端口冲突时在界面里改那一个环境的端口即可。区间的默认值是域常量
+    （`engine::domain::DEFAULT_PORT_RANGE`），本来就只定义一次。
+  - `--capture-budget` / `--log-dir` / `--no-log-file` / `--max-log-bytes` 同样是
+    "藏在看不见的地方的配置"：这是从启动器点开的 GUI，用户永远拿不到这些参数。
+    日志跟随状态目录布局落盘（`<state_dir>/logs`），路径信息将来进设置屏。
+  - 代价（记在账上）：排障时不能再从终端把日志指到别处、或把预算调大。要恢复这类
+    能力，正确的位置是**设置屏**（看得见、能持久化），不是命令行。
+- 带参数启动不报错（可能只是从一个带参的快捷方式点开），但在 stderr 给一行
+  "不接受命令行参数（已忽略）"的提示 —— 静默忽略会让人以为生效了。
+- **配套门禁**：`deps` 第 12 条禁止任何 crate 的**产物依赖**里出现命令行解析库
+  （清单封闭：`clap` / `structopt` / `argh` / `pico-args` / `lexopt` / `gumdrop` /
+  `bpaf` / `xflags` / `argparse`）。理由与第 11 条（gpui-kit 的体积守卫）同形：
+  这条决定只写在注释里，下一个人"顺手加个 `--verbose`"就能无声破掉它。
+- `HostOptions` 的字段全部**保留**（`state_dir` / `port_range` / `log_dir` /
+  `no_log_file` / `max_log_bytes` / `capture_budget`）：组合根仍要能被"直接给值"地
+  使用，测试与示例靠的就是它们，只是本入口一律用默认值。`parse_port_range`
+  （文本形状解析）随之删除——它只服务命令行。
+- **环境变量空串等同未设置**：`$ENVBOARD_STATE_DIR` 现在是唯一的外部输入，
+  `ENVBOARD_STATE_DIR=${SOME_UNSET}` 这种写法很常见，照空值用会得到一个空 `PathBuf`。
+  错误文案也从 `pass --state-dir or set ENVBOARD_STATE_DIR` 收敛成
+  `set ENVBOARD_STATE_DIR`。
+
+### Changed（平台默认目录：补齐 macOS，并把读环境变量的两条规范纪律落地）
+
+- **macOS 有了自己的默认位置**：`~/Library/Application Support/envboard`。
+  之前只有「Windows / 其它」两支，macOS 会掉进 Linux 的 XDG 规则拿到
+  `~/.local/state/envboard` —— 那里没有任何 macOS 原生工具会去找东西，
+  而症状是"起了个空工作台"（账本在另一个目录），从界面上看不出来。
+  macOS 是唯一没有 `state` 档的平台（`FileManager.SearchPathDirectory` 里既无
+  `state` 也无 `logs`），所以这一档只能落在 Application Support。
+- **三个默认位置的共同轴是"机器相关的应用数据"**，不是"用户的文档"，也都**不在主目录根**
+  （`~/.envboard` 那种放法 Windows 明文禁止，macOS/Linux 同理）：
+  Windows `%LOCALAPPDATA%`（定义即 nonroaming，不选 `%APPDATA%` 是因为状态里含端口
+  分配与单实例锁，漫游会让两台机器打架，CA 私钥更没有漫游的理由）、
+  macOS `~/Library/Application Support`、Linux `$XDG_STATE_HOME`。
+- **空串等同未设置**：三个平台变量取到空值时继续往下回退。原实现会把空值
+  `join("envboard")` 成一个**相对路径**，等于把状态写进进程 cwd。
+- **相对路径的 `$XDG_STATE_HOME` 视为无效并忽略**（XDG 原文
+  `should consider the path invalid and ignore it`），回落到 `$HOME/.local/state`。
+- 现状由**纯函数** `default_state_dir_for(platform, …)` 决策，三平台规则因此在
+  任意宿主上都能被单测覆盖（本仓没有 Mac 构建机）。
+- **应用目录名不再硬编码**：`<基础目录>/<名字>` 里那一层改由宿主二进制从
+  `Cargo.toml` 的 `[[bin]] name` 取（`env!("CARGO_BIN_NAME")`）再传进
+  `HostOptions::app_dir_name`。理由是它属于**产品身份**而不是路径规则 ——
+  `envboard-host` 是通用组合根，没有资格知道产品叫什么。连带效果：
+  `HostOptions::default()` 现在**没有**平台默认目录（宁可响亮失败，也不编一个
+  名字把账本写进 `%LOCALAPPDATA%\unknown`）；显式给了状态目录时不需名字。
+  命令行程序名也改引同一个常量，改名只需动 manifest。
+
+### Changed（状态目录布局：路径规则收口成一份，轨迹不再跟着日志目录走）
+
+- **布局字面量收口到一处**：`crates/manager/src/state.rs` 新增 `layout` 模块，
+  登记状态目录里的全部路径（账本、界面偏好、锁、事件、规则目录、日志目录、
+  轨迹目录、共享 CA 目录、v2 遗留的 agent 目录）。此前**有两份实现** ——
+  `state.rs` 派生一套，桌面形态的 `ui_prefs.rs` 又自己拼了一套 `"ui.json"`；
+  两份独立演化，改一处忘另一处的症状是"文件在、路径对，就是读不出来"，从外部
+  几乎无法归因。界面形态现在从组合根拿**算好的路径**（`Prepared::ui_prefs_file` /
+  `Host::ui_prefs_file`），不再自己 `join`。
+- **请求轨迹从 `logs/trajectories/` 移到 `trajectories/`**（状态目录下与 `logs/`
+  平级）：轨迹是数据面事件流（自己的字节偏移游标与生命周期），不是实例日志。
+  原来它挂在 `log_dir` 下面，于是 `--log-dir` 改址会**顺带搬走轨迹** ——
+  一条与调用方意图无关的副作用。轨迹现在**位置固定**（跟状态目录走）、
+  **开关跟 `--no-log-file` 走**（要不要落盘），两件事各归各。
+  此前**代码与文档不一致**：代码写 `logs/trajectories/`，而 `README`、
+  `spec/events.md`、`spec/protocol.md`、`spec/capabilities.md` 一律写
+  `trajectories/` —— 现在代码对齐文档。
+- **删掉两个死字段**：`ManagerConfig::runtime_dir`（web 形态的 `runtime/api.json`
+  随 web 宿主出库后就没人用了，全仓零引用）与 `ManagerConfig::rotated_log_file`
+  （轮转路径的**第二份实现**，用 `with_extension` 而实际轮转走
+  `logs::rotated_path` 的 `with_file_name` —— 两份实现的语义还不一样；零调用方）。
+  v2 遗留的 agent 目录改为 `ManagerConfig::legacy_agent_dir`：它只为**清扫**
+  存在（删环境 / 改名时带走残留），产品路径永不创建它。
+
+### Added（状态目录布局门禁：布局字面量只许出现在一处）
+
+- 新增 `tests/policy-tests/tests/state_layout.rs`（两条判据）：
+  ① **布局字面量只许出现在 `state.rs`** —— 别的文件里出现即红；判据按
+  "**它被拼进了路径**"判（只看 `.join("…")`），而不是"字符串出现了" ——
+  `"rules"` 这种**领域字段名**（环境绑定的规则集名）到处都用，它不是路径，
+  按字面量判会红在毫无关系的地方（红在无关处，门禁就会被当成噪声忽略）；
+  ② **布局表必须登记齐全** —— 少一项即红，防止"新加一个目录忘了登记"，
+  那等于给布局开了个没锁的口子。
+  门禁上线时当场抓到五处真违规（桌面形态的 `ui.json` 两处、管理器测试的
+  `state.json`、引擎实机组两处），都已改为引用布局表或换成不涉布局的路径。
+
+### Fixed（L0 主题用例的假红：上一轮的 `ui.json` 污染下一轮）
+
+- **L0 的 `theme_dropdown_applies_and_persists` 会稳定假红**：测试的临时状态目录
+  用固定名字，上一轮写下的 `ui.json`（界面偏好）留在那儿，下一轮就从
+  "偏好已经是深色"起步 —— 于是测的变成"本来就是深色 → 皮肤却是浅的"。
+  一次失败之后这条用例就再也绿不回来（HEAD 同形，本轮才定位到）。
+  修法两条：① 每次跑用**带纳秒时间戳的新目录**（进程号会被复用）；
+  ② 临时目录改用 `Drop` 守卫，**断言失败（panic）时也清掉 `ui.json`** ——
+  之前的清理写在测试体末尾，panic 就把它跳过了。
+  为什么不能"逐个删旧目录"：Windows 上文件被进程攥着时 `remove_file` 会成功
+  但文件仍留在那儿（删除挂起），"清干净"这件事做不到。
+
+### Changed（桌面形态 UI 打磨：层级、状态与交互细节）
+
+- **状态过滤从四枚独立 ghost 钮改成一段分段控件**（`ButtonGroup` + `outline`）：
+  四枚彼此独立的按钮看上去像四个可随手点的标签，而不是"从四档里选一档"。
+  选中态仍靠组件自己的填充说话（不另加左侧色条 —— 那是 web 模板习惯）。
+- **工具条的「新建」不再用 `primary`**（环境 / 规则集 / 上游代理三屏）：`primary`
+  留给决策区里那个明确的提交动作，工具条里的"新增一条"只是普通命令。
+- **错误统一成 `Alert` 提示条**（环境 / 规则集 / 代理 / 调试 / 配置表单五处）：
+  一行淡红字没有形状，读者要靠猜。图标 + 表面 + 边框把"这是错误"说清楚，
+  服务端消息仍原样转述。
+- **空态分两种说**：「还没有 X」与「没有匹配」的下一步不一样（新建 vs 改搜索词），
+  三张表各自给出对应文案；调试屏的空态改为居中一列（原来偏上）。
+- **健康列加了形状标记**：状态不再只靠颜色（色觉障碍与灰度打印读不出来）——
+  文字前一个同色圆点，文字仍写中文标签。
+- **行内操作的 tooltip 与无障碍名都说清对象**（"停止 beta"而不是"停止"），
+  指针停在某一行的钮上时能知道它管的是哪个环境。
+- **状态栏的装配警告有了形状**：原来是一段纯文字（警告数为 0 时还是空串占位），
+  现在是带三角图标的警告色；侧栏底部改放端口区间，状态目录回到状态栏
+  （同一件事只说一处，路径也才读得全）。
+- **「新建环境」的校验原因写进弹窗里**：原来写到表格上方的错误条，而弹窗是
+  模态 —— 那条错误被弹窗挡住，等于没人看见。现在弹窗自己有一行原因。
+- **配置页签的密码框打码**（`InputState::masked` + 掩码切换钮 + `Password`
+  内容类型）：凭据仍然只进不出，但输入时旁人看不见（此前是明文输入，
+  代码里记着"缺 mask 构造器"的已知缺口，实际 `gpui-base` 里就有）。
+- **高级配置区改用组件库的 `Collapsible`**：展开/收起的内容挂载交给组件，
+  触发器仍是普通按钮。
+- **CA 屏的"已复制"改成轻提示**（`Notification`）：原来是一行常驻文字，
+  永远不消失，下一次复制时分不清是上一次的反馈。
+- **状态栏与工具条的计数不再各说一遍**：环境屏那一行改成"可见 / 总数 + 选中项"。
+
+### Added（L0 覆盖分段过滤 + 截图工具能拍任意一屏）
+
+- 新增 `the_status_filter_switches_to_the_clicked_tier`：按 `debug_selector`
+  锚点拿到分段控件的矩形 → 点第三档 → 断言过滤档真的切到「已停止」。
+  为此 `Workbench::environments()` 与 `Environments::filter()` 两个只读入口
+  （视图层的状态本来就该可观察），`Filter` 也从 crate 根导出。
+- `examples/screenshot.rs` 加第二个参数（屏名）：`cargo run -p envboard-desktop
+  --example screenshot -- <输出路径> <environments|rules|proxies|debug|ca|settings>`。
+  切屏走**真实路径**（派发鼠标 down/up 命中组件自己的 on_click），不是直接改
+  字段 —— 摆拍出来的图不能证明界面真的能切过去。派发必须等第一帧画完：
+  命中测试靠的是已画出的命中框，首帧之前派发等于点空气。
+
 ### Added（CA 独立成屏 + 界面验收三层落地）
 
 - **CA 屏**（`crates/desktop/src/views/ca.rs`，侧栏「CA」，图标 `CircleCheck`）：

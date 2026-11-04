@@ -30,7 +30,6 @@ use crate::text::parse_ip_literal;
 use crate::{Error, ErrorCode};
 
 use crate::auth;
-use crate::ca::SharedCa;
 use crate::config::{self, CompiledConfig, EngineConfig};
 use crate::hosts;
 use crate::http::{self, HttpError, Message};
@@ -151,7 +150,8 @@ pub(crate) struct Shared {
     trajectory: Arc<crate::trajectory::TrajectoryRecorder>,
     /// 抓包会话缓冲（实例生命周期；停止/重启即消失）。
     pub(crate) capture: crate::capture::CaptureBuffer,
-    acceptor: TlsAcceptor,
+    /// 共享 CA 的当前值（重新签发即整体换入，下一次 CONNECT 生效）。
+    ca: crate::ca::CaStore,
     strict: Arc<rustls::ClientConfig>,
     permissive: Arc<rustls::ClientConfig>,
     bound: Listen,
@@ -171,14 +171,13 @@ impl EngineInstance {
     /// [EngineInstance::status] 可见（starting → running / port_conflict / failed）。
     pub fn start(
         config: EngineConfig,
-        ca: Arc<SharedCa>,
+        ca: crate::ca::CaStore,
         recorder: Arc<crate::trajectory::TrajectoryRecorder>,
         capture_session_id: u64,
     ) -> Result<Self, Error> {
         let compiled = config::compile(&config)?;
         let hash = compiled.config_hash.clone();
         let bound = compiled.listen;
-        let server = tls::mitm_server_config(ca)?;
         let (shutdown, _) = watch::channel(false);
         let shared = Arc::new(Shared {
             configs: ArcSwap::from_pointee(compiled),
@@ -192,7 +191,7 @@ impl EngineInstance {
                     crate::capture::DEFAULT_CAPTURE_BUDGET
                 },
             ),
-            acceptor: TlsAcceptor::from(server),
+            ca,
             strict: tls::strict_upstream_client_config()?,
             permissive: tls::permissive_upstream_client_config()?,
             bound,
@@ -443,10 +442,27 @@ async fn connect_flow(socket: TcpStream, head: &Message, shared: &Shared) -> Res
         let _ = write_status(&mut socket, 400, "malformed CONNECT authority").await;
         return Ok(());
     };
+    // MITM 白名单：名单非空且这个主机不在里面 → **不解密**，字节原样转给上游。
+    // 名单为空是默认（全部解密），判断在快照上做，所以热更新立刻生效。
+    let cfg = shared.configs.load_full();
+    if !cfg.mitm_allowed(&host) {
+        return tunnel_flow(&mut socket, shared, &cfg, head, &host, port).await;
+    }
+
+    // 每条 CONNECT 取一次当前 CA：重新签发后，正在跑的实例下一条连接就用新证书。
+    // 服务器配置在回 200 之前就绪：准备失败还能如实回一个 5xx，而不是让客户端
+    // 拿到"连接已建立"之后才发现没有证书可用。
+    let acceptor = match tls::mitm_server_config(shared.ca.current()) {
+        Ok(server) => TlsAcceptor::from(server),
+        Err(error) => {
+            let _ = write_status(&mut socket, 500, &error.message).await;
+            return Ok(());
+        }
+    };
     socket
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
-    let tls = match shared.acceptor.accept(socket).await {
+    let tls = match acceptor.accept(socket).await {
         Ok(tls) => tls,
         // 客户端不发 TLS：它可能只是探测端口。静默关闭，不报错给谁。
         Err(_) => return Ok(()),
@@ -493,6 +509,75 @@ async fn connect_flow(socket: TcpStream, head: &Message, shared: &Shared) -> Res
             return Ok(());
         }
     }
+}
+
+/// 白名单外的 CONNECT：**不解密**，把客户端的字节原样转给上游（盲隧道）。
+///
+/// 与 MITM 路径的三处不同（都是"不解密"的直接后果）：
+///
+/// * **鉴权只能在 CONNECT 上判**：隧道里看不到 HTTP，所以要求这层请求自带
+///   `Proxy-Authorization`；缺了或不对就 407，不放行（否则名单外的域名等于
+///   绕过代理鉴权）。
+/// * **没有 HTTP 语义**：不记请求轨迹、不抓包、不改写内容 —— 这些都需要解密后
+///   的报文。隧道只保证"连得上、转得走"。
+/// * **上游建连先于 200**：连不上就如实回 502，而不是让客户端拿到"已建立"
+///   之后才发现对面是死的。
+///
+/// 白名单只管**解密**，不管**路由**：hosts 规则照旧改写连接目标。理由是同一条
+/// CONNECT 在解密与不解密两种情形下连到不同的地方，用户无从预期；要不要解密
+/// 是他显式选的，连到哪不该跟着变。名单外的目标被改写后，TLS 由客户端自己与
+/// 那个目标谈 —— 证书不匹配会由客户端报错。
+async fn tunnel_flow(
+    socket: &mut TcpStream,
+    shared: &Shared,
+    cfg: &config::CompiledConfig,
+    head: &Message,
+    host: &str,
+    port: u16,
+) -> Result<(), HttpError> {
+    if cfg.auth_required() && !credentials_ok(cfg, head) {
+        let _ = socket.write_all(auth::challenge()).await;
+        return Ok(());
+    }
+
+    // 二级代理同样适用：隧道走它，CONNECT 由 connect_via_chained_proxy 建。
+    let mut target = ConnectTarget::seed(host, port);
+    target.chained_proxy = cfg.upstream.as_ref().map(|upstream| ProxySpec {
+        host: upstream.host.clone(),
+        port: upstream.port,
+        auth: upstream.has_auth().then(|| ProxyAuth {
+            user: upstream.user.clone().unwrap_or_default(),
+            password: upstream.password.clone().unwrap_or_default(),
+        }),
+    });
+    if let Err(reason) = hosts::apply(&cfg.rules, &mut target) {
+        let _ = write_status(socket, 502, &reason).await;
+        return Ok(());
+    }
+
+    // with_tls = false：这里要的是**裸字节管道**，TLS 由客户端与目标自己谈。
+    let upstream = match connect_upstream(shared, &target, false).await {
+        Ok(upstream) => upstream,
+        Err(reason) => {
+            let _ = write_status(socket, 502, &reason).await;
+            return Ok(());
+        }
+    };
+    socket
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await?;
+
+    match upstream {
+        Upstream::Plain(mut tcp) => {
+            let _ = tokio::io::copy_bidirectional(socket, &mut tcp).await;
+        }
+        // with_tls = false 不会产出 TLS 上游；真出现了说明调用点写错了，
+        // 这里不静默吞掉，直接按连接错误收场。
+        Upstream::Tls(_) => {
+            let _ = write_status(socket, 502, "tunnel expected a plain upstream").await;
+        }
+    }
+    Ok(())
 }
 
 async fn absolute_flow(
@@ -761,6 +846,10 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
                         "session": shared.capture.session_id(),
                         "request_id": request_id,
                         "time": started_ms,
+                        // 上游交换耗时：请求行到达 → 响应体收齐（不含写回客户端）。
+                        // 与终局日志/轨迹的 duration 同起点，终点略早一档 —— 抓包
+                        // 记录写回之前就落，客户端写失败时这条记录仍然成立。
+                        "duration_ms": clock.elapsed().as_millis() as u64,
                         "request": {
                             "method": method,
                             "path": path,

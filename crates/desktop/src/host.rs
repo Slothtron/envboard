@@ -30,15 +30,19 @@ use gpui_kit::{Context, Global, Task, Window};
 use tokio::runtime::Handle;
 
 use envboard_admin::AdminService;
-use envboard_host::{CaBundle, Prepared};
+use envboard_host::{CaControl, Prepared};
 
 /// 宿主：装配好的后端 + 它所属的 tokio 运行时句柄。
 pub struct Host {
     admin: Arc<AdminService>,
     handle: Handle,
     state_dir: PathBuf,
-    /// CA 材料的公开面（设置屏展示摘要与"证书在哪"）。
-    ca: CaBundle,
+    /// 界面偏好文件的路径（组合根算好的；界面不自己拼）。
+    ui_prefs_file: PathBuf,
+    /// CA 的操作面（摘要、重新签发、按域名签发、信任库探测）。
+    ///
+    /// `None` = 测试注入的宿主没有物化 CA。
+    ca: Option<CaControl>,
     ca_dir: PathBuf,
     port_range: (u16, u16),
     warnings: Vec<String>,
@@ -56,6 +60,7 @@ impl Host {
             admin: Arc::clone(&prepared.admin),
             handle,
             state_dir: prepared.state_dir.clone(),
+            ui_prefs_file: prepared.ui_prefs_file.clone(),
             ca: prepared.ca.clone(),
             ca_dir: prepared.ca_dir.clone(),
             port_range: prepared.port_range,
@@ -76,16 +81,27 @@ impl Host {
         &self.state_dir
     }
 
-    /// 共享 CA 公开面：摘要（可能为 `None`，测试注入时未物化）+ 证书 PEM。
+    /// 界面偏好文件的路径（主题的落点）。
     ///
-    /// **没有私钥** —— 组合根就没把它放进来，界面也就无从泄漏。
-    pub fn ca(&self) -> &CaBundle {
-        &self.ca
+    /// 路径由组合根算好 —— 界面这一侧不再自己 `join("ui.json")`，也就不会有
+    /// 第二份路径规则（两份必然漂移，而漂移的症状从外部几乎无法归因）。
+    pub fn ui_prefs_file(&self) -> &PathBuf {
+        &self.ui_prefs_file
+    }
+
+    /// 共享 CA 的操作面（可能为 `None`，测试注入时未物化）。
+    ///
+    /// **没有 CA 私钥** —— 组合根就没把它放进来，界面也就无从泄漏。
+    pub fn ca(&self) -> Option<&CaControl> {
+        self.ca.as_ref()
     }
 
     /// 客户端要安装的那张证书的路径（文件名规则只有引擎那一份）。
     pub fn ca_cert_path(&self) -> PathBuf {
-        envboard_engine::ca::cert_path(&self.ca_dir)
+        self.ca
+            .as_ref()
+            .map(|control| control.cert_path())
+            .unwrap_or_else(|| envboard_engine::ca::cert_path(&self.ca_dir))
     }
 
     pub fn port_range(&self) -> (u16, u16) {

@@ -36,8 +36,10 @@ use gpui_kit::{
 
 use envboard_protocol::ProxyView;
 
+use crate::errors::{Action, Notice};
 use crate::host::{Host, hop};
 use crate::views::environments::EnvTable;
+use crate::views::{empty_state, empty_state_with_action, error_banner, text_tooltip};
 
 // --------------------------------------------------------------------------- #
 // 规则集目录
@@ -58,7 +60,9 @@ pub struct RulesTable {
     query: String,
     envs: Entity<TableState<EnvTable>>,
     loading: bool,
-    error: Option<SharedString>,
+    error: Option<Notice>,
+    /// 这条错误来自取数还是写操作（判据见 `EnvTable::error_from_load`）。
+    error_from_load: bool,
     view: WeakEntity<RulesCatalog>,
 }
 
@@ -84,33 +88,41 @@ impl RulesTable {
             envs,
             loading: true,
             error: None,
+            error_from_load: false,
             view,
         }
     }
 
-    fn set_rows(&mut self, outcome: Result<Vec<String>, String>) -> bool {
+    fn set_rows(&mut self, outcome: Result<Vec<String>, Notice>) -> bool {
         self.loading = false;
         match outcome {
             Ok(names) => {
                 let next: Vec<SharedString> = names.into_iter().map(SharedString::from).collect();
                 let changed = next != self.rows;
                 self.rows = next;
-                self.error = None;
+                // 只撤掉"取数失败"：一次成功的列表刷新证明不了刚才那次写成功了
+                // （与环境屏同一条判据，见 `EnvTable::error_from_load`）。
+                if self.error_from_load {
+                    self.error = None;
+                    self.error_from_load = false;
+                }
                 self.rebuild_visible();
                 changed
             }
-            Err(message) => {
-                let changed = self.error.as_deref() != Some(message.as_str());
-                self.error = Some(message.into());
+            Err(notice) => {
+                let changed = self.error.as_ref() != Some(&notice);
+                self.error = Some(notice);
+                self.error_from_load = true;
                 changed
             }
         }
     }
 
-    /// 把一条错误写进表（错误条渲染在视图层，但状态归表持有，避免两处真相）。
-    fn set_error(&mut self, message: String) -> bool {
-        let changed = self.error.as_deref() != Some(message.as_str());
-        self.error = Some(message.into());
+    /// 写操作失败：不随列表刷新撤掉。
+    fn set_error(&mut self, notice: Notice) -> bool {
+        let changed = self.error.as_ref() != Some(&notice);
+        self.error = Some(notice);
+        self.error_from_load = false;
         self.loading = false;
         changed
     }
@@ -142,7 +154,7 @@ impl RulesTable {
         self.visible.is_empty() && !self.query.trim().is_empty()
     }
 
-    pub fn error(&self) -> Option<SharedString> {
+    pub fn error(&self) -> Option<Notice> {
         self.error.clone()
     }
 }
@@ -209,6 +221,9 @@ impl TableDelegate for RulesTable {
             ),
             RULES_REFS => cell(
                 div()
+                    // 引用串会随环境增多而变长：截断后 hover 给全文。
+                    .id(SharedString::from(format!("rules-refs-{row_ix}")))
+                    .tooltip(text_tooltip(refs_text.clone()))
                     .truncate()
                     .text_color(muted)
                     .child(SharedString::from(refs_text)),
@@ -258,6 +273,42 @@ impl TableDelegate for RulesTable {
                     ),
             ),
             _ => div().into_any_element(),
+        }
+    }
+
+    /// 空态：区分"还没有规则集"与"搜索后没匹配"。
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        if self.filtered_out() {
+            empty_state(
+                cx,
+                "rules-empty-filtered",
+                "没有匹配的规则集",
+                "换个关键词试试。",
+            )
+        } else {
+            // 空账本是首次使用的那一屏：把「导入」就地放一份，别让用户先去找
+            // 右上角的按钮（与环境屏空态同一写法）。
+            let view = self.view.clone();
+            empty_state_with_action(
+                cx,
+                "rules-empty-ledger",
+                "还没有规则集",
+                "规则集是 hosts 正文（每行一条「ip 域名」）。",
+                Some(
+                    Button::new("empty-import-rules")
+                        .xsmall()
+                        .icon(Icon::new(IconName::Plus))
+                        .label("导入规则集")
+                        .on_click(move |_, window, cx| {
+                            let _ = view.update(cx, |view, cx| view.open_import_dialog(window, cx));
+                        })
+                        .into_any_element(),
+                ),
+            )
         }
     }
 }
@@ -322,7 +373,11 @@ impl RulesCatalog {
         let task = hop(
             window,
             cx,
-            async move { admin.rules_list().map_err(|error| error.message) },
+            async move {
+                admin
+                    .rules_list()
+                    .map_err(|error| Notice::from_error(Action::LoadRules, None, &error))
+            },
             move |_, outcome, _, cx| {
                 let changed = table.update(cx, |state, cx| {
                     let changed = state.delegate_mut().set_rows(outcome);
@@ -345,15 +400,17 @@ impl RulesCatalog {
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
         let query = name.to_string();
+        let subject = name.clone();
         let task = hop(
             window,
             cx,
-            async move { admin.rules_read(&query).map_err(|error| error.message) },
+            async move { admin.rules_read(&query) },
             move |this, outcome, window, cx| match outcome {
                 Ok(text) => this.open_text_dialog(name, text, window, cx),
-                Err(message) => {
+                Err(error) => {
+                    let notice = Notice::from_error(Action::ReadRules, Some(&subject), &error);
                     let changed = table.update(cx, |state, cx| {
-                        let changed = state.delegate_mut().set_error(message);
+                        let changed = state.delegate_mut().set_error(notice);
                         if changed {
                             state.refresh(cx);
                         }
@@ -459,14 +516,16 @@ impl RulesCatalog {
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
         let query = name.to_string();
+        let subject = name.clone();
         let task = hop(
             window,
             cx,
-            async move { admin.rules_delete(&query).map_err(|error| error.message) },
+            async move { admin.rules_delete(&query) },
             move |this, outcome, window, cx| {
-                if let Err(message) = outcome {
+                if let Err(error) = outcome {
+                    let notice = Notice::from_error(Action::DeleteRules, Some(&subject), &error);
                     table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(message);
+                        state.delegate_mut().set_error(notice);
                         state.refresh(cx);
                     });
                 }
@@ -530,19 +589,16 @@ impl RulesCatalog {
     fn import(&mut self, name: String, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
+        let subject = name.clone();
         let task = hop(
             window,
             cx,
-            async move {
-                admin
-                    .import_rules(&name, &text)
-                    .map(|_| ())
-                    .map_err(|error| error.message)
-            },
+            async move { admin.import_rules(&name, &text).map(|_| ()) },
             move |this, outcome, window, cx| {
-                if let Err(message) = outcome {
+                if let Err(error) = outcome {
+                    let notice = Notice::from_error(Action::ImportRules, Some(&subject), &error);
                     table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(message);
+                        state.delegate_mut().set_error(notice);
                         state.refresh(cx);
                     });
                 }
@@ -582,12 +638,18 @@ impl Render for RulesCatalog {
                     .items_center()
                     .gap_2()
                     .child(div().w_64().child(Input::new(&self.search)))
-                    // 每屏只一个主操作，放在最右。
+                    // 计数挨着主操作放在右段：单独一行只说一件事太贵，
+                    // 而它本来就是"这一屏现在有多少"的脚注。
                     .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(status),
+                    )
                     .child(
                         Button::new("rules-import")
                             .xsmall()
-                            .primary()
                             .icon(Icon::new(IconName::Plus))
                             .label("导入规则集")
                             .tooltip("导入规则集")
@@ -597,19 +659,7 @@ impl Render for RulesCatalog {
                             }),
                     ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(status),
-            )
-            .children(error.map(|message| {
-                div()
-                    .id("rules-error")
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(message)
-            }))
+            .children(error.map(|message| error_banner("rules-error", message)))
             .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
     }
 }
@@ -638,8 +688,13 @@ const PROXY_ACTIONS: usize = 4;
 pub struct ProxiesTable {
     columns: Vec<Column>,
     rows: Vec<ProxyView>,
+    /// 按搜索词过滤后的可见行下标 —— 表只认这个，行下标与搜索词同源。
+    visible: Vec<usize>,
+    query: String,
     loading: bool,
-    error: Option<SharedString>,
+    error: Option<Notice>,
+    /// 这条错误来自取数还是写操作（判据见 `EnvTable::error_from_load`）。
+    error_from_load: bool,
     view: WeakEntity<ProxiesCatalog>,
 }
 
@@ -658,38 +713,83 @@ impl ProxiesTable {
         Self {
             columns,
             rows: Vec::new(),
+            visible: Vec::new(),
+            query: String::new(),
             loading: true,
             error: None,
+            error_from_load: false,
             view,
         }
     }
 
-    fn set_rows(&mut self, outcome: Result<Vec<ProxyView>, String>) -> bool {
+    fn set_rows(&mut self, outcome: Result<Vec<ProxyView>, Notice>) -> bool {
         self.loading = false;
         match outcome {
             Ok(rows) => {
                 let changed = rows != self.rows;
                 self.rows = rows;
-                self.error = None;
+                // 只撤掉"取数失败"（与环境屏同一条判据）。
+                if self.error_from_load {
+                    self.error = None;
+                    self.error_from_load = false;
+                }
+                self.rebuild_visible();
                 changed
             }
-            Err(message) => {
-                let changed = self.error.as_deref() != Some(message.as_str());
-                self.error = Some(message.into());
+            Err(notice) => {
+                let changed = self.error.as_ref() != Some(&notice);
+                self.error = Some(notice);
+                self.error_from_load = true;
                 changed
             }
         }
     }
 
-    /// 把一条错误写进表（与环境屏同一手法：状态归表持有）。
-    fn set_error(&mut self, message: String) -> bool {
-        let changed = self.error.as_deref() != Some(message.as_str());
-        self.error = Some(message.into());
+    /// 写操作失败：不随列表刷新撤掉。
+    fn set_error(&mut self, notice: Notice) -> bool {
+        let changed = self.error.as_ref() != Some(&notice);
+        self.error = Some(notice);
+        self.error_from_load = false;
         self.loading = false;
         changed
     }
 
-    pub fn error(&self) -> Option<SharedString> {
+    pub fn set_query(&mut self, query: &str) -> bool {
+        if self.query == query {
+            return false;
+        }
+        self.query = query.to_string();
+        self.rebuild_visible();
+        true
+    }
+
+    /// 搜索覆盖三处：代理名、地址、引用它的环境名 —— 与用户心里的"这条怎么找"
+    /// 一一对应（按名字、按地址、按谁在用）。
+    fn rebuild_visible(&mut self) {
+        let query = self.query.trim().to_lowercase();
+        self.visible = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, proxy)| {
+                query.is_empty()
+                    || proxy.name.to_lowercase().contains(&query)
+                    || proxy.host.to_lowercase().contains(&query)
+                    || proxy
+                        .references
+                        .iter()
+                        .any(|env| env.to_lowercase().contains(&query))
+            })
+            .map(|(index, _)| index)
+            .collect();
+    }
+
+    /// 有搜索词却一行不剩 —— 与"目录是空的"分开说。
+    fn filtered_out(&self) -> bool {
+        self.visible.is_empty() && !self.query.trim().is_empty()
+    }
+
+    pub fn error(&self) -> Option<Notice> {
         self.error.clone()
     }
 }
@@ -700,7 +800,7 @@ impl TableDelegate for ProxiesTable {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
+        self.visible.len()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -718,7 +818,12 @@ impl TableDelegate for ProxiesTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(proxy) = self.rows.get(row_ix).cloned() else {
+        let Some(proxy) = self
+            .visible
+            .get(row_ix)
+            .and_then(|index| self.rows.get(*index))
+            .cloned()
+        else {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
@@ -738,8 +843,14 @@ impl TableDelegate for ProxiesTable {
                     .child(proxy.name.clone()),
             ),
             PROXY_ADDRESS => cell(
+                // 地址是拿来比对/复制的值：等宽字体让 `host:port` 逐字符对齐，
+                // 与监听列、抓包表同一读法。
                 div()
                     .truncate()
+                    .font(Font {
+                        family: cx.theme().mono_font_family.clone(),
+                        ..Default::default()
+                    })
                     .child(SharedString::from(format!("{}:{}", proxy.host, proxy.port))),
             ),
             PROXY_AUTH => cell(
@@ -754,6 +865,8 @@ impl TableDelegate for ProxiesTable {
             ),
             PROXY_REFS => cell(
                 div()
+                    .id(SharedString::from(format!("proxy-refs-{row_ix}")))
+                    .tooltip(text_tooltip(refs_text.clone()))
                     .truncate()
                     .text_color(muted)
                     .child(SharedString::from(refs_text)),
@@ -767,7 +880,9 @@ impl TableDelegate for ProxiesTable {
                         Button::new(("proxy-edit", row_ix))
                             .xsmall()
                             .ghost()
-                            .icon(Icon::new(IconName::Settings))
+                            // 铅笔（资产图标集）而不是齿轮：齿轮读起来是"设置"，
+                            // 这一下点下去改的是**这条代理**。
+                            .icon(Icon::new(gpui_kit::assets::IconName::Pencil))
                             .accessibility_label(format!("编辑上游代理 {}", proxy.name))
                             .tooltip("编辑")
                             .on_click({
@@ -809,21 +924,84 @@ impl TableDelegate for ProxiesTable {
             _ => div().into_any_element(),
         }
     }
+
+    /// 空态：还没有上游代理。
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        if self.filtered_out() {
+            empty_state(
+                cx,
+                "proxies-empty-filtered",
+                "没有匹配的上游代理",
+                "换个关键词，或清空搜索。",
+            )
+        } else {
+            let view = self.view.clone();
+            empty_state_with_action(
+                cx,
+                "proxies-empty",
+                "还没有上游代理",
+                "上游代理是出方向的二级代理（http 隧道）。",
+                Some(
+                    Button::new("empty-new-proxy")
+                        .xsmall()
+                        .icon(Icon::new(IconName::Plus))
+                        .label("新建上游代理")
+                        .on_click(move |_, window, cx| {
+                            let _ =
+                                view.update(cx, |view, cx| view.open_put_dialog(None, window, cx));
+                        })
+                        .into_any_element(),
+                ),
+            )
+        }
+    }
 }
 
 /// 上游代理目录屏。
 pub struct ProxiesCatalog {
     table: Entity<TableState<ProxiesTable>>,
+    /// 搜索框：与规则屏同一件工具（三个目录屏的工具栏保持一致）。
+    search: Entity<InputState>,
     inflight: Vec<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl ProxiesCatalog {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let view = cx.weak_entity();
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("搜索代理、地址或引用环境")
+                .clean_on_escape()
+        });
         let table = cx.new(|cx| TableState::new(ProxiesTable::new(view), window, cx));
+        let search_sub = cx.subscribe_in(&search, window, {
+            let table = table.clone();
+            let search = search.clone();
+            move |_, _, event, _, cx| {
+                let InputEvent::Change = event else { return };
+                let query = search.read(cx).value().to_string();
+                let changed = table.update(cx, |state, cx| {
+                    let changed = state.delegate_mut().set_query(&query);
+                    if changed {
+                        state.refresh(cx);
+                    }
+                    changed
+                });
+                if changed {
+                    cx.notify();
+                }
+            }
+        });
         let mut this = Self {
             table,
+            search,
             inflight: Vec::new(),
+            _subscriptions: vec![search_sub],
         };
         this.reload(window, cx);
         this
@@ -835,7 +1013,11 @@ impl ProxiesCatalog {
         let task = hop(
             window,
             cx,
-            async move { admin.proxy_list().map_err(|error| error.message) },
+            async move {
+                admin
+                    .proxy_list()
+                    .map_err(|error| Notice::from_error(Action::LoadProxies, None, &error))
+            },
             move |_, outcome, _, cx| {
                 let changed = table.update(cx, |state, cx| {
                     let changed = state.delegate_mut().set_rows(outcome);
@@ -876,14 +1058,16 @@ impl ProxiesCatalog {
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
         let query = name.to_string();
+        let subject = name.clone();
         let task = hop(
             window,
             cx,
-            async move { admin.proxy_delete(&query).map_err(|error| error.message) },
+            async move { admin.proxy_delete(&query) },
             move |this, outcome, window, cx| {
-                if let Err(message) = outcome {
+                if let Err(error) = outcome {
+                    let notice = Notice::from_error(Action::DeleteProxy, Some(&subject), &error);
                     table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(message);
+                        state.delegate_mut().set_error(notice);
                         state.refresh(cx);
                     });
                 }
@@ -1014,19 +1198,20 @@ impl ProxiesCatalog {
     fn put(&mut self, body: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
         let admin = cx.global::<Host>().admin().clone();
         let table = self.table.clone();
+        // 主句里点名哪个代理：请求体才是服务端要的形状，这里只从里面摘名字。
+        let subject = body
+            .get("name")
+            .and_then(|name| name.as_str())
+            .map(str::to_string);
         let task = hop(
             window,
             cx,
-            async move {
-                admin
-                    .proxy_put(&body)
-                    .map(|_| ())
-                    .map_err(|error| error.message)
-            },
+            async move { admin.proxy_put(&body).map(|_| ()) },
             move |this, outcome, window, cx| {
-                if let Err(message) = outcome {
+                if let Err(error) = outcome {
+                    let notice = Notice::from_error(Action::SaveProxy, subject.as_deref(), &error);
                     table.update(cx, |state, cx| {
-                        state.delegate_mut().set_error(message);
+                        state.delegate_mut().set_error(notice);
                         state.refresh(cx);
                     });
                 }
@@ -1041,7 +1226,13 @@ impl Render for ProxiesCatalog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let delegate = self.table.read(cx).delegate();
         let error = delegate.error();
-        let rows = delegate.rows.len();
+        let total = delegate.rows.len();
+        let rows = delegate.visible.len();
+        let status = if rows == total {
+            format!("{total} 个上游代理")
+        } else {
+            format!("{rows} / {total} 个上游代理")
+        };
         let view = cx.weak_entity();
 
         div()
@@ -1058,11 +1249,18 @@ impl Render for ProxiesCatalog {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(div().w_64().child(Input::new(&self.search)))
                     .child(div().flex_1())
+                    // 计数与规则屏同一位置：搜索 → 弹性 → 计数 → 主操作。
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(status),
+                    )
                     .child(
                         Button::new("proxy-put")
                             .xsmall()
-                            .primary()
                             .icon(Icon::new(IconName::Plus))
                             .label("新建上游代理")
                             .tooltip("新建上游代理")
@@ -1072,19 +1270,7 @@ impl Render for ProxiesCatalog {
                             }),
                     ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("{rows} 个上游代理")),
-            )
-            .children(error.map(|message| {
-                div()
-                    .id("proxies-error")
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(message)
-            }))
+            .children(error.map(|message| error_banner("proxies-error", message)))
             .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
     }
 }

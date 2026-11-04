@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use envboard_engine::EngineBackend;
-use envboard_engine::ca::SharedCa;
+use envboard_engine::ca::{CaStore, SharedCa};
 use envboard_engine::{EngineSpec, InstanceState, LineWriter, Listen, ProxyEngine, sha256};
 
 #[derive(Debug, Default)]
@@ -25,6 +25,7 @@ fn spec(port: u16, rules: Option<&str>) -> EngineSpec {
     EngineSpec {
         listen: Listen::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         insecure_hosts: Vec::new(),
+        mitm_hosts: Vec::new(),
         proxy_user: None,
         proxy_password: None,
         upstream: None,
@@ -97,7 +98,7 @@ async fn settle(engine: &EngineBackend, handle: &envboard_engine::EngineHandle) 
 async fn backend_lifecycle_through_the_trait_face() {
     let dir = std::env::temp_dir().join(format!("envboard-m4-backend-{}", std::process::id()));
     let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
-    let engine = Arc::new(EngineBackend::new(ca));
+    let engine = Arc::new(EngineBackend::new(CaStore::new(ca)));
     let capture = Arc::new(Capture::default());
     let origin_port = origin().await;
     let proxy_port = free_port().await;
@@ -161,7 +162,7 @@ async fn backend_lifecycle_through_the_trait_face() {
 async fn double_register_conflicts_without_touching_the_first() {
     let dir = std::env::temp_dir().join(format!("envboard-m4-conf-{}", std::process::id()));
     let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
-    let engine = EngineBackend::new(ca);
+    let engine = EngineBackend::new(CaStore::new(ca));
     let port = free_port().await;
     let handle = engine.start("beta".into(), spec(port, None)).await.unwrap();
     let error = engine

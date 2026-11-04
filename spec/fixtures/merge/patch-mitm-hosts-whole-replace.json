@@ -1,0 +1,28 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 给 mitm_hosts = 整体替换（与 insecure_hosts 同款：列表没有无歧义的元素级合并）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 16600
+      },
+      "mitm_hosts": [
+        "a.example.com",
+        "b.example.com"
+      ]
+    },
+    "patch": {
+      "mitm_hosts": [
+        "c.example.com"
+      ]
+    }
+  },
+  "expect": {
+    "ok": true,
+    "mitm_hosts": [
+      "c.example.com"
+    ]
+  }
+}

@@ -57,7 +57,7 @@
 | `build_engine()`（引擎 + 共享 CA + CA 重生物化的两条 `eprintln!`） | `crates/host/src/assembly.rs`；警告提升为 `Prepared::warnings`，宿主打印、界面渲染都来得及 |
 | `Manager::new(...)` + 单实例锁 + `Conflict` 文案加工 | `crates/host/src/assembly.rs`（`build_prepared` / `ownership_conflict`） |
 | reconcile → 初次 `maintain_logs()` → 30s 照看循环 | `crates/host/src/startup.rs`；报告作为返回值交回调用方，宿主 `println!` |
-| `state_dir()` 的环境变量回退链 + `build_config()` | `crates/host/src/options.rs`（`HostOptions`）；`--port-range` 的**文本**解析也在这里（`parse_port_range`），CLI 参数本体仍留在各 `main.rs` |
+| `state_dir()` 的环境变量回退链 + `build_config()` | `crates/host/src/options.rs`（`HostOptions`）。状态目录的**平台默认值与规范化**（`~` 展开、相对路径补全、空串拒绝）同样只在这一处：`platform_default_state_dir` / `normalize_state_dir`。`--port-range` 的文本解析（`parse_port_range`）随后**随命令行参数一起出库**——产品不解析参数，端口区间取域常量 |
 | `WebConfig::parse(...)` | **不搬**：那是 web 形态的参数翻译，不属于共享组合根 |
 
 一处行为差异，是有意的：CA 重生物化的警告原来在装配中途直接打到 stderr，现在先收集、
@@ -99,8 +99,8 @@
 
 接缝测试钉的是组合根自己的职责：门面装出来真能用（写一次、读得到、快照全量）、
 同一状态目录第二个宿主以 `Conflict` 响亮失败并带可操作文案、`startup()` 返回报告
-而不是自己打印。`crates/host/tests/host.rs` 用独立端口窗口 + `--no-log-file`，
-与既有测试同一手法。
+而不是自己打印。`crates/host/tests/host.rs` 用独立端口窗口 + `HostOptions::no_log_file`
+（那时还是命令行开关，现在是组合根的一个字段），与既有测试同一手法。
 
 **未迁的一项（记账）**：`maintain_logs()` 返回的轮转提示原来就被丢弃，本次照搬
 不改（P0.1 的验收是"行为零变化"）。它该被渲染成界面提示，归 P2 的设置/日志页。

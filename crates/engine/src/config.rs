@@ -28,6 +28,8 @@ pub struct EngineConfig {
     pub listen: Listen,
     /// 已归一化的完整域名清单（空 = 全部严格校验）。
     pub insecure_hosts: Vec<String>,
+    /// MITM 白名单（空 = 全部解密；非空 = 只解密名单内的域名，其余 CONNECT 直通）。
+    pub mitm_hosts: Vec<String>,
     pub proxy_user: Option<String>,
     pub proxy_password: Option<String>,
     /// 上游二级代理绑定（None = 直连）。凭据成对由这里再校验一道。
@@ -51,6 +53,7 @@ impl Default for EngineConfig {
         EngineConfig {
             listen: Listen::localhost(0),
             insecure_hosts: Vec::new(),
+            mitm_hosts: Vec::new(),
             proxy_user: None,
             proxy_password: None,
             upstream: None,
@@ -68,6 +71,8 @@ impl Default for EngineConfig {
 pub struct CompiledConfig {
     pub listen: Listen,
     pub insecure_hosts: Vec<String>,
+    /// MITM 白名单（空 = 全部解密）。
+    pub mitm_hosts: Vec<String>,
     /// 上游二级代理（None = 直连）；每请求播种进 ConnectTarget。
     pub upstream: Option<UpstreamSpec>,
     /// 抓包开关（快照值；apply 热切换生效）。
@@ -91,6 +96,14 @@ impl CompiledConfig {
     /// 内核能力：放宽只经这个一等字段，没有任何全局开关。
     pub fn is_insecure(&self, sni: Option<&str>, address: Option<&str>) -> bool {
         crate::rules::insecure_matches(&self.insecure_hosts, sni, address)
+    }
+
+    /// MITM 白名单判定：空名单 = 全部解密（默认）；非空 = **完全等于**名单里的
+    /// 某一项才解密，其余一律直通。与 `insecure_hosts` 共用归一化与匹配规则
+    /// （逐条点名、不接受通配符）。
+    pub fn mitm_allowed(&self, host: &str) -> bool {
+        self.mitm_hosts.is_empty()
+            || crate::rules::insecure_matches(&self.mitm_hosts, Some(host), None)
     }
 
     /// 比对凭据：user 与 secret 都是定长时间比较。
@@ -180,6 +193,7 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
     struct HashShape<'a> {
         listen: &'a Listen,
         insecure_hosts: &'a [String],
+        mitm_hosts: &'a [String],
         rules: &'a BTreeMap<String, String>,
         max_buffered_body: usize,
         auth: Option<(&'a str, String)>,
@@ -188,6 +202,7 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
     let shape = HashShape {
         listen: &config.listen,
         insecure_hosts: &config.insecure_hosts,
+        mitm_hosts: &config.mitm_hosts,
         rules: &rules,
         max_buffered_body,
         auth: auth
@@ -214,6 +229,7 @@ pub fn compile(config: &EngineConfig) -> Result<CompiledConfig, Error> {
     Ok(CompiledConfig {
         listen: config.listen,
         insecure_hosts: config.insecure_hosts.clone(),
+        mitm_hosts: config.mitm_hosts.clone(),
         upstream: config.upstream.clone(),
         capture: config.capture,
         rules,
