@@ -28,6 +28,7 @@ use gpui_kit::component::table::{
     Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::{Icon, IconName, Selectable, Sizable, WindowExt};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
@@ -445,7 +446,9 @@ impl TableDelegate for EnvTable {
             NAME => cell(
                 div()
                     // 行高回归断言的锚点：L0 量相邻两行的原点差，必须一致。
+                    .id(SharedString::from(format!("env-name-{row_ix}")))
                     .debug_selector(move || format!("env-row-{row_ix}"))
+                    .tooltip(text_tooltip(env.name.clone()))
                     .truncate()
                     .font_weight(FontWeight::BOLD)
                     .child(env.name.clone()),
@@ -466,31 +469,55 @@ impl TableDelegate for EnvTable {
                     )
                     .child(div().truncate().child(health_label(&env.health))),
             ),
-            LISTEN => cell(div().truncate().child(listen_address(&env))),
-            RULES => cell(
-                div()
-                    .truncate()
-                    .text_color(if env.rules_missing { warning } else { muted })
-                    .child(match (&env.rules, env.rules_missing) {
-                        (Some(name), true) => format!("{name}（缺失）"),
-                        (Some(name), false) => format!("{name} · {} 条", env.rules_count),
-                        (None, _) => "未绑定".to_string(),
-                    }),
-            ),
-            UPSTREAM => cell(div().truncate().child(match &env.upstream {
-                Some(name) if env.proxy_auth_enabled => format!("{name}（带鉴权）"),
-                Some(name) => name.clone(),
-                None => "直连".to_string(),
-            })),
+            LISTEN => {
+                let address = listen_address(&env);
+                cell(
+                    div()
+                        .id(SharedString::from(format!("env-listen-{row_ix}")))
+                        .tooltip(text_tooltip(address.clone()))
+                        .truncate()
+                        .child(address),
+                )
+            }
+            RULES => {
+                let text = match (&env.rules, env.rules_missing) {
+                    (Some(name), true) => format!("{name}（缺失）"),
+                    (Some(name), false) => format!("{name} · {} 条", env.rules_count),
+                    (None, _) => "未绑定".to_string(),
+                };
+                cell(
+                    div()
+                        .id(SharedString::from(format!("env-rules-{row_ix}")))
+                        .tooltip(text_tooltip(text.clone()))
+                        .truncate()
+                        .text_color(if env.rules_missing { warning } else { muted })
+                        .child(text),
+                )
+            }
+            UPSTREAM => {
+                let text = match &env.upstream {
+                    Some(name) if env.proxy_auth_enabled => format!("{name}（带鉴权）"),
+                    Some(name) => name.clone(),
+                    None => "直连".to_string(),
+                };
+                cell(
+                    div()
+                        .id(SharedString::from(format!("env-upstream-{row_ix}")))
+                        .tooltip(text_tooltip(text.clone()))
+                        .truncate()
+                        .child(text),
+                )
+            }
             // 「说明」是用户写的备注，不是系统状态：它恒定用次要色。
             // 把"需处理"染在这里等于借一个语义无关的通道 —— 用户会以为这段备注
             // 有问题，而空说明的环境又完全得不到提示。状态归健康列。
             DESCRIPTION => cell(
                 div()
-                    // 说明列是唯一会被裁切的可变长文本：hover 给出全文，
-                    // 否则被截掉的部分再也读不到。
                     .id(SharedString::from(format!("env-desc-{row_ix}")))
-                    .tooltip(text_tooltip(env.description.clone()))
+                    // 空说明不挂 tooltip：一个悬停出来是空白的提示比没有更糟。
+                    .when(!env.description.is_empty(), |this| {
+                        this.tooltip(text_tooltip(env.description.clone()))
+                    })
                     .truncate()
                     .text_color(muted)
                     .child(env.description.clone()),
@@ -607,6 +634,7 @@ impl EnvTable {
                         cx,
                     )
                     .disabled(pending)
+                    .loading(pending)
                     .tooltip(format!("重启 {name}"))
                     .accessibility_label(format!("重启 {name}"))
                     .on_click(move |_, window, cx| {
@@ -628,6 +656,7 @@ impl EnvTable {
                         cx,
                     )
                     .disabled(pending)
+                    .loading(pending)
                     .tooltip("更多操作")
                     .accessibility_label(format!("{name} 的更多操作"))
                     .dropdown_menu(move |mut menu, _, _| {

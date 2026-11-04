@@ -205,6 +205,8 @@ impl TableDelegate for RulesTable {
         match col_ix {
             RULES_NAME => cell(
                 div()
+                    .id(SharedString::from(format!("rules-name-{row_ix}")))
+                    .tooltip(text_tooltip(name.clone()))
                     .truncate()
                     .font_weight(FontWeight::BOLD)
                     .child(name.clone()),
@@ -869,21 +871,26 @@ impl TableDelegate for ProxiesTable {
         match col_ix {
             PROXY_NAME => cell(
                 div()
+                    .id(SharedString::from(format!("proxy-name-{row_ix}")))
+                    .tooltip(text_tooltip(proxy.name.clone()))
                     .truncate()
                     .font_weight(FontWeight::BOLD)
                     .child(proxy.name.clone()),
             ),
-            PROXY_ADDRESS => cell(
+            PROXY_ADDRESS => cell({
+                let address = format!("{}:{}", proxy.host, proxy.port);
                 // 地址是拿来比对/复制的值：等宽字体让 `host:port` 逐字符对齐，
                 // 与监听列、抓包表同一读法。
                 div()
+                    .id(SharedString::from(format!("proxy-address-{row_ix}")))
+                    .tooltip(text_tooltip(address.clone()))
                     .truncate()
                     .font(Font {
                         family: cx.theme().mono_font_family.clone(),
                         ..Default::default()
                     })
-                    .child(SharedString::from(format!("{}:{}", proxy.host, proxy.port))),
-            ),
+                    .child(SharedString::from(address))
+            }),
             PROXY_AUTH => cell(
                 div()
                     .text_color(muted)

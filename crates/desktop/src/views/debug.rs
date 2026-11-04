@@ -32,9 +32,9 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Font, FontWeight, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, Task, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Font, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -484,7 +484,7 @@ impl TableDelegate for RecordsTable {
         } else {
             (
                 "还没有记录",
-                "开始调试后，把客户端的代理指到该环境的端口走一遍请求，记录会出现在这里。",
+                "点工具条左上的「选择环境」开始调试，再把客户端的代理指到该环境的端口走一遍请求。",
             )
         };
         div()
@@ -613,7 +613,7 @@ impl CaptureDetail {
             .into_any_element()
     }
 
-    fn render_body(&self, cx: &App) -> AnyElement {
+    fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let mono = Font {
             family: cx.theme().mono_font_family.clone(),
@@ -670,12 +670,43 @@ impl CaptureDetail {
         }
 
         let body = body_lines(side.get("body"));
+        // 复制用整段文本（渲染按行拆成子元素，剪贴板不需要那些空格占位）。
+        let head_text = head.join("\n");
+        let body_text = body.join("\n");
 
         div()
             .id("capture-detail-body")
             .flex()
             .flex_col()
             .gap_4()
+            // 抓包详情最常见的下一步是"把这段拿去搜/贴给别人"：给两个复制动作，
+            // 免去在等宽文本里手拖选区。
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("capture-copy-head")
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Copy))
+                            .label("复制起始行与头")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(head_text.clone()));
+                            })),
+                    )
+                    .child(
+                        Button::new("capture-copy-body")
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Copy))
+                            .label("复制正文")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(body_text.clone()));
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .flex()
