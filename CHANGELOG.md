@@ -4,7 +4,7 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## Unreleased
+## 0.2.0 — 2026-11-13
 
 - **证书安装/卸载改为直接写当前用户存储**：证书页的「安装证书」不再打开系统证书导入
   向导，也不再让用户选当前用户/计算机——直接写当前用户 ROOT 存储（免管理员、幂等、

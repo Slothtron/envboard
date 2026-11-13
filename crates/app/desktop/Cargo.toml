@@ -3,7 +3,7 @@ name = "envboard-desktop"
 description = "envboard 桌面形态：Tauri 壳。WebView 里的界面经 IPC 直调 AdminService 门面，不起任何监听端口。"
 # 这几个字段不写 `.workspace = true`：本 crate 自成一个 workspace（见下），继承不到
 # 仓库根的 [workspace.package]，取值与根保持一致但字面写死。
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
