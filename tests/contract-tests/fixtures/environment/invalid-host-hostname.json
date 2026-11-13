@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "listen.host 只接受 IP 字面量，不接受主机名（否则工作台显示的端口与客户端实际能连的地址会分叉）",
+  "input": { "name": "prod", "listen": { "host": "localhost", "port": 16600 } },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.host" }
+}

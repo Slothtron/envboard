@@ -1,0 +1,14 @@
+{
+  "capability": "insecure.hosts",
+  "description": "不做子域继承：清单里写 example.com 不会放行 app.example.com",
+  "input": {
+    "hosts": [
+      "example.com"
+    ],
+    "sni": "app.example.com"
+  },
+  "expect": {
+    "ok": true,
+    "match": false
+  }
+}

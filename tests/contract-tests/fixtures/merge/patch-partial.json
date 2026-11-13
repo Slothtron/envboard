@@ -1,0 +1,20 @@
+{
+  "capability": "environment.merge",
+  "description": "patch 只改 rules，其余字段保持不变（含 description）",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": { "host": "127.0.0.1", "port": 16600 },
+      "rules": "alpha",
+      "description": "保持不动"
+    },
+    "patch": { "rules": "beta" }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gray",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "rules": "beta",
+    "description": "保持不动"
+  }
+}

@@ -1,0 +1,114 @@
+# 本地开发环境：工具版本锁定 + 任务入口。`mise run` / `mise run <task>` 即用。
+# mise 只管本地开发；分发（发行包）后续由 CI / npm 包接手，这里不设打包任务。
+#
+# rust 不在 [tools] 管理：由 rust-toolchain.toml（rustup）钉死，避免双头；
+# [env] 的 RUSTUP_TOOLCHAIN 防本机 mise 全局 rust 版本压过 rust-toolchain.toml。
+# 任务 recipe 一律单命令、不用 `&&`，多步用 depends 串（sh 与 PowerShell 均可）。
+#
+# 前端工具链圈禁在 frontend/ 边界内；构建衔接由 crates/app/desktop/build.rs 在
+# cargo build 时自动驱动 —— build/typecheck 供前端单独开发用。
+# 桌面壳自成 workspace（tauri-build 静态 CRT 隔离，见其 Cargo.toml），
+# tauri 任务用 dir 落到 crate 目录；tauri-cli 走 cargo install（不进 mise）。
+
+[settings]
+# verify 链按依赖顺序跑（并行会让 cargo 抢锁、输出 interleaving）
+jobs = 1
+
+[env]
+RUSTUP_TOOLCHAIN = "1.98.0"
+
+[tools]
+node = "24.16.0"        # frontend 工具链；Vite 7 要求 ≥ 22.12
+pnpm = "10.18.2"        # 与 frontend/package.json 的 packageManager 字段一致
+
+[tasks.dev]
+description = "桌面开发（Tauri 壳 + vite HMR，IPC 直调门面）"
+dir = "crates/app/desktop"
+run = "cargo tauri dev"
+
+[tasks.build]
+description = "前端构建（tsc 类型检查 + 打包产出 dist/）"
+run = "pnpm -C frontend build"
+
+[tasks.typecheck]
+description = "仅前端类型检查（tsc --noEmit）"
+run = "pnpm -C frontend typecheck"
+
+[tasks.test]
+description = "Rust 全量测试（参数透传给 cargo）"
+raw = true
+run = "cargo test"
+
+[tasks.desktop]
+description = "构建桌面产物（调试档、不打包；发布档用 cargo tauri build）"
+dir = "crates/app/desktop"
+run = "cargo tauri build --debug --no-bundle"
+
+[tasks.verify-desktop]
+description = "桌面形态的编译 + 测试（smoke / artifact / 命令级契约三套）"
+dir = "crates/app/desktop"
+run = "cargo test --locked --offline"
+
+# ---------------------------------------------------------------------------
+# verify 链：判据一律在 Rust 测试里，任务只做编排。
+# cargo 调用一律 --locked --offline（可复现 + 离线可构建是验收项）；
+# clippy 只 --offline（它不消费锁文件）。遇错即停。
+# ---------------------------------------------------------------------------
+
+[tasks.verify-fmt]
+description = "格式检查"
+run = "cargo fmt --all --check"
+
+[tasks.verify-clippy]
+description = "lint（-D warnings）"
+run = "cargo clippy --workspace --all-targets --offline -- -D warnings"
+
+[tasks.verify-check]
+description = "全目标编译检查"
+run = "cargo check --workspace --all-targets --locked --offline"
+
+[tasks.verify-build]
+description = "全 workspace 构建（build.rs 自动驱动前端）"
+run = "cargo build --workspace --locked --offline"
+
+[tasks.verify-test]
+description = "全 workspace 测试"
+run = "cargo test --workspace --locked --offline"
+
+[tasks.verify-doc]
+description = "rustdoc 构建（契约住在 crate 文档里，文档必须能编译）"
+run = "cargo doc --workspace --no-deps --locked --offline"
+
+[tasks.verify-rust]
+description = "Rust 层：fmt / clippy / check / build / test / doc"
+depends = ["verify-fmt", "verify-clippy", "verify-check", "verify-build", "verify-test", "verify-doc"]
+
+[tasks.verify-contract]
+description = "契约层：84 个 fixture 的形状与消费"
+run = "cargo test -p envboard-contract-tests --locked --offline"
+
+[tasks.verify]
+description = "全量验证（Rust 层 + 契约层 + 桌面层）"
+depends = ["verify-rust", "verify-contract", "verify-desktop"]
+
+[tasks.frontend-install]
+description = "前端依赖安装（frozen lockfile，吃暖 store）"
+run = "pnpm -C frontend install --frozen-lockfile --prefer-offline"
+
+[tasks.verify-frontend]
+description = "前端层：install + build（cargo build 也会经 build.rs 自动跑）"
+depends = ["frontend-install"]
+run = "pnpm -C frontend build"
+
+[tasks.live-manager]
+description = "实机：引擎管理器（真 openssl/curl、真端口）"
+run = "cargo test --locked --offline -p envboard-engine --test live_manager -- --ignored --nocapture"
+
+# 桌面形态的真机走查（真窗口 + IPC 流 + 真代理流量）走 CDP：
+# 工作区 tools/envboard-desktop/cdp-walk.mjs（验收脚本不进仓库，工作区分类规则）。
+# 旧 live_workbench（HTTP 面 34 条实机断言）随 web 形态退场：契约部分由
+# desktop/tests/contract.rs 承接，真流量部分由引擎 live_manager + CDP 走查承接。
+
+[tasks.verify-live]
+description = "实机层（默认不在 verify 里；需要 openssl/curl 与真网络）"
+depends = ["live-manager"]

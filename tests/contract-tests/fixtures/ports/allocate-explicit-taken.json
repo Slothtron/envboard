@@ -1,0 +1,13 @@
+{
+  "capability": "port.allocate",
+  "description": "显式指定但已被占用：响亮失败，绝不静默改端口",
+  "input": {
+    "existing": null,
+    "requested": 16600,
+    "candidates": [16601, 16602],
+    "taken": [16600],
+    "range": { "min": 16000, "max": 16999 },
+    "max_attempts": 32
+  },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.port" }
+}

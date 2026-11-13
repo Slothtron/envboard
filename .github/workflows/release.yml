@@ -1,0 +1,101 @@
+name: release
+
+# 首个公开版本只发 Windows x64：NSIS 安装包 + 免安装 exe。
+# 触发：推 `v*` 标签（正式发布）或手动 workflow_dispatch（只出构建产物，不建 Release）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "${GITHUB_REF_NAME}" || {
+            echo "tag ${GITHUB_REF_NAME} != v$version（版本号与 tag 必须一致）" >&2
+            exit 1
+          }
+
+      # 前端工具链版本与 mise.toml / frontend/package.json 的 packageManager 对齐。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # 与 rust-toolchain.toml 钉死的版本一致。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/app/desktop
+
+      # tauri-cli 不进 mise、也不进依赖树：单独安装，版本在此钉住。
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.11" --locked
+
+      # `cargo tauri build` 在调用 cargo **之前**就要求 frontendDist 存在，而 dist/
+      # 不入库，所以先单独构建前端；随后让 build.rs 跳过它自己那次 pnpm，避免跑两遍。
+      - name: Build frontend
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+
+      - name: Build (NSIS bundle)
+        working-directory: crates/app/desktop
+        env:
+          ENVBOARD_SKIP_FRONTEND_BUILD: "1"
+        run: cargo tauri build --bundles nsis
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp crates/app/desktop/target/release/envboard.exe dist/
+          cp crates/app/desktop/target/release/bundle/nsis/*.exe dist/
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: envboard-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            Windows x64 构建（首个公开版本只支持 Windows）。
+
+            - `envboard.exe`：免安装，双击即用（需要 WebView2，Windows 10/11 通常已带）。
+            - `*_x64-setup.exe`：NSIS 安装包（currentUser，免 UAC）。
+
+            未签名：首次运行会撞 SmartScreen，点「更多信息 → 仍要运行」。

@@ -1,0 +1,22 @@
+{
+  "capability": "environment.merge",
+  "description": "upstream 显式 null = 改直连；未提及的字段（rules）保持不变",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": { "port": 16600 },
+      "rules": "alpha",
+      "upstream": "corp",
+      "description": ""
+    },
+    "patch": { "upstream": null }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gray",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "rules": "alpha",
+    "upstream": null,
+    "description": ""
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "capability": "proxy.validate",
+  "description": "未知字段响亮失败：实体没有透传通道",
+  "input": {
+    "name": "corp",
+    "host": "proxy.example.com",
+    "port": 3128,
+    "scheme": "http"
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "proxy.scheme"
+  }
+}

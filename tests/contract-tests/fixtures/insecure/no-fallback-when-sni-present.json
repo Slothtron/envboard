@@ -1,0 +1,15 @@
+{
+  "capability": "insecure.hosts",
+  "description": "SNI 存在但不在清单里**不**退回地址（退回会让命名失配变成静默放行）",
+  "input": {
+    "hosts": [
+      "10.0.0.8"
+    ],
+    "sni": "app.example.com",
+    "address": "10.0.0.8"
+  },
+  "expect": {
+    "ok": true,
+    "match": false
+  }
+}

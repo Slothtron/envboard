@@ -1,0 +1,12 @@
+{
+  "capability": "environment.validate",
+  "description": "listen.host 省略时取默认 127.0.0.1（默认值只在 core 定义一次）",
+  "input": { "name": "prod", "listen": { "port": 16600 } },
+  "expect": {
+    "ok": true,
+    "name": "prod",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "rules": null,
+    "description": ""
+  }
+}

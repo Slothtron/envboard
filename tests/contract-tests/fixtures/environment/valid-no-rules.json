@@ -1,0 +1,12 @@
+{
+  "capability": "environment.validate",
+  "description": "rules 省略 = null = 显式语义「本环境不覆盖任何域名」，不是缺省降级",
+  "input": { "name": "clean", "listen": { "port": 16602 }, "description": "不覆盖" },
+  "expect": {
+    "ok": true,
+    "name": "clean",
+    "listen": { "host": "127.0.0.1", "port": 16602 },
+    "rules": null,
+    "description": "不覆盖"
+  }
+}

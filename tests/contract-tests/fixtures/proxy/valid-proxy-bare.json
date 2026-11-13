@@ -1,0 +1,17 @@
+{
+  "capability": "proxy.validate",
+  "description": "无鉴权的上游代理：user/password 键仍在，值为 null",
+  "input": {
+    "name": "direct",
+    "host": "10.0.0.9",
+    "port": 8080
+  },
+  "expect": {
+    "ok": true,
+    "name": "direct",
+    "host": "10.0.0.9",
+    "port": 8080,
+    "user": null,
+    "password": null
+  }
+}

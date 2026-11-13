@@ -1,0 +1,27 @@
+{
+  "capability": "rules.parse",
+  "description": "非法行自动忽略；同一行里合法的 host 仍然保留",
+  "input": {
+    "text": "only-a-host.example.com\n10.0.0.6 good.example.com -bad.example.com\n300.1.2.3 out-of-range.example.com\n10.0.0.7 10.0.0.8\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 1,
+    "ips": 1,
+    "entries": {
+      "good.example.com": "10.0.0.6"
+    },
+    "skipped_reasons": [
+      "too-few-tokens",
+      "invalid-host",
+      "no-ip-literal",
+      "invalid-host"
+    ],
+    "skipped_details": [
+      "only-a-host.example.com",
+      "-bad.example.com",
+      "",
+      "10.0.0.8"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "capability": "proxy.validate",
+  "description": "带鉴权的上游代理：名字与主机归一化，凭据成对；五个键永远都在",
+  "input": {
+    "name": "  CORP ",
+    "host": "Proxy.Corp.Example.NET.",
+    "port": 3128,
+    "user": "alice",
+    "password": "s3cret"
+  },
+  "expect": {
+    "ok": true,
+    "name": "corp",
+    "host": "proxy.corp.example.net",
+    "port": 3128,
+    "user": "alice",
+    "password": "s3cret"
+  }
+}

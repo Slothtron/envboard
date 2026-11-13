@@ -1,0 +1,75 @@
+[package]
+name = "envboard-desktop"
+description = "envboard 桌面形态：Tauri 壳。WebView 里的界面经 IPC 直调 AdminService 门面，不起任何监听端口。"
+# 这几个字段不写 `.workspace = true`：本 crate 自成一个 workspace（见下），继承不到
+# 仓库根的 [workspace.package]，取值与根保持一致但字面写死。
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.98"
+publish = false
+
+# 这个 crate **自成一个 workspace**（不并进仓库根那一个）。原因不是审美，是 QingJian 被咬过：
+#
+# `cargo tauri build` 会设 `STATIC_VCRUNTIME=true`，tauri-build 于是在自己的 OUT_DIR 里写一个
+# **故意空的** `msvcrt.lib` 并加一条 `/LIBPATH`——目的是让静态 CRT 生效（发布物不依赖 VC++
+# 可再发行包）。但 rustdoc 的**合并 doctest** 会把整个 workspace 各成员的链接参数并进同一次
+# 链接，那条 LIBPATH 就泄漏到核心 crate 的 doctest 上，空 `msvcrt.lib` 把真的盖掉——
+# **整仓 doctest 全部链接失败**，而且只在跑过 `tauri build` 之后才出现（顺序相关的坑）。
+#
+# 隔离之后：核心 workspace 的 `cargo test --locked --offline` 不受影响，桌面端也保住静态 CRT。
+# 代价：这条依赖树会被编译第二遍，且根 `cargo test` 不再覆盖本 crate——
+# 本 crate 的验收在自己的 tests/（命令级契约 + artifact + smoke）与 CDP 真机走查。
+[workspace]
+
+# 与仓库根的 release 档位保持一致（根 workspace 的 [profile] 管不到这里）。
+[profile.release]
+lto = "thin"
+strip = true
+
+[[bin]]
+name = "envboard"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+# 版本要与前端工程的 `@tauri-apps/api` 同一 minor —— Tauri CLI 在构建前会对一遍，
+# 不一致直接报错停构建（"Found version mismatched Tauri packages"）。
+tauri = { version = "2.12.2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# 流的节拍与取消通道（tauri::async_runtime 底层也是 tokio，版本对齐根 workspace）。
+tokio = { version = "1.53.1", features = ["time", "sync", "macros"] }
+# clap 只许出现在宿主二进制 crate：启动方式是宿主的事，不是门面的事。
+clap = { version = "4.6.6", features = ["derive"] }
+# 提权助手读 CA 的 PEM（ADR-010）；版本与引擎侧一致，lock 已有。
+rustls-pemfile = "2.2.0"
+
+# 跨 workspace 的 path 依赖：这些 crate 属于仓库根 workspace，它们自己的
+# `.workspace = true` 照旧按根 workspace 解析（cargo 按包所在位置找 workspace）。
+# 依赖方向与 ADR-002 一致：壳只认门面、词汇、组合根交付的公开操作面（CaControl），
+# 不认识引擎装配，也不直依 manager。
+envboard-admin = { path = "../../service/admin" }
+envboard-engine = { path = "../../core/engine" }
+envboard-events = { path = "../../core/events" }
+envboard-host = { path = "../../service/host" }
+envboard-protocol = { path = "../../core/protocol" }
+
+[dev-dependencies]
+envboard-engine-fake = { path = "../../core/engine-fake" }
+
+# 壳加固（ADR-009）：setup 里经 with_webview 拿 controller 改 WebView2 settings
+# （禁默认右键菜单/浏览器加速键）。**钉死与 tauri 内部同版**——controller()
+# 的返回类型来自 tauri 依赖树里的 webview2-com，版本不一致类型就对不上。
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.39.1"
+# Interface trait（.cast 拿 Settings3）；与 webview2-com-sys 同版保证类型同一。
+windows-core = "=0.62.2"
+# 二次启动激活（ADR-012）：命名内核事件 + 等待线程。只用 Foundation/Threading
+# 两个 feature；0.61 已在 tauri 依赖树里（lock 已含），不引入新版本。
+# WindowsAndMessaging 是窗口几何要用的 `IsZoomed`（tao 缓存的 `is_maximized`
+# 在最大化瞬间还来不及翻转，见 geometry 模块）。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

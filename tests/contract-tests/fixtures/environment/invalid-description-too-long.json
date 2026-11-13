@@ -1,0 +1,16 @@
+{
+  "capability": "environment.validate",
+  "description": "description 按字符计最长 200（此处 201 个字符）",
+  "input": {
+    "name": "prod",
+    "listen": {
+      "port": 16600
+    },
+    "description": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.description"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "capability": "insecure.hosts",
+  "description": "精确命中：归一化后的 SNI 与清单元素完全相等",
+  "input": {
+    "hosts": [
+      "app.example.com"
+    ],
+    "sni": "app.example.com"
+  },
+  "expect": {
+    "ok": true,
+    "match": true
+  }
+}

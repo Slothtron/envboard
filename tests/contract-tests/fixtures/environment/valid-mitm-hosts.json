@@ -1,0 +1,22 @@
+{
+  "capability": "environment.validate",
+  "description": "MITM 白名单与 insecure_hosts 同一套归一化（trim + 小写 + 去尾根点，去重排序），但语义相反：列出来的才解密",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "mitm_hosts": [
+      " App.Example.COM ",
+      "api.example.com",
+      "API.Example.com."
+    ]
+  },
+  "expect": {
+    "ok": true,
+    "mitm_hosts": [
+      "api.example.com",
+      "app.example.com"
+    ]
+  }
+}

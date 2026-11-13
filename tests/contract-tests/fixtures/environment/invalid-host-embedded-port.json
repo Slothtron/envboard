@@ -1,0 +1,6 @@
+{
+  "capability": "environment.validate",
+  "description": "listen.host 不接受 ip:port 写法（端口有独立字段）",
+  "input": { "name": "prod", "listen": { "host": "127.0.0.1:8080", "port": 16600 } },
+  "expect": { "ok": false, "code": "invalid_config", "field": "environment.listen.host" }
+}

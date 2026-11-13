@@ -1,0 +1,11 @@
+{
+  "capability": "instance.reconcile",
+  "description": "引擎在跑但期望是 stopped → 先停（清理遍）",
+  "input": {
+    "instances": [
+      { "env": "beta", "desired": "stopped", "live": true, "listen_port": 16301 }
+    ],
+    "occupied_by_others": []
+  },
+  "expect": { "ok": true, "actions": [["beta", "stop"]], "warnings": [] }
+}

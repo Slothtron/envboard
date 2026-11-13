@@ -1,0 +1,13 @@
+{
+  "capability": "port.allocate",
+  "description": "按候选顺序取第一个既未被占用、也不在已分配账本里的端口（随机性在候选生成侧，不进契约）",
+  "input": {
+    "existing": null,
+    "requested": null,
+    "candidates": [16005, 16001, 16200],
+    "taken": [16005, 16400],
+    "range": { "min": 16000, "max": 16999 },
+    "max_attempts": 32
+  },
+  "expect": { "ok": true, "port": 16001, "warnings": [] }
+}

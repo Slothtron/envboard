@@ -1,0 +1,332 @@
+/* ==========================================================================
+   envboard 工作台 · 全局样式（方向C · PHOSPHOR APPLIANCE 落地）
+   --------------------------------------------------------------------------
+   入口样式已含 @import "tailwindcss"; 与 @import "@heroui/styles"，此处不重复引入。
+   暗色靠 <html class="dark" data-theme="dark"> 切换，本文件不写任何 dark: 工具覆盖。
+   令牌区（:root / 暗色选择器）是唯一允许字面色值的地方（UI-1）；其余一律语义令牌。
+   自定义结构样式走 BEM 类（ph-* / wb-*），不在 JSX 内联写死 hex / px。
+   ========================================================================== */
+
+/* ------------------------- 令牌区 · 纸面终端（浅） ------------------------- */
+:root {
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+  --font-sans: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+  --default-font-family: var(--font-mono);
+
+  --background: #f2f4ec;
+  --foreground: #152a1b;
+  --surface: #fafbf5;
+  --surface-secondary: #e9eee0;
+  --surface-tertiary: #dfe6d2;
+  --overlay: #ffffff;
+  --muted: #48604e;
+  --default: #e4ead9;
+  --field-background: #ffffff;
+  --border: #d4dcc6;
+  --separator: #dde4cf;
+  --accent: #0e7a22;
+  --accent-foreground: #f6fbf2;
+  --success: #0e7a22;
+  --success-foreground: #f6fbf2;
+  --warning: #8a5a00;
+  --danger: #c22626;
+  --focus: #0e7a22;
+  --backdrop: rgba(30, 42, 32, 0.4);
+  --radius: 0.25rem;
+  --field-radius: 0.25rem;
+
+  /* 方向C 专属令牌 */
+  --ph-cyan: #0c7490;
+  --ph-accent-dim: color-mix(in srgb, var(--accent) 10%, transparent);
+  --ph-cyan-dim: color-mix(in srgb, var(--ph-cyan) 10%, transparent);
+  --ph-glow: 0 0 0 rgba(0, 0, 0, 0);
+  --ph-scanline: rgba(0, 0, 0, 0);
+  --ph-shadow: 0 10px 30px rgba(40, 56, 44, 0.18);
+  color-scheme: light;
+}
+
+/* ------------------------- 令牌区 · 磷光（深） ------------------------- */
+:root[data-theme="dark"],
+:root.dark {
+  --background: #0a0f0c;
+  --foreground: #d9ffe3;
+  --surface: #101711;
+  --surface-secondary: #16211a;
+  --surface-tertiary: #1b2a20;
+  --overlay: #182420;
+  --muted: #7fa88c;
+  --default: #1b2a20;
+  --field-background: #0d1410;
+  --border: #1e2a22;
+  --separator: #182420;
+  --accent: #4af626;
+  --accent-foreground: #08130a;
+  --success: #4af626;
+  --success-foreground: #08130a;
+  --warning: #fbbf24;
+  --danger: #ff5c5c;
+  --focus: #4af626;
+  --backdrop: rgba(3, 7, 5, 0.66);
+  --radius: 0.25rem;
+  --field-radius: 0.25rem;
+
+  --ph-cyan: #22d3ee;
+  --ph-accent-dim: color-mix(in srgb, var(--accent) 13%, transparent);
+  --ph-cyan-dim: color-mix(in srgb, var(--ph-cyan) 12%, transparent);
+  --ph-glow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
+  --ph-scanline: rgba(0, 0, 0, 0.16);
+  --ph-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+/* ------------------------- 基底氛围 ------------------------- */
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    font-variant-numeric: tabular-nums;
+    background: var(--background);
+    color: var(--foreground);
+  }
+  /* 磷光氛围底（双 radial，取自本方向 palette） */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(1100px 480px at 18% -8%, var(--ph-accent-dim), transparent 62%),
+      radial-gradient(900px 420px at 92% 108%, var(--ph-cyan-dim), transparent 60%);
+  }
+  /* 极淡 scanline：浅色 / reduced-motion 关闭 */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, var(--ph-scanline) 0 1px, transparent 1px 3px);
+    opacity: 0.16;
+  }
+  :root[data-theme="light"] body::after {
+    display: none;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-foreground);
+  }
+  /* 自定义滚动条（取自本方向 palette） */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) var(--surface);
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--surface);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border: 2px solid var(--surface);
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::after {
+      display: none;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001s !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001s !important;
+    }
+  }
+}
+
+@layer components {
+  /* 按钮四档中的「警示」：中断服务但可逆（停止 / 停止抓包） */
+  .btn-action--warn {
+    @apply border-warning/40 text-warning;
+  }
+
+  /* 按钮四档中的「危险」：不可逆破坏（删除 / 重置根证书），页面内用描边 */
+  .btn-action--danger {
+    @apply border-danger/40 text-danger;
+  }
+
+  /* 抓包详情抽屉内的请求 / 响应体等宽文本块 */
+  .wb-body-block {
+    @apply h-full rounded bg-surface-secondary p-2;
+  }
+
+  /* 右侧详情面板（非模态悬浮层）：默认隐藏，打开时从右滑入，不挤占列表宽度 */
+  .wb-detail-panel {
+    display: none;
+  }
+
+  .wb-detail-panel--open {
+    @apply flex min-h-0 flex-col border-l border-border bg-surface;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(clamp(420px, 36vw, 640px), calc(100% - 3rem));
+    z-index: 30;
+    box-shadow: var(--ph-shadow);
+    animation: wb-drawer-in 200ms ease-out;
+  }
+
+  .wb-detail-panel--env.wb-detail-panel--open {
+    width: min(clamp(520px, 48vw, 860px), calc(100% - 3rem));
+  }
+
+  @keyframes wb-drawer-in {
+    from {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .wb-kv-grid {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  }
+
+  .wb-header-row {
+    @apply grid grid-cols-1 gap-3 rounded p-2 font-mono text-sm;
+  }
+
+  @media (min-width: 640px) {
+    .wb-header-row {
+      grid-template-columns: 180px minmax(0, 1fr);
+    }
+  }
+
+  /* ---------------- 方向C 外壳：顶部横向导航 ---------------- */
+  .ph-nav {
+    @apply flex items-center gap-1 overflow-x-auto border-b border-border bg-surface px-3;
+    min-height: 42px;
+  }
+  .ph-navitem {
+    @apply relative flex-none gap-2 font-mono text-sm;
+  }
+  .ph-navitem--active {
+    @apply text-accent;
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .ph-navitem--active .ph-navcode {
+    color: var(--accent);
+  }
+  .ph-navcode {
+    @apply text-xs text-muted;
+  }
+  .ph-navbadge {
+    @apply ml-1 rounded px-1 font-mono text-xs;
+    background: var(--ph-accent-dim);
+    color: var(--accent);
+  }
+
+  /* LED 状态点（语义色 + 磷光 glow） */
+  .ph-led {
+    @apply inline-block size-2 flex-none rounded-full;
+  }
+  .ph-led--ok {
+    background: var(--success);
+    box-shadow: var(--ph-glow);
+  }
+  .ph-led--warn {
+    background: var(--warning);
+  }
+  .ph-led--err {
+    background: var(--danger);
+  }
+  .ph-led--idle {
+    background: var(--muted);
+  }
+  .ph-led--live {
+    animation: ph-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes ph-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* 底部状态栏（appliance statusbar） */
+  .ph-statusbar {
+    @apply flex items-center gap-3 overflow-x-auto border-t border-border bg-surface px-6 font-mono text-xs text-muted;
+    min-height: 32px;
+  }
+  .ph-statusbar b {
+    @apply font-semibold text-foreground;
+  }
+  .ph-warnchip {
+    @apply flex flex-none items-center gap-1 rounded border border-warning/40 px-2 py-0.5 text-warning;
+  }
+
+  /* 反馈区：外壳头下方右上，容器点击穿透 */
+  .ph-feedback {
+    @apply pointer-events-none fixed right-4 z-50 flex flex-col gap-2;
+    top: 108px;
+  }
+  .ph-feedback > * {
+    @apply pointer-events-auto;
+    box-shadow: var(--ph-shadow);
+  }
+
+  /* boot sequence（签名时刻；reduced-motion 由 base 层降为即时） */
+  .ph-boot {
+    @apply fixed inset-0 z-[3000] flex items-center justify-center bg-background;
+  }
+  .ph-boot pre {
+    @apply font-mono text-sm leading-relaxed text-foreground;
+  }
+  .ph-boot .ph-bootline {
+    opacity: 0;
+    animation: ph-bootline 0.3s ease-out forwards;
+  }
+  .ph-boot .ph-bootline:nth-child(1) { animation-delay: 0.02s; }
+  .ph-boot .ph-bootline:nth-child(2) { animation-delay: 0.12s; }
+  .ph-boot .ph-bootline:nth-child(3) { animation-delay: 0.22s; }
+  .ph-boot .ph-bootline:nth-child(4) { animation-delay: 0.32s; }
+  .ph-boot .ph-bootline:nth-child(5) { animation-delay: 0.42s; }
+  .ph-boot .ph-bootline:nth-child(6) { animation-delay: 0.52s; }
+  .ph-boot .ph-bootline:nth-child(7) { animation-delay: 0.62s; }
+  .ph-boot .ph-bootline:nth-child(8) { animation-delay: 0.72s; }
+  @keyframes ph-bootline {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .ph-bootok {
+    color: var(--success);
+  }
+  .ph-bootwarn {
+    color: var(--warning);
+  }
+  .ph-bootcyan {
+    color: var(--ph-cyan);
+  }
+}

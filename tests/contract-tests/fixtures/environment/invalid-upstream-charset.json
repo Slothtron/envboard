@@ -1,0 +1,14 @@
+{
+  "capability": "environment.validate",
+  "description": "upstream 名字白名单：分隔符与 .. 是路径不是名字（与 rules 名同规）",
+  "input": {
+    "name": "beta",
+    "listen": { "port": 16301 },
+    "upstream": "corp/../x"
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.upstream"
+  }
+}

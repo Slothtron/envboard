@@ -1,0 +1,20 @@
+{
+  "capability": "environment.merge",
+  "description": "显式 null = 清空绑定；「未提及」与「给了 null」必须区分开",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": { "port": 16600 },
+      "rules": "alpha",
+      "description": ""
+    },
+    "patch": { "rules": null }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gray",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "rules": null,
+    "description": ""
+  }
+}

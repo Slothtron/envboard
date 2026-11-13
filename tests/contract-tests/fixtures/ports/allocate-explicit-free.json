@@ -1,0 +1,13 @@
+{
+  "capability": "port.allocate",
+  "description": "显式指定且空闲：直接采用（显式指定允许落在区间外，因为它的用途就是人工固定）",
+  "input": {
+    "existing": null,
+    "requested": 16600,
+    "candidates": [],
+    "taken": [],
+    "range": { "min": 16000, "max": 16999 },
+    "max_attempts": 32
+  },
+  "expect": { "ok": true, "port": 16600, "warnings": [] }
+}

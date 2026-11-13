@@ -1,0 +1,20 @@
+{
+  "capability": "environment.merge",
+  "description": "upstream 绑定：未提及保持、显式 null 改直连、显式值整体替换",
+  "input": {
+    "base": {
+      "name": "gray",
+      "listen": { "port": 16600 },
+      "upstream": "corp",
+      "description": ""
+    },
+    "patch": { "upstream": "edge" }
+  },
+  "expect": {
+    "ok": true,
+    "name": "gray",
+    "listen": { "host": "127.0.0.1", "port": 16600 },
+    "upstream": "edge",
+    "description": ""
+  }
+}

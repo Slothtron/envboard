@@ -1,0 +1,18 @@
+{
+  "capability": "environment.validate",
+  "description": "MITM 白名单同样拒绝通配符：『只解密某些域名』必须逐条点名，否则 `*` 就等于把名单写回空",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "mitm_hosts": [
+      "*.example.com"
+    ]
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.mitm_hosts.0"
+  }
+}

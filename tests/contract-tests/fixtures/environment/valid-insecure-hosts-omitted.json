@@ -1,0 +1,14 @@
+{
+  "capability": "environment.validate",
+  "description": "没给 insecure_hosts = 空清单（全部严格校验），不是一个隐式的『全放行』",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    }
+  },
+  "expect": {
+    "ok": true,
+    "insecure_hosts": []
+  }
+}

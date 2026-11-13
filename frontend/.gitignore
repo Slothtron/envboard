@@ -1,0 +1,9 @@
+# 构建产物与依赖树一律不入库（与 target/ 同类，可随时再生）。
+# cargo build 经 crates/app/web/build.rs 自动跑 pnpm 产出 dist/ 再 include_dir!
+# 内嵌；缺 dist 时响亮失败。
+node_modules/
+.pnpm-store/
+dist/
+
+# vite 依赖预打包缓存（本地物，不入库）
+.vite/

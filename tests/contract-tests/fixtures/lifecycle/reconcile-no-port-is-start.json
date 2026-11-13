@@ -1,0 +1,11 @@
+{
+  "capability": "instance.reconcile",
+  "description": "没有可比较端口（listen_port 缺省）时不判冲突，照常 start——占用检测的前提是端口已知",
+  "input": {
+    "instances": [
+      { "env": "beta", "desired": "running", "live": false }
+    ],
+    "occupied_by_others": [16301]
+  },
+  "expect": { "ok": true, "actions": [["beta", "start"]], "warnings": [] }
+}

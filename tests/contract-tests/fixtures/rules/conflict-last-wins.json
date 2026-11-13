@@ -1,0 +1,23 @@
+{
+  "capability": "rules.parse",
+  "description": "同一 host 映射到不同 ip 时后出现者胜，并记进 conflicts",
+  "input": {
+    "text": "10.0.0.10 c.example.com\n10.0.0.11 c.example.com\n10.0.0.12 d.example.com\n10.0.0.12 d.example.com\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 2,
+    "ips": 2,
+    "entries": {
+      "c.example.com": "10.0.0.11",
+      "d.example.com": "10.0.0.12"
+    },
+    "conflicts": [
+      [
+        "c.example.com",
+        "10.0.0.10",
+        "10.0.0.11"
+      ]
+    ]
+  }
+}

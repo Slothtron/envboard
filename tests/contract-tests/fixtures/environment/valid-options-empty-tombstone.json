@@ -1,0 +1,17 @@
+{
+  "capability": "environment.validate",
+  "description": "options 墓碑：空对象被接受并忽略（旧版每个环境都写 options: {}），归一化输出里不再有它",
+  "input": {
+    "name": "beta",
+    "listen": {
+      "port": 16301
+    },
+    "options": {}
+  },
+  "expect": {
+    "ok": true,
+    "name": "beta",
+    "rules": null,
+    "insecure_hosts": []
+  }
+}

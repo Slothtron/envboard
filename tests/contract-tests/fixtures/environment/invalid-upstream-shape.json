@@ -1,0 +1,14 @@
+{
+  "capability": "environment.validate",
+  "description": "upstream 必须是字符串或 null，其它形状一律响亮失败",
+  "input": {
+    "name": "beta",
+    "listen": { "port": 16301 },
+    "upstream": 42
+  },
+  "expect": {
+    "ok": false,
+    "code": "invalid_config",
+    "field": "environment.upstream"
+  }
+}

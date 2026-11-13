@@ -1,0 +1,81 @@
+# envboard —— Rust workspace 根（界面在 frontend/，node/pnpm 只在那个边界内）。
+#
+# 分层即架构，crates/ 按依赖方向分三层，层内平铺：
+#   core/     领域内核：protocol、events（叶子词汇）+ engine（规则/领域/代理引擎）
+#             + engine-fake（引擎测试替身）
+#   service/  编排与组合根：manager（环境生命周期）→ admin（传输无关门面）
+#             → host（唯一组合根，引擎装配只住这里）
+#   app/      交付形态：desktop（Tauri 壳，IPC 直调门面；自成 workspace，见其 Cargo.toml）
+# 依赖方向单向：protocol/events ← engine ← manager ← admin ← host ← desktop。
+# tests/ 是纯测试 crate（contract-tests 消费 fixtures 的可执行契约）。
+#
+# 成员用 glob，层内加 crate 不需要改这里。
+[workspace]
+resolver = "3"
+members = ["crates/core/*", "crates/service/*", "crates/app/*", "tests/*"]
+# desktop 自成 workspace（tauri-build 静态 CRT 隔离，见其 Cargo.toml）——
+# members 的 glob 会扫到它，必须显式排除，否则「multiple workspace roots」。
+exclude = ["crates/app/desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.98"
+
+[workspace.dependencies]
+# 内部 crate：只写 path，避免版本漂移
+envboard-admin = { path = "crates/service/admin" }
+envboard-engine = { path = "crates/core/engine" }
+envboard-events = { path = "crates/core/events" }
+envboard-engine-fake = { path = "crates/core/engine-fake" }
+envboard-host = { path = "crates/service/host" }
+envboard-manager = { path = "crates/service/manager" }
+envboard-protocol = { path = "crates/core/protocol" }
+
+# 外部依赖：版本写在这里，成员一律 `workspace = true`。
+#
+# 两条纪律：
+#   1. `Cargo.lock` 必须入库，`cargo build --offline` 是验收项 —— 依赖要克制；
+#   2. **本仓只有一个可执行形态**：Tauri 桌面（`crates/app/desktop`，ADR-006）。
+#      界面在 `frontend/`（pnpm + HeroUI），数据面走 IPC 直调门面，不起监听端口。
+#      web 控制台（axum/HTTP/SSE）与 GPUI 桌面均已退场；desktop 自成 workspace
+#      （tauri-build 的静态 CRT 会毒化根工作区 doctest，见其 Cargo.toml 注释），
+#      故 tauri 系依赖不在本清单登记。
+async-trait = "0.1.92"
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# 成员可以再追加 features（如 envboard-engine 给 rustls 追加 ring/std）。
+# clap **只许出现在宿主二进制 crate**（envboard-desktop）：状态目录与端口区间
+# 是启动方式，不是界面设置（见 envboard-admin 门面文档「不在门面上的东西」）。
+clap = { version = "4.6.6", features = ["derive"] }
+
+# 引擎（envboard-engine）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
+# 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA
+# 用 ECDSA P-256，加载既有 RSA CA 不受影响）。
+# x509-parser 与 time 是 rcgen 的**同版本可选传递依赖**，被本仓直接 used 的两条：
+# 公钥配对校验要读证书 SPKI、证书有效期要设时间戳 —— 版本必须与 rcgen 内部一致。
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+# 上游严格档走平台校验器（ADR-008）：Windows Schannel 完整口径（用户+本机 ROOT、
+# AIA 补链、动态根）。rustls-native-certs 的 Windows 实现只读当前用户 ROOT，
+# 公共根多在本机 ROOT → 系统口径成功的域名报 UnknownIssuer，故换装。
+rustls-platform-verifier = "0.7.1"
+rustls-pemfile = "2.2.0"
+# x509-parser 不作直接依赖：证书结构的读取由 envboard-engine 的 der 模块自己做
+# （固定形状、可单测），它只是 rcgen 的可选传递依赖随 feature 进入。
+time = { version = "0.3", default-features = false, features = ["std"] }
+# 热更新单快照：数据面每请求 load_full，装配即整体换入，无文件通道、无轮询。
+arc-swap = "1.9.2"
+# 账本存储（ADR-007）：bundled 静态链接 sqlite，目标机不需要系统 sqlite；
+# 离线缓存已暖（rusqlite 0.40.2 / libsqlite3-sys 0.38.2 / cc）。
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[profile.release]
+# 单机工具，体积与启动速度优先于极致优化
+lto = "thin"
+strip = true

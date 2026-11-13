@@ -1,0 +1,11 @@
+{
+  "capability": "instance.reconcile",
+  "description": "期望 running 而引擎实例不在跑 → 拉起；无端口占用、无告警",
+  "input": {
+    "instances": [
+      { "env": "beta", "desired": "running", "live": false, "listen_port": 16301 }
+    ],
+    "occupied_by_others": []
+  },
+  "expect": { "ok": true, "actions": [["beta", "start"]], "warnings": [] }
+}

@@ -1,0 +1,17 @@
+{
+  "capability": "rules.parse",
+  "description": "反序写法 host… ip 与 ip host… 等价",
+  "input": {
+    "text": "beta.example.com 10.0.0.2\ngray.example.com canary.example.com 10.0.0.3\n"
+  },
+  "expect": {
+    "ok": true,
+    "accepted": 3,
+    "ips": 2,
+    "entries": {
+      "beta.example.com": "10.0.0.2",
+      "gray.example.com": "10.0.0.3",
+      "canary.example.com": "10.0.0.3"
+    }
+  }
+}

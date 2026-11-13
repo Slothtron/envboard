@@ -1,0 +1,39 @@
+# Rust（核心实现）。`target/` 永不提交（构建产物一律由构建生成）；
+# 而 `Cargo.lock` 必须入库 —— 它是可复现构建（`cargo build --locked`）的前提。
+target/
+
+# 本机状态（绝不应入库）
+.zvec-grep/
+.envboard-*.tmp
+envboard.json
+*.log
+
+# 本机工作材料：决策记录（ADR-*）、走查计划、验收截图等**故意不入库** ——
+# 仓库只留项目本身的文档（README.md / CHANGELOG.md / docs/ / rustdoc / examples 示例）。
+.agents/
+
+# 真实 hosts 映射：含内网 IP 与内部域名，只在本机当导入源用，不入库。
+# 仓库里保留的是脱敏示例 examples/hosts.sample.txt。
+/examples/hosts.txt
+/examples/*.rules
+
+# 测试 fixture 的假值 CA 必须入库（mitm.rs 消费）—— 全局 gitignore 的 *.pem
+# 会静默吞掉它们，这里显式豁免。
+!crates/core/engine/tests/fixtures/
+!crates/core/engine/tests/fixtures/**
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+
+# mise.toml 是仓库交付的一部分（本地开发环境：工具版本锁定 + 任务入口）：
+# 全局 gitignore 把它当本机配置忽略，这里显式豁免。
+!mise.toml
+# Tauri 壳的可再生 schema（tauri-build 产出）
+crates/app/desktop/gen/
+
+# 全局 gitignore（~/.gitignore）把 `.github/` 当本机配置忽略：
+# CI 工作流是仓库交付的一部分，这里解除（父目录 + 内容两行都要）。
+!.github/
+!.github/**

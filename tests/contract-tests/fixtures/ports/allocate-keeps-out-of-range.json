@@ -1,0 +1,13 @@
+{
+  "capability": "port.allocate",
+  "description": "区间缩小不迁移已分配的端口：保留原端口，只产出一条告警（端口变了等于让客户端配置失效）",
+  "input": {
+    "existing": 16301,
+    "requested": null,
+    "candidates": [16500, 16501],
+    "taken": [],
+    "range": { "min": 16500, "max": 16999 },
+    "max_attempts": 32
+  },
+  "expect": { "ok": true, "port": 16301, "warnings": ["out_of_range"] }
+}

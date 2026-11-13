@@ -1,0 +1,12 @@
+{
+  "capability": "environment.validate",
+  "description": "环境名先 trim 再整体小写化，然后按 ^[a-z][a-z0-9_-]{0,31}$ 校验",
+  "input": { "name": "  Beta-2  ", "listen": { "port": 16603 } },
+  "expect": {
+    "ok": true,
+    "name": "beta-2",
+    "listen": { "host": "127.0.0.1", "port": 16603 },
+    "rules": null,
+    "description": ""
+  }
+}
