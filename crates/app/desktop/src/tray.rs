@@ -60,14 +60,17 @@ pub fn install(app: &tauri::App, no_dialog: bool) -> bool {
 }
 
 fn build(app: &tauri::App, icon: Image<'_>) -> tauri::Result<TrayIcon<tauri::Wry>> {
+    // ADR-014：多个形态可以同时挂着托盘图标，tooltip / 菜单项要能一眼分清。
+    let profile = current_profile(app.handle());
     let open = MenuItem::with_id(app, "open", "打开工作台", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 envboard", true, None::<&str>)?;
+    let quit_label = profile.display_name("退出 envboard");
+    let quit = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &separator, &quit])?;
 
     TrayIconBuilder::with_id("envboard-tray")
         .icon(icon)
-        .tooltip("envboard 工作台")
+        .tooltip(profile.display_name("envboard 工作台"))
         .menu(&menu)
         // 左键 = 回前台，右键 = 菜单（tray-icon 的 Windows 默认两者都弹菜单）。
         .show_menu_on_left_click(false)
@@ -141,6 +144,14 @@ pub fn create_workbench(app: &AppHandle, first: bool) -> Result<WebviewWindow, S
 
     let builder =
         WebviewWindowBuilder::from_config(app, &config).map_err(|error| error.to_string())?;
+    // ADR-014：开发版 / 便携版 / 预览版带可读后缀，并把 WebView2 用户数据目录挪开
+    // （正式版共享同一个 `%LOCALAPPDATA%\<identifier>`，多份 profile 互相踩缓存）。
+    let profile = current_profile(app);
+    let builder = builder.title(profile.display_name(&config.title));
+    let builder = match profile.webview_data_dir(app) {
+        Some(dir) => builder.data_directory(dir),
+        None => builder,
+    };
     let builder = if first {
         builder
     } else {
@@ -197,6 +208,14 @@ fn reveal_eventually(
             reveal(&window);
         }
     });
+}
+
+/// 本进程已解析的形态身份（ADR-014）：`Shell` 在 setup 里先 manage，托盘与窗口
+/// 的创建都晚于它；兜底用正式版身份只是为了不 panic。
+fn current_profile(app: &AppHandle) -> crate::profile::Profile {
+    app.try_state::<Shell>()
+        .map(|shell| shell.profile.clone())
+        .unwrap_or_else(crate::profile::Profile::stable)
 }
 
 fn warn(app: &AppHandle, no_dialog: bool, message: &str) {

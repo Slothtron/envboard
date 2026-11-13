@@ -76,7 +76,8 @@
 ## 安装
 
 从 [Releases](https://github.com/Slothtron/envboard/releases) 下载 Windows 构建：
-`envboard.exe`（免安装）或 `*_x64-setup.exe`（NSIS，perMachine，需要一次 UAC）。目标机器只需要
+`envboard.exe`（免安装）、`envboard-portable.zip`（便携包，数据跟着目录走，可与安装版并存）
+或 `*_x64-setup.exe`（NSIS，perMachine，需要一次 UAC）。目标机器只需要
 WebView2（Windows 10/11 通常已带）。未签名，首次运行按 SmartScreen 提示「仍要运行」。
 
 从源码构建：
@@ -85,6 +86,13 @@ WebView2（Windows 10/11 通常已带）。未签名，首次运行按 SmartScre
 mise run dev                        # 开发：Tauri 壳 + vite HMR
 cd crates/app/desktop && cargo tauri build   # 发布产物 + NSIS 安装包
 ```
+
+开发构建与已安装的正式版**互不干扰**：debug 构建自动带 `dev` 标签——状态目录
+`%LOCALAPPDATA%\envboard-dev`、WebView2 profile `com.envboard.desktop-dev`、默认端口段
+`17000-17999`，窗口标题与托盘提示都带「（dev）」，两套可以同时开着。
+便携副本（exe 旁放 `envboard.portable`）与预览渠道（版本号 `X.Y.Z-preview.N`）同样是
+独立形态：各自的数据目录 / WebView2 profile / 端口段，都能与正式版并存。
+标签可用 `$ENVBOARD_PROFILE=<tag>` 覆盖（`release` / `none` = 恢复正式版身份）。
 
 前置工具链、三步入网、便携形态、启动参数与状态目录见 [使用](docs/usage.md)；
 发布链路与分发形态见 [构建与发布](docs/building.md)。

@@ -91,6 +91,13 @@ curl https://api.example.com/
 放一个**非空**的 `envboard.portable` 文本文件：数据落在 exe 旁边的 `envboard-data/`，
 整个目录可整体搬走，删目录 = 卸载；一个副本只能起一个实例。
 
+Releases 里的 `envboard-portable.zip`（预览渠道是 `envboard-preview-portable.zip`）就是
+这个形态：解压即用，exe 与标记已经放好。
+
+便携副本同时也是一种**独立形态**（`portable`）：WebView2 用户数据目录、窗口/托盘标题
+与默认端口段都和安装版分开，所以「装好的正式版 + 一个便携副本」可以同时开着互不影响。
+把多份 exe 各放一个目录、各带一个标记，就是多套互不干扰的环境（本地开发常用这个）。
+
 ## 工作台
 
 - **两视图**：环境、证书。环境列表列精简为 环境·状态·监听·规则·操作；顶栏聚合
@@ -134,7 +141,7 @@ curl https://api.example.com/
 | 旗标 | 默认 | 说明 |
 | --- | --- | --- |
 | `--state-dir <dir>` | 回退链（见下） | 状态目录 |
-| `--port-range <min-max>` | `16000-16999` | 新建环境的端口分配区间 |
+| `--port-range <min-max>` | `16000-16999`（便携 / 预览 / 开发形态 `17000-17999`） | 新建环境的端口分配区间 |
 | `--capture-budget <bytes>` | 256 MiB | 每环境抓包缓冲预算（0 = 引擎默认） |
 | `--log-dir <dir>` | `<state_dir>/logs` | 实例日志目录 |
 | `--no-log-file` | 关 | 日志只留内存环形缓冲 |
@@ -156,6 +163,34 @@ curl https://api.example.com/
 
 不放主目录根（`~/.envboard`）：Windows 明文禁止，macOS/Linux 也各有约定。读环境变量
 守两条纪律：**空串等同未设置**；**相对路径的 `$XDG_STATE_HOME` 视为无效并忽略**。
+
+### 正式版 / 便携版 / 预览版 / 开发版
+
+几个形态共用一套机器级资源很危险：状态目录里是账本、单实例锁与共享 CA，激活事件由
+state-dir 哈希而来，WebView2 用户数据目录由应用 identifier 决定——都按「正式版」定的话，
+换个形态启动就会撞锁、把正在用的正式版拉到前台、或者直接改动正式版的账本。
+
+所以每个进程先解析一个**形态标签**（ADR-014），优先级从高到低：
+
+1. `$ENVBOARD_PROFILE` —— 显式覆盖（`alice` → `envboard-alice`；`release` / `none` = 正式版身份）；
+2. **版本号预发布段** —— `0.2.0-preview.1` → `preview`（预览渠道的判据，跟着二进制走）；
+3. **便携标记** —— exe 同目录有 `envboard.portable` → `portable`；
+4. `debug` 构建 → `dev`；以上都没有 = 正式版。
+
+| | 正式版 | 便携版 | 预览版 | 开发版（debug） |
+| --- | --- | --- | --- | --- |
+| 触发 | 版本号无预发布段 | `envboard.portable` 标记 | 版本号 `-preview.N` | debug 构建 |
+| 状态目录（平台默认） | `%LOCALAPPDATA%\envboard` | `<exe 目录>\envboard-data` | `%LOCALAPPDATA%\envboard-preview` | `%LOCALAPPDATA%\envboard-dev` |
+| WebView2 用户数据目录 | `…\com.envboard.desktop` | `…\com.envboard.desktop-portable` | `…\com.envboard.desktop-preview` | `…\com.envboard.desktop-dev` |
+| 默认端口段 | `16000-16999` | `17000-17999` | `17000-17999` | `17000-17999` |
+| 窗口标题 / 托盘 | 原文 | 后缀「（portable）」 | 后缀「（preview）」 | 后缀「（dev）」 |
+
+单实例范围随状态目录走：同目录第二个实例只把已有窗口拉回前台（ADR-012），不同形态
+互不激活，可以同时运行。显式 `--state-dir` / `$ENVBOARD_STATE_DIR` 仍压过一切——临时
+指向别的目录不需要动标签。
+
+注意**系统信任库是共享的**：每个形态会物化自己的 CA，点「安装证书」装进的是同一份
+当前用户 ROOT 存储（多张证书可以并存，卸载按字节匹配，不会误删另一张）。
 
 ### 凭据与对外服务
 

@@ -13,6 +13,18 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 - **证书页移除下载与外部入口**：不再提供「下载根证书」与「在证书管理器中查看」；
   对应 IPC 命令（`ca_pem` / `save_text_as` / `open_cert_install_wizard` /
   `open_cert_manager`）与 `--machine-trust` 提权助手一并退场。
+- **正式版 / 便携版 / 预览版 / 开发版身份隔离**：进程按形态标签使用各自的状态目录、
+  WebView2 用户数据目录与默认端口段（非稳定形态统一 `17000-17999`），窗口标题与托盘
+  提示带「（portable）」「（preview）」「（dev）」，可与已安装的正式版同时运行。
+  标签优先级：`$ENVBOARD_PROFILE` → 版本号预发布段（`X.Y.Z-preview.N` → `preview`）→
+  便携标记（`envboard.portable` → `portable`）→ `debug` 构建 → 正式版；
+  `release` / `none` 显式恢复正式版身份。
+- **preview 分发渠道**：`vX.Y.Z-preview.N` 标签发布 prerelease，只出免安装的
+  `envboard-preview.exe`（不发 NSIS——perMachine 安装会覆盖正式版），数据落在
+  `%LOCALAPPDATA%\envboard-preview`。
+- **便携包随 Release 分发**：workflow 额外产出 `envboard-portable.zip`
+  （`envboard.exe` + `envboard.portable` 标记；preview 渠道为
+  `envboard-preview-portable.zip`），解压即用，数据落在解压目录的 `envboard-data\`。
 
 ## 0.1.0 — 2026-11-13
 

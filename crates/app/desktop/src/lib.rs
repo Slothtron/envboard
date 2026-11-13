@@ -22,11 +22,12 @@
 //! 窗口几何（位置 / 客户区大小 / 最大化）与主题同住 `ui.json`：启动与重建都会贴回
 //! 原样（`geometry`），屏外坐标只恢复尺寸。
 
-pub mod commands;
 mod activation;
+pub mod commands;
 mod geometry;
 pub mod ops;
 mod prefs;
+mod profile;
 pub mod stream;
 mod tray;
 
@@ -59,6 +60,9 @@ pub struct Shell {
     /// 最近一次「正常态」窗口几何（内存）：`Moved`/`Resized` 只更新它，
     /// 关窗/退出时才写 ui.json（见 `geometry`）。
     window_geometry: Mutex<Option<prefs::WindowGeometry>>,
+    /// 本进程的形态身份（正式版 / 便携 / 预览 / 开发，ADR-014）：托盘与窗口重建
+    /// 要按它决定标题、tooltip 与 WebView2 数据目录。
+    pub profile: profile::Profile,
 }
 
 impl Shell {
@@ -121,11 +125,17 @@ struct Cli {
 /// （`env!("CARGO_BIN_NAME")` 只在 bin 目标编译期可用，lib 里取不到）。
 pub fn run(app_dir_name: &str) -> std::process::ExitCode {
     let cli = Cli::parse();
-    let app_name = app_dir_name.to_owned();
+    // ADR-014：正式版 / 便携版 / 预览版 / 开发版用各自的状态目录、WebView2 数据目录
+    // 与端口段，否则换个形态启动就会撞上正在跑的正式版（锁 / 激活事件 / 账本）。
+    let profile = profile::Profile::current(app_dir_name);
+    let app_name = profile.app_dir_name(app_dir_name);
+    if let Some(tag) = profile.tag() {
+        eprintln!("envboard: {tag} 形态，数据目录与正式版隔离（{app_name}）");
+    }
 
     // ADR-012：同一 state-dir 的第二个实例只做激活 —— 在 Tauri 之前就能判定，
     // 不建窗口、不拿锁、不写状态。解析 state-dir 失败就照常启动（由 boot 报错）。
-    let waiter = match host_options(&cli, &app_name) {
+    let waiter = match host_options(&cli, &app_name, &profile) {
         Ok(options) => match activation::preflight(&options) {
             activation::Preflight::Activated => {
                 eprintln!("envboard: 已有实例在运行，已请求它回到前台");
@@ -141,7 +151,7 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let handle = app.handle().clone();
-            match boot(&handle, &cli, &app_name) {
+            match boot(&handle, &cli, &app_name, &profile) {
                 Ok(shell) => {
                     app.manage(shell);
                     // 托盘是后台运行的入口；创建失败只降级（关窗即退出），不挡启动。
@@ -334,8 +344,13 @@ fn harden_window(_window: &tauri::WebviewWindow) {}
 
 /// 启动编排：组合根入参 → prepare → 装配警告 → startup（reconcile + 日志照看）。
 /// 与退场的 server 宿主同序：先崩溃自愈，再让界面取数。
-fn boot(handle: &tauri::AppHandle, cli: &Cli, app_name: &str) -> Result<Shell, Error> {
-    let prepared: Prepared = prepare(host_options(cli, app_name)?)?;
+fn boot(
+    handle: &tauri::AppHandle,
+    cli: &Cli,
+    app_name: &str,
+    profile: &profile::Profile,
+) -> Result<Shell, Error> {
+    let prepared: Prepared = prepare(host_options(cli, app_name, profile)?)?;
     // 装配期的响亮警告（例如共享 CA 被重新物化：客户端要重装）——不能静默。
     if !prepared.warnings.is_empty() && !cli.no_dialog {
         handle
@@ -358,16 +373,24 @@ fn boot(handle: &tauri::AppHandle, cli: &Cli, app_name: &str) -> Result<Shell, E
         tray: Mutex::new(None),
         ui_prefs: prefs::UiPrefsStore::new(prepared.ui_prefs_file.clone()),
         window_geometry: Mutex::new(None),
+        profile: profile.clone(),
     })
 }
 
 /// CLI → 组合根入参。参数名与帮助文本属于界面形态，这里不掺任何领域判定。
-fn host_options(cli: &Cli, app_name: &str) -> Result<HostOptions, Error> {
+fn host_options(
+    cli: &Cli,
+    app_name: &str,
+    profile: &profile::Profile,
+) -> Result<HostOptions, Error> {
     Ok(HostOptions {
         state_dir: cli.state_dir.clone(),
         app_dir_name: Some(app_name.to_owned()),
         port_range: match &cli.port_range {
             Some(raw) => Some(parse_port_range(raw)?),
+            // 开发版 / 便携版 / 预览版换一段端口：否则两个形态从同一个 16000-16999
+            // 里挑，撞上正在跑的正式版环境就是启动失败（账本各自独立，分配不会互相避让）。
+            None if profile.is_non_stable() => Some(profile::NON_STABLE_PORT_RANGE),
             None => None,
         },
         capture_budget: cli.capture_budget,
@@ -396,7 +419,20 @@ fn parse_port_range(raw: &str) -> Result<(u16, u16), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_port_range;
+    use super::{Cli, host_options, parse_port_range};
+    use crate::profile::{NON_STABLE_PORT_RANGE, Profile};
+
+    fn cli() -> Cli {
+        Cli {
+            state_dir: None,
+            port_range: None,
+            capture_budget: 0,
+            log_dir: None,
+            no_log_file: false,
+            max_log_bytes: None,
+            no_dialog: true,
+        }
+    }
 
     #[test]
     fn port_range_accepts_the_documented_shape() {
@@ -411,5 +447,30 @@ mod tests {
             let error = parse_port_range(raw).expect_err("shape must be rejected");
             assert_eq!(error.field.as_deref(), Some("port_range"), "got {error:?}");
         }
+    }
+
+    #[test]
+    fn non_stable_profiles_default_to_a_disjoint_port_range() {
+        for tag in ["dev", "preview", "portable"] {
+            let profile = Profile::with_tag(Some(tag));
+            let options = host_options(&cli(), "envboard", &profile).expect("options");
+            assert_eq!(options.port_range, Some(NON_STABLE_PORT_RANGE), "tag={tag}");
+        }
+
+        // 正式版沿用引擎默认（`None` = ManagerConfig 自己推）。
+        let release = Profile::with_tag(None);
+        let options = host_options(&cli(), "envboard", &release).expect("options");
+        assert_eq!(options.port_range, None);
+    }
+
+    #[test]
+    fn explicit_port_range_wins_over_the_non_stable_default() {
+        let explicit = Cli {
+            port_range: Some("18000-18010".to_owned()),
+            ..cli()
+        };
+        let dev = Profile::with_tag(Some("dev"));
+        let options = host_options(&explicit, "envboard-dev", &dev).expect("options");
+        assert_eq!(options.port_range, Some((18_000, 18_010)));
     }
 }

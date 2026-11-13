@@ -1,7 +1,12 @@
 name: release
 
-# 首个公开版本只发 Windows x64：NSIS 安装包 + 免安装 exe。
-# 触发：推 `v*` 标签（正式发布）或手动 workflow_dispatch（只出构建产物，不建 Release）。
+# 两个渠道，同一个二进制来源：
+# - stable：`vX.Y.Z` 标签 → NSIS 安装包（perMachine，去 Program Files）+ 免安装 exe；
+# - preview：`vX.Y.Z-preview.N` 标签 → 只出免安装 exe（`envboard-preview.exe`），发
+#   prerelease。**不发 NSIS**：安装包会装到同一个 `C:\Program Files\envboard`，覆盖正式版。
+# 版本号里的预发布段就是渠道身份（ADR-014）：preview 二进制自带 `envboard-preview`
+# 数据目录，可与正式版同时运行。
+# 触发：推 `v*` 标签，或手动 workflow_dispatch（只出构建产物，不建 Release）。
 on:
   push:
     tags: ["v*"]
@@ -23,13 +28,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify tag matches workspace version
-        if: startsWith(github.ref, 'refs/tags/v')
+      # 版本号是唯一真源：tag、Cargo.toml、渠道（有无预发布段）都从它推。
+      - name: Resolve version and channel
+        id: version
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          test "v$version" = "${GITHUB_REF_NAME}" || {
-            echo "tag ${GITHUB_REF_NAME} != v$version（版本号与 tag 必须一致）" >&2
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "channel=preview" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test "v$VERSION" = "${GITHUB_REF_NAME}" || {
+            echo "tag ${GITHUB_REF_NAME} != v$VERSION（版本号与 tag 必须一致）" >&2
             exit 1
           }
 
@@ -64,28 +83,63 @@ jobs:
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend build
 
-      - name: Build (NSIS bundle)
+      - name: Build stable (NSIS bundle)
+        if: steps.version.outputs.channel == 'stable'
         working-directory: crates/app/desktop
         env:
           ENVBOARD_SKIP_FRONTEND_BUILD: "1"
         run: cargo tauri build --bundles nsis
 
+      # preview 只出裸 exe：NSIS 是 perMachine，装到同一个 Program Files\envboard，
+      # 会把用户装着的正式版覆盖掉。
+      - name: Build preview (portable exe only)
+        if: steps.version.outputs.channel == 'preview'
+        working-directory: crates/app/desktop
+        env:
+          ENVBOARD_SKIP_FRONTEND_BUILD: "1"
+        run: cargo tauri build --no-bundle
+
       - name: Collect artifacts
         shell: bash
+        env:
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           mkdir -p dist
-          cp crates/app/desktop/target/release/envboard.exe dist/
-          cp crates/app/desktop/target/release/bundle/nsis/*.exe dist/
+          if [[ "$CHANNEL" == "preview" ]]; then
+            cp crates/app/desktop/target/release/envboard.exe dist/envboard-preview.exe
+            exe=envboard-preview.exe
+            zip=envboard-preview-portable.zip
+          else
+            cp crates/app/desktop/target/release/envboard.exe dist/
+            cp crates/app/desktop/target/release/bundle/nsis/*.exe dist/
+            exe=envboard.exe
+            zip=envboard-portable.zip
+          fi
+
+          # 便携版不是另一种编译产物，而是「同一个 exe + 同目录的 envboard.portable
+          # 标记」：标记决定数据落在 exe 旁的 envboard-data，并把 WebView2 profile、
+          # 标题与端口段切成 portable 形态（ADR-014）。裸 exe 不带标记，保持正式版
+          # 身份（数据在 %LOCALAPPDATA%\envboard），所以便携形态必须单独打包。
+          mkdir -p dist/portable
+          cp "dist/$exe" dist/portable/
+          printf '%s\n' \
+            'envboard 便携标记（不要删除本文件）' \
+            '数据目录：本目录下的 envboard-data/' \
+            '删除本文件即回到该形态的平台默认目录；详见 docs/usage.md「便携形态」。' \
+            > dist/portable/envboard.portable
+          powershell -NoProfile -Command "Compress-Archive -Path dist/portable/* -DestinationPath dist/$zip -Force"
+          rm -rf dist/portable
           ls -lh dist
+          powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'dist/$zip')).Entries | ForEach-Object { \$_.FullName }"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: envboard-windows-x64
+          name: envboard-windows-x64-${{ steps.version.outputs.channel }}
           path: dist/*
           if-no-files-found: error
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish GitHub Release (stable)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.version.outputs.channel == 'stable'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -93,9 +147,33 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            Windows x64 构建（首个公开版本只支持 Windows）。
+            Windows x64 构建（只支持 Windows）。
 
-            - `envboard.exe`：免安装，双击即用（需要 WebView2，Windows 10/11 通常已带）。
-            - `*_x64-setup.exe`：NSIS 安装包（currentUser，免 UAC）。
+            - `envboard.exe`：单文件免安装，双击即用（需要 WebView2，Windows 10/11 通常已带）。
+              数据在 `%LOCALAPPDATA%\envboard`，与安装版共用 —— 要与已安装版本并存请用下面的便携包。
+            - `envboard-portable.zip`：便携包（`envboard.exe` + `envboard.portable` 标记），
+              解压即用，数据落在解压目录的 `envboard-data\`，可与正式版同时运行。
+            - `*_x64-setup.exe`：NSIS 安装包（perMachine，安装/卸载各一次 UAC），
+              装到 `C:\Program Files\envboard`；数据在 `%LOCALAPPDATA%\envboard`。
+
+            未签名：首次运行会撞 SmartScreen，点「更多信息 → 仍要运行」。
+
+      - name: Publish GitHub Release (preview)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.version.outputs.channel == 'preview'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            Windows x64 **预览版**（版本号带 `-preview.N`），可与正式版同时运行。
+
+            - `envboard-preview.exe`：单文件免安装，不写 Program Files，不覆盖正式版安装。
+            - `envboard-preview-portable.zip`：便携包（exe + `envboard.portable` 标记），
+              数据落在解压目录的 `envboard-data\`。
+            - 裸 exe 的数据与配置在 `%LOCALAPPDATA%\envboard-preview`，WebView2 profile 也在
+              独立目录；正式版的 `%LOCALAPPDATA%\envboard` 不受影响。
+            - 默认端口段 `17000-17999`（正式版 `16000-16999`），两套环境可以同时跑。
 
             未签名：首次运行会撞 SmartScreen，点「更多信息 → 仍要运行」。
