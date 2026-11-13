@@ -146,26 +146,6 @@ fn legacy_state_json_migrates_to_sqlite_on_boot() {
 }
 
 #[test]
-fn the_machine_trust_helper_rejects_a_bad_pem_without_touching_anything() {
-    // ADR-010 提权助手的参数面：坏/缺 PEM 必须响亮失败；
-    // 助手形态在 clap/Tauri 之前拦截，不得初始化工作台、也不得建 state-dir 锁。
-    let state = state_dir("helper");
-    let missing = state.join("nope.pem");
-    let output = Command::new(envboard())
-        .args(["--machine-trust", "uninstall", missing.to_str().unwrap()])
-        .output()
-        .expect("run the machine-trust helper");
-    assert!(!output.status.success(), "缺 PEM 必须非零退出");
-    assert!(!state.join("lock").exists(), "helper 不得初始化工作台/拿锁");
-    let text = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        text.contains("cannot read") || text.contains("no certificate"),
-        "stderr 要说明原因：{text}"
-    );
-    let _ = std::fs::remove_dir_all(&state);
-}
-
-#[test]
 fn a_second_instance_activates_the_running_workbench() {
     // ADR-012：同 state-dir 的第二个进程只做激活并退出 0 —— 它不拿锁、不写状态，
     // 所以「状态单写者」仍由第一个实例持有（第二个连 prepare 都没走到）。

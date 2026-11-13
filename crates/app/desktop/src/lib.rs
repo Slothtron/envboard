@@ -24,7 +24,6 @@
 
 pub mod commands;
 mod activation;
-mod elevate;
 mod geometry;
 pub mod ops;
 mod prefs;
@@ -121,11 +120,6 @@ struct Cli {
 /// 入口。`app_dir_name` 是产品身份，由二进制从自己的 `[[bin]] name` 取来传进
 /// （`env!("CARGO_BIN_NAME")` 只在 bin 目标编译期可用，lib 里取不到）。
 pub fn run(app_dir_name: &str) -> std::process::ExitCode {
-    // ADR-010：提权助手形态在 clap/Tauri 之前拦截 —— 提权子进程不初始化 webview、
-    // 不拿实例锁，只做一次本机 ROOT 卸载然后退出。
-    if let Some(code) = elevate::try_run_helper(std::env::args_os()) {
-        return code;
-    }
     let cli = Cli::parse();
     let app_name = app_dir_name.to_owned();
 
@@ -205,11 +199,8 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
             commands::ui_prefs_get,
             commands::ui_prefs_set,
             commands::ca_overview,
-            commands::ca_pem,
+            commands::ca_install_cert,
             commands::ca_uninstall_cert,
-            commands::open_cert_install_wizard,
-            commands::save_text_as,
-            commands::open_cert_manager,
             commands::env_list,
             commands::env_get,
             commands::env_create,

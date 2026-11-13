@@ -413,23 +413,6 @@ fn ca_is_unavailable_with_a_fake_engine() {
     assert_eq!(error.code.as_str(), "not_found");
     let error = h.err(ops::ca_uninstall_cert(h.prepared.ca.as_ref()));
     assert_eq!(error.code.as_str(), "not_found");
-    let error = ops::open_cert_install_wizard(h.prepared.ca.as_ref())
-        .expect_err("无 CA 时向导入口必须响亮失败");
+    let error = h.err(ops::ca_install_cert(h.prepared.ca.as_ref()));
     assert_eq!(error.code.as_str(), "not_found");
-}
-
-#[test]
-fn save_as_pure_core_writes_text_without_touching_system_stores() {
-    // 另存为的对话框在命令层；纯核只负责写盘 —— 自动化不写真系统信任库。
-    let h = Harness::new("saveas");
-    let path = h._dir.join("nested").join("saved.pem");
-    ops::write_text(
-        &path,
-        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
-    )
-    .expect("write_text 必须建父目录并落盘");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
-    );
 }

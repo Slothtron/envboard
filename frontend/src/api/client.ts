@@ -42,7 +42,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   }
 }
 
-/** 文本落盘（CA PEM / HAR / JSONL 导出）：blob + a[download]，WebView2 原生支持。 */
+/** 文本落盘（HAR / JSONL 导出）：blob + a[download]，WebView2 原生支持。 */
 export function downloadText(filename: string, text: string, mime: string): void {
   const url = URL.createObjectURL(new Blob([text], { type: mime }));
   const anchor = document.createElement("a");
@@ -69,18 +69,11 @@ export const api = {
   /* ---------------- CA 操作面（证书页） ---------------- */
 
   ca: () => call<CaOverview>("ca_overview"),
-  caPem: () => call<string>("ca_pem"),
-  /** 卸载（ADR-010）：当前用户直删；本机存储里有则拉起提权助手。 */
+  /** 直接安装到当前用户 ROOT 存储（免管理员、幂等）。 */
+  caInstallCert: () => call<{ ok: boolean }>("ca_install_cert"),
+  /** 卸载：只处理当前用户 ROOT 存储；计算机存储里的旧证书只提示、不代删。 */
   caUninstallCert: () =>
-    call<{ ok: boolean; removed_user: boolean; removed_machine: boolean; warning?: string | null }>(
-      "ca_uninstall_cert",
-    ),
-  /** 打开系统证书安装向导（装到哪一层由用户在向导里选）。 */
-  openCertInstallWizard: () => call<void>("open_cert_install_wizard"),
-  /** 原生另存为对话框；用户取消回 null。 */
-  saveTextAs: (defaultName: string, text: string) =>
-    call<string | null>("save_text_as", { defaultName, text }),
-  openCertManager: () => call<void>("open_cert_manager"),
+    call<{ ok: boolean; removed: boolean; warning?: string | null }>("ca_uninstall_cert"),
 
   envList: () => call<EnvView[]>("env_list"),
   envGet: (name: string) => call<EnvView>("env_get", { name }),

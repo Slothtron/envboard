@@ -83,105 +83,36 @@ pub fn ca_overview(ca: Option<&CaControl>) -> OpsResult {
     }))
 }
 
-/// 根证书 PEM 文本（只含证书，不含私钥）。前端经原生另存为落盘（ADR-008）。
-pub fn ca_pem(ca: Option<&CaControl>) -> Result<String, Error> {
+/// 把当前 CA 直接安装进**当前用户** ROOT 存储（免管理员、幂等）。
+///
+/// 不再走系统证书导入向导：位置固定为当前用户，用户不需要在向导里做选择。
+pub fn ca_install_cert(ca: Option<&CaControl>) -> OpsResult {
     let control = ca.ok_or_else(ca_unavailable)?;
-    Ok(String::from_utf8_lossy(&control.pem()).into_owned())
+    control.install_trust()?;
+    Ok(json!({"ok": true}))
 }
 
-/// 打开系统证书安装向导（ADR-010）：导出当前 CA 的 DER 到
-/// `<confdir>/envboard-ca-cert.cer`，再交给 Windows 的证书导入向导。
-/// 装到「当前用户」还是「计算机」由用户在向导里选，本进程不请求管理员
-/// （选计算机时由系统自己要 UAC）。
-pub fn open_cert_install_wizard(ca: Option<&CaControl>) -> Result<(), Error> {
-    let control = ca.ok_or_else(ca_unavailable)?;
-    if !cfg!(windows) {
-        return Err(Error::new(
-            ErrorCode::StoreFailure,
-            "the certificate install wizard is available on Windows only",
-        ));
-    }
-    let cer = control.cert_path().with_extension("cer");
-    std::fs::write(&cer, control.cert_der()).map_err(|error| Error::io_at("write", &cer, error))?;
-    let cer = cer.to_string_lossy().into_owned();
-    std::process::Command::new("rundll32.exe")
-        .args(["cryptext.dll,CryptExtOpenCER", &cer])
-        .spawn()
-        .map_err(|error| {
-            Error::internal_error(format!("cannot open the certificate install wizard: {error}"))
-        })?;
-    Ok(())
-}
-
-/// 卸载证书（ADR-010）：当前用户那份直接删；探测到**本机 ROOT 也有**时，
-/// 拉起提权助手删除。UAC 取消/超时是「用户取消」而不是错误 ——
-/// 回 `{ok, removed_user, removed_machine, warning?}`。
+/// 卸载证书：只处理**当前用户** ROOT 存储（免管理员、幂等）。
+///
+/// 计算机存储里的旧证书不在本版本的处理范围 —— 仍会探测并提示，
+/// 但不拉起提权助手，也不假装已经清空。
 pub fn ca_uninstall_cert(ca: Option<&CaControl>) -> OpsResult {
     let control = ca.ok_or_else(ca_unavailable)?;
     let trust = control.trust();
-    let removed_user = if trust.current_user == StorePresence::Installed {
+    let removed = if trust.current_user == StorePresence::Installed {
         control.uninstall_trust()?
     } else {
         false
     };
-    let mut removed_machine = false;
-    let mut warning = None;
-    if trust.machine == StorePresence::Installed {
-        match crate::elevate::run_elevated_uninstall(&control.cert_path()) {
-            Ok(()) => {
-                removed_machine = wait_machine_missing(control);
-                if !removed_machine {
-                    warning = Some(
-                        "当前用户已处理；计算机根未卸载（UAC 被取消或系统确认未完成）".to_string(),
-                    );
-                }
-            }
-            Err(error) => {
-                warning = Some(format!("当前用户已处理；计算机根未卸载：{}", error.message));
-            }
-        }
-    }
+    let warning = (trust.machine == StorePresence::Installed).then(|| {
+        "计算机存储里仍有一份旧证书；本版本只管理当前用户存储，需要时请在系统证书管理器中手动移除"
+            .to_string()
+    });
     Ok(json!({
         "ok": true,
-        "removed_user": removed_user,
-        "removed_machine": removed_machine,
+        "removed": removed,
         "warning": warning,
     }))
-}
-
-/// 提权助手是异步的：轮询探测直到本机存储里没有这张证书（最多 60 秒）。
-fn wait_machine_missing(control: &CaControl) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while std::time::Instant::now() < deadline {
-        if control.trust().machine != StorePresence::Installed {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-    }
-    false
-}
-
-/// 另存为的**纯核**：写文本到指定路径（对话框在命令层，这里可脱 webview 直测）。
-pub fn write_text(path: &std::path::Path, text: &str) -> Result<(), Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| Error::io_at("create", parent, error))?;
-    }
-    std::fs::write(path, text).map_err(|error| Error::io_at("write", path, error))
-}
-
-/// 打开系统证书管理器（当前用户存储视图）。best-effort _spawn，失败回信封。
-pub fn open_cert_manager() -> Result<(), Error> {
-    if !cfg!(windows) {
-        return Err(Error::new(
-            envboard_engine::ErrorCode::StoreFailure,
-            "the system certificate manager is available on Windows only",
-        ));
-    }
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", "certmgr.msc"])
-        .spawn()
-        .map_err(|error| Error::internal_error(format!("cannot open certmgr.msc: {error}")))?;
-    Ok(())
 }
 
 /* ---------------- 环境生命周期 ---------------- */

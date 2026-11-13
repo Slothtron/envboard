@@ -5,8 +5,8 @@
 //! * 材料的生成与解析在 `envboard_engine::ca`（路径规则也只有那一份）；
 //! * 本模块只把它们接起来，并且**保证旋转对正在跑的实例立即生效**
 //!   （`CaStore` 是引擎按连接读取的当前值，换入即生效，不需要重启环境）；
-//! * 系统信任库在 [`crate::trust_store`]：探测只读；**安装走系统证书向导**
-//!   （位置由用户选），**卸载优先当前用户直删、本机存储经提权助手**（ADR-010）。
+//! * 系统信任库在 [`crate::trust_store`]：探测只读；**安装/卸载只写当前用户存储**
+//!   （免管理员、可逆）。计算机存储里的旧证书只探测、不代删。
 //!
 //! 界面形态通过 [`crate::Prepared::ca`] 拿到本模块；它**不含私钥**——CA 私钥只在
 //! 引擎进程内存与状态目录的 `envboard-ca.pem` 里。
@@ -93,8 +93,8 @@ impl CaControl {
         trust_store::probe(self.store.current().ca_cert_der())
     }
 
-    /// 把当前 CA 安装进**当前用户** ROOT 存储（ADR-007；安装入口已改为系统向导，
-    /// 本方法保留为宿主能力，界面不再直接调用）。
+    /// 把当前 CA 安装进**当前用户** ROOT 存储（工作台「安装证书」直接调用；
+    /// 免管理员、幂等）。
     pub fn install_trust(&self) -> Result<(), Error> {
         trust_store::install(self.store.current().ca_cert_der())
     }

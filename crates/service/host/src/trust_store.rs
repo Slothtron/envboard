@@ -61,7 +61,7 @@ pub fn probe(cert_der: &[u8]) -> TrustProbe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // 非 Windows 构建里两个变体都不被读取。
 pub enum StoreScope {
-    /// 当前用户 ROOT：免提权。安装入口已改为系统证书向导，写入函数只作宿主能力保留。
+    /// 当前用户 ROOT：免提权。工作台的安装/卸载都只作用于这一层。
     CurrentUser,
     /// 本机 ROOT：写需要管理员，只允许提权助手调用。
     LocalMachine,
@@ -69,7 +69,7 @@ pub enum StoreScope {
 
 /// 把 `cert_der` 安装进**当前用户** ROOT 存储（幂等：已存在则替换为同一张）。
 ///
-/// 安装入口是系统证书导入向导（ADR-010）；本函数保留为宿主能力，界面不再直接调用。
+/// 工作台「安装证书」直接调用本函数（免管理员，不走向导）。
 pub fn install(cert_der: &[u8]) -> Result<(), envboard_engine::Error> {
     imp::install(StoreScope::CurrentUser, cert_der)
 }

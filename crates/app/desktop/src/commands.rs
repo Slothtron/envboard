@@ -63,13 +63,16 @@ pub fn ca_overview(shell: State<'_, Shell>) -> CmdResult {
     ops::ca_overview(shell.ca.as_ref()).map_err(Into::into)
 }
 
+/// 安装到当前用户 ROOT 存储（crypt32 写入是阻塞调用）→ spawn_blocking，别占主线程。
 #[tauri::command]
-pub fn ca_pem(shell: State<'_, Shell>) -> Result<String, CmdError> {
-    ops::ca_pem(shell.ca.as_ref()).map_err(Into::into)
+pub async fn ca_install_cert(shell: State<'_, Shell>) -> CmdResult {
+    let ca = shell.ca.clone();
+    tauri::async_runtime::spawn_blocking(move || ops::ca_install_cert(ca.as_ref()))
+        .await
+        .map_err(join_error)?
+        .map_err(Into::into)
 }
 
-/// 卸载可能拉起提权助手（本机 ROOT，UAC + 系统确认期间 ShellExecute 阻塞）→
-/// 与旧的信任写入一样 spawn_blocking，别占主线程。
 #[tauri::command]
 pub async fn ca_uninstall_cert(shell: State<'_, Shell>) -> CmdResult {
     let ca = shell.ca.clone();
@@ -79,47 +82,12 @@ pub async fn ca_uninstall_cert(shell: State<'_, Shell>) -> CmdResult {
         .map_err(Into::into)
 }
 
-/// 打开系统证书安装向导（原生窗口，立即返回；装到哪一层由用户在向导里选）。
-#[tauri::command]
-pub fn open_cert_install_wizard(shell: State<'_, Shell>) -> Result<(), CmdError> {
-    ops::open_cert_install_wizard(shell.ca.as_ref()).map_err(Into::into)
-}
-
 fn join_error(error: impl std::fmt::Display) -> CmdError {
     envboard_engine::Error::new(
         envboard_engine::ErrorCode::InternalError,
         format!("trust store task failed: {error}"),
     )
     .into()
-}
-
-/// 另存为：原生保存对话框选路径 → 纯核写盘。用户取消 = Ok(None)。
-#[tauri::command]
-pub fn save_text_as(
-    app: tauri::AppHandle,
-    default_name: String,
-    text: String,
-) -> Result<Option<String>, CmdError> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = app
-        .dialog()
-        .file()
-        .set_file_name(&default_name)
-        .add_filter("证书 / 文本", &["pem", "crt", "key", "txt", "har", "jsonl"])
-        .blocking_save_file();
-    let Some(file) = picked else {
-        return Ok(None);
-    };
-    let path = file.into_path().map_err(|error| {
-        CmdError::from(envboard_engine::Error::internal_error(error.to_string()))
-    })?;
-    ops::write_text(&path, &text)?;
-    Ok(Some(path.display().to_string()))
-}
-
-#[tauri::command]
-pub fn open_cert_manager() -> Result<(), CmdError> {
-    ops::open_cert_manager().map_err(Into::into)
 }
 
 /* ---------------- 环境生命周期 ---------------- */

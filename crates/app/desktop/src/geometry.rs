@@ -167,7 +167,7 @@ fn monitor_rects(window: &WebviewWindow) -> Vec<MonitorRect> {
                 .filter_map(|monitor| {
                     let position = monitor.position();
                     let size = monitor.size();
-                    (size.width > 0 && size.height > 0).then(|| MonitorRect {
+                    (size.width > 0 && size.height > 0).then_some(MonitorRect {
                         x: position.x as f64,
                         y: position.y as f64,
                         width: size.width as f64,

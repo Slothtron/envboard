@@ -4,6 +4,16 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## Unreleased
+
+- **证书安装/卸载改为直接写当前用户存储**：证书页的「安装证书」不再打开系统证书导入
+  向导，也不再让用户选当前用户/计算机——直接写当前用户 ROOT 存储（免管理员、幂等、
+  可逆）；卸载只处理当前用户存储，检测到计算机存储里还有旧证书时只提示、不再拉起
+  提权助手。
+- **证书页移除下载与外部入口**：不再提供「下载根证书」与「在证书管理器中查看」；
+  对应 IPC 命令（`ca_pem` / `save_text_as` / `open_cert_install_wizard` /
+  `open_cert_manager`）与 `--machine-trust` 提权助手一并退场。
+
 ## 0.1.0 — 2026-11-13
 
 首个公开版本：Windows 桌面应用（Tauri 2 壳 + 进程内代理引擎），单颗 `envboard.exe`；
