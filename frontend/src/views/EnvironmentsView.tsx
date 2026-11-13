@@ -310,7 +310,12 @@ export function EnvironmentsView({
                         <Table.Column className="text-end">操作</Table.Column>
                       </Table.Header>
                       <Table.Body
-                        items={visible}
+                        // react-aria 的 useCachedChildren 用 `rendered.props.id ?? item.key ?? item.id`
+                        // 派生集合 key，取不到就退化成数组索引——头部插入一行会让全部 key 位移，
+                        // React 按索引复用 <tr>，Table.Row 的 setProps 收到变化的 id 直接抛
+                        // "Cannot change the id of an item" 白屏。给 item 稳定 id（= 环境名），
+                        // 顺带让 selectedKeys 按名字真正匹配上（原先索引 key 下高亮是失配的）。
+                        items={visible.map((env) => ({ ...env, id: env.name }))}
                         renderEmptyState={() => (
                           <EmptyState
                             title="没有匹配的环境"
@@ -343,6 +348,7 @@ export function EnvironmentsView({
                       >
                         {(env) => (
                           <EnvRow
+                            key={env.name}
                             env={env}
                             onDelete={onDelete}
                             onOpenCapture={(e) => {

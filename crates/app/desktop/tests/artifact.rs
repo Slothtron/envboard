@@ -223,6 +223,12 @@ fn the_shipped_binary_carries_engine_and_embedded_frontend() {
         problems
             .push("dist js 仍带着 watch_trajectory 接线 —— 前端轨迹流绑定没有删干净".to_string());
     }
+    // mock 传输（dev-tools）只在 VITE_TRANSPORT=mock 的 dev server 里经 alias 引入；
+    // 发布产物里出现标记 = shim 漏进了生产构建（假引擎接管真 IPC 是最坏漂移）。
+    if js_bundle.contains("__envboardMock") {
+        problems
+            .push("dist js 带着 __envboardMock 标记 —— mock 传输 shim 漏进了发布构建".to_string());
+    }
 
     // boot 自检屏只属于「进程的首次窗口」（ADR-012）：壳注入端与前端读取端必须
     // 成对存在 —— 只丢一边的坏法都是静默的（重建窗重播 1s 动画，或标记没人消费）。

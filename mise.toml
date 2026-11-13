@@ -96,9 +96,18 @@ description = "前端依赖安装（frozen lockfile，吃暖 store）"
 run = "pnpm -C frontend install --frozen-lockfile --prefer-offline"
 
 [tasks.verify-frontend]
-description = "前端层：install + build（cargo build 也会经 build.rs 自动跑）"
-depends = ["frontend-install"]
+description = "前端层：install + parity + build（cargo build 也会经 build.rs 自动跑）"
+depends = ["frontend-install", "verify-parity"]
 run = "pnpm -C frontend build"
+
+[tasks.verify-parity]
+description = "mock 命令面与壳 generate_handler! 逐条对齐（dev-tools 防漂移闸）"
+run = "node frontend/dev-tools/check-parity.mjs"
+
+[tasks.mock-dev]
+description = "前端单独验收：mock 传输 + Vite dev server（不起 Tauri 壳，见 .agents/docs/dev-tools-mock-transport.md）"
+env = { VITE_TRANSPORT = "mock" }
+run = "pnpm -C frontend dev"
 
 [tasks.live-manager]
 description = "实机：引擎管理器（真 openssl/curl、真端口）"
