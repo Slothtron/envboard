@@ -16,7 +16,7 @@
 //! 用户看到的就是「白窗出现在默认位置、随即跳到上次的位置」。
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -29,6 +29,15 @@ use crate::Shell;
 
 /// 主窗口 label（tauri.conf.json / capabilities 都是这个值，不许另起）。
 pub const MAIN_LABEL: &str = "main";
+
+/// `open_workbench` 去抖窗口（基建 P0）：连点托盘 / 激活风暴只放行一次。
+/// 取 400ms —— 比双击间隔长，比「用户觉得没反应又点一次」的耐心短。
+const OPEN_DEBOUNCE: Duration = Duration::from_millis(400);
+
+/// 去抖判定（纯函数）：上次放行距今不足 `interval` 就拒绝。
+fn debounce_allows(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last.is_none_or(|previous| now.duration_since(previous) >= interval)
+}
 
 /// 创建托盘并挂到 `Shell`。返回是否就绪（false = 已降级为「关窗即退出」）。
 pub fn install(app: &tauri::App, no_dialog: bool) -> bool {
@@ -93,7 +102,24 @@ fn build(app: &tauri::App, icon: Image<'_>) -> tauri::Result<TrayIcon<tauri::Wry
 }
 
 /// 回前台：窗口在就恢复，不在就按 config 重建。
+///
+/// 收口（基建 P0）：退出中短路；400ms 去抖吸收连点；有窗口正在创建时不重复
+/// 发起（`create_workbench` 里还有 CAS 兜底）。
 pub fn open_workbench(app: &AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    if shell.is_exiting.load(Ordering::Relaxed) {
+        return;
+    }
+    {
+        let mut last = shell.last_open.lock().unwrap();
+        let now = Instant::now();
+        if !debounce_allows(*last, now, OPEN_DEBOUNCE) {
+            return;
+        }
+        *last = Some(now);
+    }
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         // 还不可见 = 正在等首帧（`reveal` 会自己露面）：这时候别抢着 show，
         // 否则又会出现一块白底空窗。
@@ -102,6 +128,9 @@ pub fn open_workbench(app: &AppHandle) {
             let _ = window.show();
             let _ = window.set_focus();
         }
+        return;
+    }
+    if shell.creating.load(Ordering::Acquire) {
         return;
     }
 
@@ -127,6 +156,24 @@ pub fn open_workbench(app: &AppHandle) {
 /// `build()` 返回后才贴 —— 用户看到的是一块白底空窗出现在默认位置、再跳到上次的
 /// 位置。`first` 区分「进程的第一个窗口」：只有它播 boot 自检屏。
 pub fn create_workbench(app: &AppHandle, first: bool) -> Result<WebviewWindow, String> {
+    // CAS 守卫（基建 P0）：托盘连点与二次启动激活可能同时发起重建，
+    // 同 label 建两个窗口必然撞一个 —— 后到的直接让位。
+    if let Some(shell) = app.try_state::<Shell>() {
+        if shell.is_exiting.load(Ordering::Relaxed) {
+            return Err("应用正在退出，不再创建窗口".to_owned());
+        }
+        if shell.creating.swap(true, Ordering::AcqRel) {
+            return Err("已有窗口正在创建".to_owned());
+        }
+    }
+    let result = build_workbench(app, first);
+    if let Some(shell) = app.try_state::<Shell>() {
+        shell.creating.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn build_workbench(app: &AppHandle, first: bool) -> Result<WebviewWindow, String> {
     let config = app
         .config()
         .app
@@ -226,5 +273,39 @@ fn warn(app: &AppHandle, no_dialog: bool, message: &str) {
             .title("envboard 托盘不可用")
             .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
             .blocking_show();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debounce_absorbs_bursts_but_not_deliberate_retries() {
+        let start = Instant::now();
+        // 首次请求（没有上次放行时刻）必过。
+        assert!(debounce_allows(None, start, OPEN_DEBOUNCE));
+        // 连点：400ms 内的第二次、第三次都拒。
+        assert!(!debounce_allows(
+            Some(start),
+            start + Duration::from_millis(1),
+            OPEN_DEBOUNCE
+        ));
+        assert!(!debounce_allows(
+            Some(start),
+            start + Duration::from_millis(399),
+            OPEN_DEBOUNCE
+        ));
+        // 边界与之后：用户等了一会儿再点，放行。
+        assert!(debounce_allows(
+            Some(start),
+            start + OPEN_DEBOUNCE,
+            OPEN_DEBOUNCE
+        ));
+        assert!(debounce_allows(
+            Some(start),
+            start + Duration::from_secs(2),
+            OPEN_DEBOUNCE
+        ));
     }
 }

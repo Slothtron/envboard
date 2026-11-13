@@ -146,6 +146,34 @@ fn legacy_state_json_migrates_to_sqlite_on_boot() {
 }
 
 #[test]
+fn startup_log_records_the_boot_stages_and_readiness() {
+    // 基建 P0：windows 子系统没有控制台，启动过程必须落盘留痕 ——
+    // 会话头 + 两个装配阶段 + ready 都要在，崩溃时用户才有东西可交。
+    let state = state_dir("startuplog");
+    let wb = spawn(&state, &[]);
+    let log = state.join("logs").join("startup.log");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let ready = loop {
+        if std::fs::read_to_string(&log).is_ok_and(|text| text.contains("ready")) {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(ready, "startup.log 应记到 ready 阶段：{}", log.display());
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("stage: boot"), "缺 boot 阶段：{text}");
+    assert!(
+        text.contains("stage: tray+window"),
+        "缺 tray+window 阶段：{text}"
+    );
+    drop(wb);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
 fn a_second_instance_activates_the_running_workbench() {
     // ADR-012：同 state-dir 的第二个进程只做激活并退出 0 —— 它不拿锁、不写状态，
     // 所以「状态单写者」仍由第一个实例持有（第二个连 prepare 都没走到）。

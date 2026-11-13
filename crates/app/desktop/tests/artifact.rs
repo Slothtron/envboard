@@ -217,14 +217,11 @@ fn the_shipped_binary_carries_engine_and_embedded_frontend() {
         }
     }
     if lib_rs.contains("watch_trajectory") {
-        problems.push(
-            "lib.rs 仍注册了 watch_trajectory —— 轨迹流已随 ADR-012 退场".to_string(),
-        );
+        problems.push("lib.rs 仍注册了 watch_trajectory —— 轨迹流已随 ADR-012 退场".to_string());
     }
     if js_bundle.contains("watch_trajectory") {
-        problems.push(
-            "dist js 仍带着 watch_trajectory 接线 —— 前端轨迹流绑定没有删干净".to_string(),
-        );
+        problems
+            .push("dist js 仍带着 watch_trajectory 接线 —— 前端轨迹流绑定没有删干净".to_string());
     }
 
     // boot 自检屏只属于「进程的首次窗口」（ADR-012）：壳注入端与前端读取端必须
@@ -233,14 +230,12 @@ fn the_shipped_binary_carries_engine_and_embedded_frontend() {
         std::fs::read_to_string(root.join("crates/app/desktop/src/tray.rs")).expect("tray.rs");
     if !tray_rs.contains("__envboardRecreated") {
         problems.push(
-            "tray.rs 不再注入 __envboardRecreated —— 托盘重建的窗口会重播 boot 自检屏"
-                .to_string(),
+            "tray.rs 不再注入 __envboardRecreated —— 托盘重建的窗口会重播 boot 自检屏".to_string(),
         );
     }
     if !js_bundle.contains("__envboardRecreated") {
-        problems.push(
-            "dist js 不再读取 __envboardRecreated —— 壳注入的重建标记没人消费".to_string(),
-        );
+        problems
+            .push("dist js 不再读取 __envboardRecreated —— 壳注入的重建标记没人消费".to_string());
     }
 
     // CSP 钉在 tauri.conf.json：严格档 + react-aria 样式 hash + ipc 通道。

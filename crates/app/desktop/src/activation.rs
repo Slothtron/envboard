@@ -23,9 +23,10 @@ pub use stub::{Preflight, preflight, spawn_waiter};
 #[cfg(windows)]
 mod imp {
     use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     use envboard_host::HostOptions;
-    use tauri::AppHandle;
+    use tauri::{AppHandle, Manager};
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE};
     use windows_sys::Win32::System::Threading::{
         CreateEventW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
@@ -91,13 +92,32 @@ mod imp {
     }
 
     /// 起等待线程：每次被 signal 就回前台，直到进程退出。
+    ///
+    /// 就绪门（基建 P0）：setup 没完成时窗口/核心还没就位，直接开窗会落空 ——
+    /// 只记 `pending_activation`，由 setup 收尾统一开。存完再查一次 ready，
+    /// 堵住「store 恰好落在 setup 的 swap 之后」的缝（两边都开也由去抖吸收）。
     pub fn spawn_waiter(app: AppHandle, handle: ActivationHandle) {
-        std::thread::spawn(move || loop {
-            if handle.wait() != WAIT_OBJECT_0 {
-                return;
+        std::thread::spawn(move || {
+            loop {
+                if handle.wait() != WAIT_OBJECT_0 {
+                    return;
+                }
+                let Some(shell) = app.try_state::<crate::Shell>() else {
+                    return;
+                };
+                if shell.is_exiting.load(Ordering::Relaxed) {
+                    return;
+                }
+                if !shell.ready.load(Ordering::Acquire) {
+                    shell.pending_activation.store(true, Ordering::Release);
+                    crate::diagnostics::note("activation received before ready; pending");
+                    if !shell.ready.load(Ordering::Acquire) {
+                        continue;
+                    }
+                }
+                let app_for_main = app.clone();
+                let _ = app.run_on_main_thread(move || crate::tray::open_workbench(&app_for_main));
             }
-            let app_for_main = app.clone();
-            let _ = app.run_on_main_thread(move || crate::tray::open_workbench(&app_for_main));
         });
     }
 

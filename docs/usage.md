@@ -144,7 +144,7 @@ Releases 里的 `envboard-portable.zip`（预览渠道是 `envboard-preview-port
 | `--port-range <min-max>` | `16000-16999`（便携 / 预览 / 开发形态 `17000-17999`） | 新建环境的端口分配区间 |
 | `--capture-budget <bytes>` | 256 MiB | 每环境抓包缓冲预算（0 = 引擎默认） |
 | `--log-dir <dir>` | `<state_dir>/logs` | 实例日志目录 |
-| `--no-log-file` | 关 | 日志只留内存环形缓冲 |
+| `--no-log-file` | 关 | 实例日志只留内存环形缓冲（不影响 `startup.log`） |
 | `--max-log-bytes <n>` | 8 MiB | 单环境日志轮转上限（0 = 不轮转） |
 | `--no-dialog` | 关 | 启动失败/装配警告不弹框（测试 / 无头） |
 
@@ -231,6 +231,7 @@ await invoke("env_create", { body: { name: "dev" } });    // 新建环境
 ├── lock                  单实例锁（flock）
 ├── rules/<name>.rules    规则物化文件（可再生；给人看，运行时输入是账本 rendered）
 ├── logs/<env>.log        实例日志（copytruncate 轮转，保留一份 .1）
+├── logs/startup.log      壳启动诊断（会话头 + 装配阶段 + panic 现场；1 MiB 轮转留 .1）
 ├── events.jsonl          控制面审计事件（8 MiB 轮转）
 ├── trajectories/<env>.jsonl  请求轨迹（append-only 事件流）
 └── shared/confdir/       共享 CA（envboard-ca.pem 私钥+证书 / envboard-ca-cert.pem）
@@ -248,3 +249,16 @@ await invoke("env_create", { body: { name: "dev" } });    // 新建环境
 **`ui.json` 为什么不由 localStorage 管**：WebView2 在窗口销毁时不保证把最近的
 localStorage 写入刷盘（实测写入 3s 后关窗、重开读回 null），所以主题与窗口几何由壳
 原子写入 `ui.json`；窗口几何跨屏按物理像素还原。
+
+### 启动诊断
+
+发布构建是 windows 子系统、没有控制台，早期失败必须自己留痕：
+
+- `logs/startup.log` 每个会话一段：会话头（版本 / pid / 形态）+ 装配阶段
+  （`stage: boot` → `stage: tray+window` → `ready`）+ reconcile 动作。启动失败时
+  错误框里带这份日志的路径。超 1 MiB 轮转一代（`startup.log.1`）。
+- 任何线程的 panic 先落盘（线程 / file:line / payload / backtrace）再走默认行为。
+- 装配期 panic 与 Tauri build 失败弹**原生错误框**（不依赖事件循环），随后按退出码
+  退出：boot 失败按可重试性 1/2，装配 panic 3。
+- `startup.log` 是壳级诊断，**不受 `--no-log-file` 影响**（那条旗标只管实例日志）；
+  `--log-dir` 可以改它的落点。诊断自身写入失败只降级到 stderr，不挡启动。

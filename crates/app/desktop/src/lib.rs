@@ -24,6 +24,7 @@
 
 mod activation;
 pub mod commands;
+mod diagnostics;
 mod geometry;
 pub mod ops;
 mod prefs;
@@ -32,9 +33,11 @@ pub mod stream;
 mod tray;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use clap::Parser;
 use envboard_admin::AdminService;
@@ -63,6 +66,18 @@ pub struct Shell {
     /// 本进程的形态身份（正式版 / 便携 / 预览 / 开发，ADR-014）：托盘与窗口重建
     /// 要按它决定标题、tooltip 与 WebView2 数据目录。
     pub profile: profile::Profile,
+    /// 就绪门（基建 P0）：setup 全部完成（核心 + 托盘 + 首窗 + 激活线程）才置真。
+    /// 未就绪时二次启动的激活只记 `pending_activation`，由 setup 收尾统一开窗，
+    /// 否则事件落在「窗口还没建好」的空档里就丢了。
+    ready: AtomicBool,
+    /// 就绪前收到的激活请求（见 `ready`）。
+    pending_activation: AtomicBool,
+    /// 正在退出：托盘 / 激活 / 窗口重建回调一律短路，防退出重入竞态。
+    is_exiting: AtomicBool,
+    /// 有窗口正在创建：`create_workbench` 的 CAS 守卫，托盘连点与激活不会同时建两个。
+    creating: AtomicBool,
+    /// `open_workbench` 上一次放行时刻：去抖，连点托盘只重建一次。
+    last_open: Mutex<Option<Instant>>,
 }
 
 impl Shell {
@@ -124,6 +139,8 @@ struct Cli {
 /// 入口。`app_dir_name` 是产品身份，由二进制从自己的 `[[bin]] name` 取来传进
 /// （`env!("CARGO_BIN_NAME")` 只在 bin 目标编译期可用，lib 里取不到）。
 pub fn run(app_dir_name: &str) -> std::process::ExitCode {
+    // 基建 P0：panic hook 最先装 —— 此后任何线程的 panic 都先落盘再走默认行为。
+    diagnostics::install_panic_hook();
     let cli = Cli::parse();
     // ADR-014：正式版 / 便携版 / 预览版 / 开发版用各自的状态目录、WebView2 数据目录
     // 与端口段，否则换个形态启动就会撞上正在跑的正式版（锁 / 激活事件 / 账本）。
@@ -141,68 +158,75 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
                 eprintln!("envboard: 已有实例在运行，已请求它回到前台");
                 return std::process::ExitCode::SUCCESS;
             }
-            activation::Preflight::Owner(handle) => Some(handle),
-            activation::Preflight::Unavailable => None,
+            activation::Preflight::Owner(handle) => {
+                open_diagnostics(&cli, &options, &profile);
+                Some(handle)
+            }
+            activation::Preflight::Unavailable => {
+                open_diagnostics(&cli, &options, &profile);
+                None
+            }
         },
         Err(_) => None,
     };
 
+    let no_dialog = cli.no_dialog;
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let handle = app.handle().clone();
-            match boot(&handle, &cli, &app_name, &profile) {
-                Ok(shell) => {
-                    app.manage(shell);
-                    // 托盘是后台运行的入口；创建失败只降级（关窗即退出），不挡启动。
-                    tray::install(app, cli.no_dialog);
-                    // 首窗也走壳自己的创建路径（config 里 create: false）：隐藏建窗 →
-                    // 贴几何 → 首帧后再显示，否则会看到默认位置的窗口再跳到上次的位置。
-                    if let Err(error) = tray::create_workbench(app.handle(), true) {
-                        eprintln!("envboard: 创建工作台窗口失败：{error}");
-                        return Err(error.into());
-                    }
-                    // 二次启动激活的等待线程：被 signal 就重建/聚焦工作台。
-                    if let Some(owner) = waiter {
-                        activation::spawn_waiter(app.handle().clone(), owner);
-                    }
-                    Ok(())
+            // 基建 P0：setup 分两段 catch_unwind —— boot（核心装配）与 tray+window
+            // 各自兜 panic。windows 子系统下装配期 panic 不接住就是静默死亡；
+            // 接住后弹原生框（带日志路径）并按退出码退出。
+            diagnostics::note("stage: boot");
+            let shell = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                boot(&handle, &cli, &app_name, &profile)
+            })) {
+                Ok(Ok(shell)) => shell,
+                Ok(Err(error)) => boot_failure(&handle, no_dialog, error),
+                Err(panic) => setup_panic("boot", panic.as_ref()),
+            };
+            app.manage(shell);
+            diagnostics::note("stage: tray+window");
+            let wired = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+                // 托盘是后台运行的入口；创建失败只降级（关窗即退出），不挡启动。
+                tray::install(app, no_dialog);
+                // 激活等待先于建窗就位：整个装配期间收到的激活都记 pending，
+                // 由就绪门收尾统一开窗（否则信号落在建窗中途会被锁存到 ready 之后）。
+                if let Some(owner) = waiter {
+                    activation::spawn_waiter(app.handle().clone(), owner);
                 }
-                Err(error) => {
-                    // windows 子系统没有控制台：启动失败必须弹框可见，
-                    // 同时 stderr 留一份（debug 构建 / 从终端拉起时可读）。
-                    eprintln!(
-                        "envboard: {}: {}{}",
-                        error.code.as_str(),
-                        error.message,
-                        error
-                            .field
-                            .as_deref()
-                            .map(|field| format!(" (field: {field})"))
-                            .unwrap_or_default()
-                    );
-                    if !cli.no_dialog {
+                // 首窗也走壳自己的创建路径（config 里 create: false）：隐藏建窗 →
+                // 贴几何 → 首帧后再显示，否则会看到默认位置的窗口再跳到上次的位置。
+                tray::create_workbench(app.handle(), true)?;
+                Ok(())
+            }));
+            match wired {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    diagnostics::note(&format!("创建工作台窗口失败：{error}"));
+                    if !no_dialog {
                         handle
                             .dialog()
-                            .message(format!(
-                                "{}{}",
-                                error.message,
-                                error
-                                    .field
-                                    .as_deref()
-                                    .map(|field| format!("\n(field: {field})"))
-                                    .unwrap_or_default()
-                            ))
+                            .message(format!("创建工作台窗口失败：{error}"))
                             .title("envboard 启动失败")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Error)
                             .blocking_show();
                     }
-                    std::process::exit(match error.code.retryability() {
-                        Retryability::No => 2,
-                        _ => 1,
-                    });
+                    std::process::exit(1);
                 }
+                Err(panic) => setup_panic("tray+window", panic.as_ref()),
             }
+            // 就绪门：此后激活可以直接开窗；此前收到的请求记在 pending_activation，
+            // 这里补开一次（与等待线程的「存完再查 ready」互为兜底，重复请求由去抖吸收）。
+            let shell = app.state::<Shell>();
+            shell.ready.store(true, Ordering::Release);
+            if shell.pending_activation.swap(false, Ordering::AcqRel) {
+                diagnostics::note("draining pending activation");
+                tray::open_workbench(app.handle());
+            }
+            diagnostics::note("ready");
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
@@ -249,7 +273,15 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
     let app = match app {
         Ok(app) => app,
         Err(error) => {
-            eprintln!("envboard: {error}");
+            // 装配没走到事件循环：Tauri dialog 不可用，弹原生框（基建 P0）。
+            diagnostics::note(&format!("tauri 装配失败：{error}"));
+            if !no_dialog {
+                let mut text = format!("Tauri 装配失败：{error}");
+                if let Some(path) = diagnostics::path() {
+                    text.push_str(&format!("\n\n启动日志：{}", path.display()));
+                }
+                diagnostics::fatal_box("envboard 启动失败", &text);
+            }
             return std::process::ExitCode::from(1);
         }
     };
@@ -267,6 +299,9 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
                 .is_some_and(|shell| shell.background.load(Ordering::Relaxed));
             if background && app.webview_windows().is_empty() {
                 api.prevent_exit();
+            } else if let Some(shell) = app.try_state::<Shell>() {
+                // 不常驻（托盘降级）：退出成立，短路后续托盘/激活回调。
+                shell.is_exiting.store(true, Ordering::Relaxed);
             }
         }
         // 关窗在销毁之前把「正常态」几何落盘（ui.json）。
@@ -287,6 +322,9 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
         } if label == tray::MAIN_LABEL => geometry::track(app),
         // 托盘「退出」时窗口可能还开着：顺手记一次，下次启动回到原位。
         RunEvent::ExitRequested { code: Some(_), .. } => {
+            if let Some(shell) = app.try_state::<Shell>() {
+                shell.is_exiting.store(true, Ordering::Relaxed);
+            }
             if let Some(window) = app.get_webview_window(tray::MAIN_LABEL) {
                 geometry::save(app, &window);
             }
@@ -299,6 +337,10 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
             if let Some(shell) = app.try_state::<Shell>() {
                 shell.cancel_all_streams();
             }
+        }
+        RunEvent::Exit => {
+            diagnostics::note("exit");
+            diagnostics::flush();
         }
         _ => {}
     });
@@ -362,7 +404,7 @@ fn boot(
     }
     let report = tauri::async_runtime::block_on(prepared.startup())?;
     for (env, action) in &report.actions {
-        eprintln!("reconcile: {action:<14} {env}");
+        diagnostics::note(&format!("reconcile: {action:<14} {env}"));
     }
     Ok(Shell {
         admin: Arc::clone(&prepared.admin),
@@ -374,7 +416,88 @@ fn boot(
         ui_prefs: prefs::UiPrefsStore::new(prepared.ui_prefs_file.clone()),
         window_geometry: Mutex::new(None),
         profile: profile.clone(),
+        ready: AtomicBool::new(false),
+        pending_activation: AtomicBool::new(false),
+        is_exiting: AtomicBool::new(false),
+        creating: AtomicBool::new(false),
+        last_open: Mutex::new(None),
     })
+}
+
+/// state-dir 落定后开启动日志（基建 P0）。第二个实例（Activated）不开 ——
+/// 它马上退出，别留一个误导性的会话头。诊断失败不挡启动。
+fn open_diagnostics(cli: &Cli, options: &HostOptions, profile: &profile::Profile) {
+    let Ok(state_dir) = options.resolve_state_dir() else {
+        return;
+    };
+    let logs_dir = cli
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| state_dir.join("logs"));
+    let session = format!(
+        "envboard {} pid={} profile={}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        profile.tag().unwrap_or("stable")
+    );
+    if diagnostics::open(&logs_dir, &session).is_some() {
+        diagnostics::note(&format!("state dir: {}", state_dir.display()));
+    }
+}
+
+/// boot 失败（prepare/startup/reconcile）：弹框可见 + 落盘留痕，按可重试性退出。
+/// windows 子系统没有控制台，不弹框就等于静默失败；框里带启动日志路径。
+fn boot_failure(handle: &tauri::AppHandle, no_dialog: bool, error: Error) -> ! {
+    let field = error
+        .field
+        .as_deref()
+        .map(|field| format!(" (field: {field})"))
+        .unwrap_or_default();
+    diagnostics::note(&format!(
+        "boot failed: {} {}{field}",
+        error.code.as_str(),
+        error.message
+    ));
+    if !no_dialog {
+        let mut message = format!(
+            "{}{}",
+            error.message,
+            error
+                .field
+                .as_deref()
+                .map(|field| format!("\n(field: {field})"))
+                .unwrap_or_default()
+        );
+        if let Some(path) = diagnostics::path() {
+            message.push_str(&format!("\n\n启动日志：{}", path.display()));
+        }
+        handle
+            .dialog()
+            .message(message)
+            .title("envboard 启动失败")
+            .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+            .blocking_show();
+    }
+    std::process::exit(match error.code.retryability() {
+        Retryability::No => 2,
+        _ => 1,
+    });
+}
+
+/// 装配期 panic：完整现场已由 panic hook 落盘，这里只给用户短消息 + 日志路径。
+/// 用原生框而不是 Tauri dialog —— panic 之后事件循环/插件已不可信。
+fn setup_panic(stage: &str, payload: &(dyn std::any::Any + Send)) -> ! {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic payload>");
+    let mut text = format!("envboard 启动装配 panic（{stage} 阶段）：{message}");
+    if let Some(path) = diagnostics::path() {
+        text.push_str(&format!("\n\n启动日志：{}", path.display()));
+    }
+    diagnostics::fatal_box("envboard 启动失败", &text);
+    std::process::exit(3);
 }
 
 /// CLI → 组合根入参。参数名与帮助文本属于界面形态，这里不掺任何领域判定。

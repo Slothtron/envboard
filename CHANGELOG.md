@@ -25,6 +25,11 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 - **便携包随 Release 分发**：workflow 额外产出 `envboard-portable.zip`
   （`envboard.exe` + `envboard.portable` 标记；preview 渠道为
   `envboard-preview-portable.zip`），解压即用，数据落在解压目录的 `envboard-data\`。
+- **启动诊断与壳健壮性**：`<state_dir>/logs/startup.log` 记录会话头与装配阶段
+  （1 MiB 轮转留一代）；全局 panic hook 把线程 / file:line / backtrace 落盘；
+  setup 分两段 `catch_unwind`，装配 panic 与 Tauri build 失败弹原生错误框（带日志
+  路径）再退出。二次启动激活加「就绪门」：装配期间收到的激活记 pending、就绪后
+  统一开窗；托盘回前台 400ms 去抖 + 建窗 CAS 守卫，退出中短路一切窗口回调。
 
 ## 0.1.0 — 2026-11-13
 
