@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
   Checkbox,
   Chip,
+  Description,
   Disclosure,
+  Dropdown,
+  FieldError,
   Input,
   Label,
   ListBox,
@@ -23,7 +26,6 @@ import type { EnvPatchReq, EnvView } from "../api/types";
 import {
   envNeedsAttention,
   healthLabel,
-  healthTone,
   isPublicListen,
   listenAddress,
 } from "../data";
@@ -39,28 +41,16 @@ import {
   IconStop,
   IconTrash,
 } from "../icons";
-import { Hint, InlineNotice, Kv, KvGrid, SectionTitle } from "../shared";
+import { Hint, InlineNotice, Kv, KvGrid, SectionTitle, StatusBadge } from "../shared";
 import { RuleTextButton } from "./CatalogViews";
-
-const TONE_CHIP: Record<string, "success" | "warning" | "danger" | "default"> = {
-  success: "success",
-  warning: "warning",
-  danger: "danger",
-  muted: "default",
-};
-const TONE_DOT: Record<string, string> = {
-  success: "bg-success",
-  warning: "bg-warning",
-  danger: "bg-danger",
-  muted: "bg-muted",
-};
 
 export interface EnvironmentDetailProps {
   env: EnvView;
   onToggle: (env: EnvView) => void;
   onRestart: (env: EnvView) => void;
   onDelete: (env: EnvView) => void;
-  onSave: (name: string, patch: EnvPatchReq) => void;
+  /** 返回 Promise：ConfigTab 依结果决定保留还是回退表单（失败不谎报已保存）。 */
+  onSave: (name: string, patch: EnvPatchReq) => Promise<void>;
   onCopied: () => void;
   /** 抽屉模式下传入：头部出现关闭按钮 */
   onClose?: () => void;
@@ -77,17 +67,13 @@ export function EnvironmentDetail({
 }: EnvironmentDetailProps) {
   const isRunning = env.health === "running";
   const hasIssue = envNeedsAttention(env);
-  const tone = healthTone(env.health);
 
   return (
     <>
       <div className="flex flex-none flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-4 py-3">
         <div className="flex min-w-0 items-baseline gap-3">
-          <span className="truncate font-mono text-2xl font-bold text-foreground">{env.name}</span>
-          <Chip color={TONE_CHIP[tone]} size="sm" variant="soft">
-            <span aria-hidden="true" className={`size-2 rounded-full ${TONE_DOT[tone]}`} />
-            <Chip.Label>{healthLabel(env.health)}</Chip.Label>
-          </Chip>
+          <span className="truncate font-mono text-xl font-bold text-foreground">{env.name}</span>
+          <StatusBadge health={env.health} />
           {/* 窄抽屉放不下时隐藏监听地址（概览分组里仍完整展示） */}
           <span className="hidden truncate font-mono text-sm text-muted 2xl:inline">
             {listenAddress(env)}
@@ -125,16 +111,27 @@ export function EnvironmentDetail({
             </Button>
           )}
 
-          {/* 危险档：不可逆，走 AlertDialog 二次确认 */}
-          <Button
-            className="btn-action--danger"
-            size="sm"
-            variant="outline"
-            onPress={() => onDelete(env)}
-          >
-            <IconTrash className="size-4" />
-            删除
-          </Button>
+          {/* 危险档收进「更多」菜单：不可逆，走 AlertDialog 二次确认 */}
+          <Dropdown>
+            <Dropdown.Trigger>
+              <Button aria-label={`更多操作 ${env.name}`} size="sm" variant="ghost">
+                更多
+              </Button>
+            </Dropdown.Trigger>
+            <Dropdown.Popover placement="bottom end">
+              <Dropdown.Menu
+                aria-label={`环境 ${env.name} 操作`}
+                onAction={(key) => {
+                  if (key === "delete") onDelete(env);
+                }}
+              >
+                <Dropdown.Item id="delete" textValue="删除" className="text-danger">
+                  <IconTrash className="size-4" />
+                  删除…
+                </Dropdown.Item>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
 
           {onClose ? (
             <Tooltip delay={200}>
@@ -149,32 +146,22 @@ export function EnvironmentDetail({
         </div>
       </div>
 
-      {/* 页签带计数徽标（P4） */}
+      {/* 页内分段控件（宽度随文字，与页面主导航区分） */}
       <Tabs
         align="start"
-        className="flex min-h-0 flex-1 flex-col"
+        className="wb-utabs flex min-h-0 flex-1 flex-col"
         defaultSelectedKey="overview"
-        variant="secondary"
       >
-        <Tabs.ListContainer>
-          <Tabs.List aria-label="环境详情">
-            <Tabs.Tab id="overview">
-              概览
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="config">
-              配置
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="rules">
-              规则
-              <Chip className="ml-2" size="sm" variant="soft">
-                <Chip.Label>{env.rules_count}</Chip.Label>
-              </Chip>
-              <Tabs.Indicator />
-            </Tabs.Tab>
-          </Tabs.List>
-        </Tabs.ListContainer>
+        <Tabs.List aria-label="环境详情">
+          <Tabs.Tab id="overview">概览</Tabs.Tab>
+          <Tabs.Tab id="config">配置</Tabs.Tab>
+          <Tabs.Tab id="rules">
+            规则
+            <Chip className="ml-2" size="sm" variant="soft">
+              <Chip.Label>{env.rules_count}</Chip.Label>
+            </Chip>
+          </Tabs.Tab>
+        </Tabs.List>
 
         <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-4" id="overview">
           <OverviewTab env={env} hasIssue={hasIssue} isRunning={isRunning} onCopied={onCopied} />
@@ -352,7 +339,7 @@ function ConfigTab({
   onSave,
 }: {
   env: EnvView;
-  onSave: (name: string, patch: EnvPatchReq) => void;
+  onSave: (name: string, patch: EnvPatchReq) => Promise<void>;
 }) {
   const [dirty, setDirty] = useState(false);
   const [port, setPort] = useState(String(env.listen.port));
@@ -366,6 +353,9 @@ function ConfigTab({
   const [authUser, setAuthUser] = useState("");
   const [authPass, setAuthPass] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  /* 编辑中标记：快照回流（含 advisory tick）不得冲掉正在输入的字段。
+     只有「放弃改动」与保存成功才解除。 */
+  const editingRef = useRef(false);
 
   /* 绑定选项来自真实账本（规则库 / 上游代理） */
   const [ruleNames, setRuleNames] = useState<string[]>([]);
@@ -380,8 +370,9 @@ function ConfigTab({
   const authInvalid = authHalfFilled || authHasColon;
   const exposeRisk = isPublic && !(authUser && authPass);
 
-  /* env 变化（SSE 刷新）时回到服务端值 */
-  useEffect(() => {
+  /* 回到服务端值：env 身份变化（切换环境）时无条件重置；
+     同一环境的快照回流只在非编辑态重置（否则用户输入会被 tick 冲掉）。 */
+  const resetFromEnv = useCallback(() => {
     setPort(String(env.listen.port));
     setRules(env.rules ?? "none");
     setUpstream(env.upstream ?? "direct");
@@ -390,12 +381,30 @@ function ConfigTab({
     setMitmText(env.mitm_hosts.join("\n"));
     setIsPublic(isPublicListen(env));
     setCapture(env.capture);
+    setAuthUser("");
+    setAuthPass("");
     setDirty(false);
+    editingRef.current = false;
   }, [env]);
+
+  const envNameRef = useRef(env.name);
+  useEffect(() => {
+    if (envNameRef.current !== env.name) {
+      envNameRef.current = env.name;
+      resetFromEnv();
+      return;
+    }
+    if (!editingRef.current) resetFromEnv();
+  }, [env, resetFromEnv]);
+
+  const markDirty = () => {
+    editingRef.current = true;
+    setDirty(true);
+  };
 
   const portInvalid = port.length > 0 && !/^\d{1,5}$/.test(port);
 
-  function submit() {
+  async function submit() {
     const patch: EnvPatchReq = {};
     if (Number(port) !== env.listen.port) patch.listen = { ...env.listen, port: Number(port) };
     const nextHost = isPublic ? "0.0.0.0" : "127.0.0.1";
@@ -426,14 +435,19 @@ function ConfigTab({
     }
 
     setIsSaving(true);
-    onSave(env.name, patch);
-    /* 保存结果经 SSE 快照回流；成功/失败反馈由 Workbench 统一推送 */
-    window.setTimeout(() => {
-      setIsSaving(false);
+    try {
+      await onSave(env.name, patch);
+      /* 成功：解除编辑锁，让下一帧快照把表单带回服务端值；凭据清空（只进不出）。 */
+      editingRef.current = false;
       setDirty(false);
       setAuthUser("");
       setAuthPass("");
-    }, 400);
+    } catch {
+      /* 失败：保留 dirty 与全部字段值——错误反馈由 Workbench 推送，
+         表单不能谎报「已放弃」。用户可修正后重试或显式放弃。 */
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   return (
@@ -442,7 +456,7 @@ function ConfigTab({
         <InlineNotice
           status="warning"
           action={
-            <Button size="sm" variant="ghost" onPress={() => setDirty(false)}>
+            <Button size="sm" variant="ghost" onPress={resetFromEnv}>
               放弃改动
             </Button>
           }
@@ -458,12 +472,12 @@ function ConfigTab({
         value={description}
         onChange={(v) => {
           setDescription(v);
-          setDirty(true);
+          markDirty();
         }}
       >
         <Label>描述</Label>
         <Input spellCheck={false} />
-        <span className="text-sm text-muted">纯展示字段，热生效。</span>
+        <Description>纯展示字段，热生效。</Description>
       </TextField>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -473,26 +487,29 @@ function ConfigTab({
           value={port}
           onChange={(v) => {
             setPort(v);
-            setDirty(true);
+            markDirty();
           }}
         >
           <Label>监听端口</Label>
           <Input inputMode="numeric" spellCheck={false} />
           {portInvalid ? (
-            <span className="text-sm text-danger">端口必须是数字。</span>
+            <FieldError>端口必须是数字。</FieldError>
           ) : (
-            <span className="text-sm text-muted">
+            <Description>
               范围 16000–16999。<b>停机生效</b>。
-            </span>
+            </Description>
           )}
         </TextField>
 
+        {/* HeroUI Select 的受控属性是 value/onChange（react-aria SelectProps）；
+            selectedKey/onSelectionChange 是 ListBox/Tabs 的 API，落在这里会被
+            静默忽略——Select 退化成非受控，初始显示占位符且「放弃」无法回退。 */}
         <Select
           className="w-full"
-          selectedKey={rules}
-          onSelectionChange={(key) => {
+          value={rules}
+          onChange={(key) => {
             setRules(String(key));
-            setDirty(true);
+            markDirty();
           }}
         >
           <Label>规则绑定</Label>
@@ -502,6 +519,15 @@ function ConfigTab({
           </Select.Trigger>
           <Select.Popover>
             <ListBox>
+              {/* 当前绑定但账本里已缺失的规则名也要进集合：react-aria 的
+                  firstSelectedKey 只认 collection.getItem(key) 命中的项，
+                  选中 key 不在集合里时 trigger 会退化成占位符。 */}
+              {env.rules !== null && !ruleNames.includes(env.rules) ? (
+                <ListBox.Item id={env.rules} textValue={`${env.rules}（缺失）`}>
+                  {env.rules}（缺失）
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+              ) : null}
               {ruleNames.map((name) => (
                 <ListBox.Item key={name} id={name} textValue={name}>
                   {name}
@@ -514,18 +540,18 @@ function ConfigTab({
               </ListBox.Item>
             </ListBox>
           </Select.Popover>
-          <span className="text-sm text-muted">
+          <Description>
             热生效：换绑定后运行中的实例立即按新规则改写，不必重启。
-          </span>
+          </Description>
         </Select>
       </div>
 
       <Select
         className="w-full"
-        selectedKey={upstream}
-        onSelectionChange={(key) => {
+        value={upstream}
+        onChange={(key) => {
           setUpstream(String(key));
-          setDirty(true);
+          markDirty();
         }}
       >
         <Label>上游代理</Label>
@@ -539,6 +565,13 @@ function ConfigTab({
               （直连）
               <ListBox.ItemIndicator />
             </ListBox.Item>
+            {/* 同规则绑定：当前绑定的代理名若已不在账本，仍要进集合才能显示。 */}
+            {env.upstream !== null && !proxyNames.includes(env.upstream) ? (
+              <ListBox.Item id={env.upstream} textValue={`${env.upstream}（缺失）`}>
+                {env.upstream}（缺失）
+                <ListBox.ItemIndicator />
+              </ListBox.Item>
+            ) : null}
             {proxyNames.map((name) => (
               <ListBox.Item key={name} id={name} textValue={name}>
                 {name}
@@ -547,7 +580,7 @@ function ConfigTab({
             ))}
           </ListBox>
         </Select.Popover>
-        <span className="text-sm text-muted">热生效。绑定后出方向先经所选代理再到目标。</span>
+        <Description>热生效。绑定后出方向先经所选代理再到目标。</Description>
       </Select>
 
       {/* 渐进披露：安全相关的高级字段收进折叠。
@@ -569,14 +602,14 @@ function ConfigTab({
               value={insecureText}
               onChange={(v) => {
                 setInsecureText(v);
-                setDirty(true);
+                markDirty();
               }}
             >
               <Label>按域名放宽上游证书校验</Label>
               <TextArea rows={3} spellCheck={false} />
-              <span className="text-sm leading-relaxed text-muted">
+              <Description className="leading-relaxed">
                 每行一个<b>完整域名</b>，精确匹配：列出的域名才跳过上游证书校验，子域不继承、后缀不匹配，通配符会被服务端拒绝。热生效。
-              </span>
+              </Description>
             </TextField>
 
             <TextField
@@ -584,22 +617,22 @@ function ConfigTab({
               value={mitmText}
               onChange={(v) => {
                 setMitmText(v);
-                setDirty(true);
+                markDirty();
               }}
             >
               <Label>TLS 解密白名单</Label>
               <TextArea rows={3} spellCheck={false} />
-              <span className="text-sm leading-relaxed text-muted">
+              <Description className="leading-relaxed">
                 每行一个<b>完整域名</b>，精确匹配：<b>留空 = 全部解密</b>；给了名单则只解密名单内的
                 CONNECT，名单外直通（不做 MITM）。子域不继承、通配符会被服务端拒绝。热生效。
-              </span>
+              </Description>
             </TextField>
 
             <Checkbox
               isSelected={isPublic}
               onChange={(v) => {
                 setIsPublic(v);
-                setDirty(true);
+                markDirty();
               }}
             >
               <Checkbox.Content>
@@ -615,7 +648,7 @@ function ConfigTab({
               isSelected={capture}
               onChange={(v) => {
                 setCapture(v);
-                setDirty(true);
+                markDirty();
               }}
             >
               <Checkbox.Content>
@@ -635,7 +668,10 @@ function ConfigTab({
                   className="w-full"
                   isInvalid={authInvalid}
                   value={authUser}
-                  onChange={setAuthUser}
+                  onChange={(v) => {
+                    setAuthUser(v);
+                    markDirty();
+                  }}
                 >
                   <Input placeholder="用户名" spellCheck={false} />
                 </TextField>
@@ -644,16 +680,23 @@ function ConfigTab({
                   className="w-full"
                   isInvalid={authInvalid}
                   value={authPass}
-                  onChange={setAuthPass}
+                  onChange={(v) => {
+                    setAuthPass(v);
+                    markDirty();
+                  }}
                 >
                   <Input placeholder="留空则保持不变" spellCheck={false} type="password" />
                 </TextField>
               </div>
-              <span className={`text-sm leading-relaxed ${authInvalid ? "text-danger" : "text-muted"}`}>
-                {authInvalid
-                  ? "两栏必须同时填写，且都不能含「:」或空白字符。"
-                  : "两栏必须同时填写，都不能含「:」或空白字符。凭据只进不出 —— 服务端永不回显。停机生效。"}
-              </span>
+              {authInvalid ? (
+                <p className="text-sm leading-relaxed text-danger" role="alert">
+                  两栏必须同时填写，且都不能含「:」或空白字符。
+                </p>
+              ) : (
+                <Hint>
+                  两栏必须同时填写，都不能含「:」或空白字符。凭据只进不出 —— 服务端永不回显。停机生效。
+                </Hint>
+              )}
             </div>
 
             {exposeRisk ? (
@@ -674,13 +717,13 @@ function ConfigTab({
           className="font-semibold"
           size="sm"
           variant="secondary"
-          isDisabled={nameInvalidOrEmpty(portInvalid, authInvalid)}
+          isDisabled={portInvalid || authInvalid || !dirty}
           isPending={isSaving}
           onPress={submit}
         >
           保存
         </Button>
-        <Button size="sm" variant="ghost" isDisabled={!dirty} onPress={() => setDirty(false)}>
+        <Button size="sm" variant="ghost" isDisabled={!dirty} onPress={resetFromEnv}>
           放弃改动
         </Button>
         <span className="ml-auto" />
@@ -688,10 +731,6 @@ function ConfigTab({
       </div>
     </div>
   );
-}
-
-function nameInvalidOrEmpty(portInvalid: boolean, authInvalid: boolean): boolean {
-  return portInvalid || authInvalid;
 }
 
 /* ------------------------------------------------------------------ */

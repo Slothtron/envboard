@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   Chip,
+  Description,
+  Dropdown,
+  FieldError,
   Input,
   Label,
   SearchField,
@@ -9,12 +12,11 @@ import {
   Surface,
   TextArea,
   TextField,
-  Tooltip,
 } from "@heroui/react";
 
 import { api } from "../api/client";
 import type { EnvView, ProxyView } from "../api/types";
-import { formatErrorNotice } from "../errors";
+import { errorTitle, formatErrorNotice } from "../errors";
 import {
   IconEdit,
   IconPlus,
@@ -162,7 +164,7 @@ export function RulesView({
           <SearchField.Group>
             <SearchField.SearchIcon />
             <SearchField.Input className="w-40 xl:w-56" placeholder="搜索规则集" />
-            <SearchField.ClearButton />
+            <SearchField.ClearButton aria-label="清除搜索" />
           </SearchField.Group>
         </SearchField>
 
@@ -175,8 +177,8 @@ export function RulesView({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        <Surface className="flex flex-col p-0">
+      <div className="min-h-0 flex-1 overflow-y-auto bg-surface p-5">
+        <Surface className="flex min-h-full flex-col p-0">
           <div className="flex items-center gap-2 border-b border-border px-4 py-3">
             <IconRules className="size-4 text-muted" />
             <h2 className="text-base font-semibold text-foreground">规则集</h2>
@@ -247,21 +249,26 @@ export function RulesView({
 
                     <span className="ml-auto flex items-center gap-2">
                       <RuleTextButton name={rule.name} />
-                      <Tooltip delay={200}>
-                        <Tooltip.Trigger>
-                          <Button
-                            aria-label={`删除规则集 ${rule.name}`}
-                            className="btn-action--danger"
-                            size="sm"
-                            variant="outline"
-                            onPress={() => setConfirmDelete(rule.name)}
-                          >
-                            <IconTrash className="size-4" />
-                            删除
+                      <Dropdown>
+                        <Dropdown.Trigger>
+                          <Button aria-label={`更多操作 ${rule.name}`} size="sm" variant="ghost">
+                            更多
                           </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>删除规则集（二次确认；绑定它的环境会标记规则缺失）</Tooltip.Content>
-                      </Tooltip>
+                        </Dropdown.Trigger>
+                        <Dropdown.Popover placement="bottom end">
+                          <Dropdown.Menu
+                            aria-label={`规则集 ${rule.name} 操作`}
+                            onAction={(key) => {
+                              if (key === "delete") setConfirmDelete(rule.name);
+                            }}
+                          >
+                            <Dropdown.Item id="delete" textValue="删除" className="text-danger">
+                              <IconTrash className="size-4" />
+                              删除…
+                            </Dropdown.Item>
+                          </Dropdown.Menu>
+                        </Dropdown.Popover>
+                      </Dropdown>
                     </span>
                   </div>
                 </div>
@@ -270,15 +277,13 @@ export function RulesView({
         </Surface>
 
         <div className="p-3">
-          <Hint>
-            规则账本的唯一真相在服务端（<b>state.json rules[]</b>）；物化文件可再生。
-            被引用关系实时来自环境绑定。
-          </Hint>
+          <Hint>被引用关系实时来自环境绑定；删除规则集会让绑定它的环境标记「规则缺失」。</Hint>
         </div>
       </div>
 
       <FormDialog
         confirmLabel="导入"
+        confirmDisabled={!importName.trim() || nameInvalid}
         isOpen={importOpen}
         note="导入即覆盖同名规则集；正文为 hosts 风格（IP + 完整域名，每行一条）。"
         title="导入规则集"
@@ -292,11 +297,11 @@ export function RulesView({
           onChange={setImportName}
         >
           <Label>规则集名称</Label>
-          <Input placeholder="小写字母开头，限 a-z 0-9 _ -" spellCheck={false} />
+          <Input autoFocus placeholder="小写字母开头，限 a-z 0-9 _ -" spellCheck={false} />
           {nameInvalid ? (
-            <span className="text-sm text-danger">名称不合法：小写字母开头，限 a-z 0-9 _ -。</span>
+            <FieldError>名称不合法：小写字母开头，限 a-z 0-9 _ -。</FieldError>
           ) : (
-            <span className="text-sm text-muted">同名规则集将被覆盖。</span>
+            <Description>同名规则集将被覆盖。</Description>
           )}
         </TextField>
         <TextField className="w-full" value={importText} onChange={setImportText}>
@@ -355,8 +360,8 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        <Surface className="flex flex-col p-0">
+      <div className="min-h-0 flex-1 overflow-y-auto bg-surface p-5">
+        <Surface className="flex min-h-full flex-col p-0">
           <div className="flex items-center gap-2 border-b border-border px-4 py-3">
             <IconServer className="size-4 text-muted" />
             <h2 className="text-base font-semibold text-foreground">上游代理</h2>
@@ -422,34 +427,32 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
                         <IconEdit className="size-4" />
                         编辑
                       </Button>
-                      {/* 禁用原因由行内「被引用」chips 随行可见（P12），解释走 aria-label（D-6） */}
-                      {up.references.length > 0 ? (
-                        <Button
-                          aria-label={`删除上游代理 ${up.name}：仍被 ${up.references.join("、")} 引用，先解除绑定才能删除`}
-                          className="btn-action--danger"
-                          size="sm"
-                          variant="outline"
-                          isDisabled
-                        >
-                          <IconTrash className="size-4" />
-                          删除
-                        </Button>
-                      ) : (
-                        <Tooltip delay={200}>
-                          <Tooltip.Trigger>
-                            <Button
-                              className="btn-action--danger"
-                              size="sm"
-                              variant="outline"
-                              onPress={() => setConfirmDelete(up)}
+                      {/* 删除入「更多」菜单；被引用时禁用，原因由行内「被引用」chips 随行可见 */}
+                      <Dropdown>
+                        <Dropdown.Trigger>
+                          <Button aria-label={`更多操作 ${up.name}`} size="sm" variant="ghost">
+                            更多
+                          </Button>
+                        </Dropdown.Trigger>
+                        <Dropdown.Popover placement="bottom end">
+                          <Dropdown.Menu
+                            aria-label={`上游代理 ${up.name} 操作`}
+                            onAction={(key) => {
+                              if (key === "delete") setConfirmDelete(up);
+                            }}
+                          >
+                            <Dropdown.Item
+                              id="delete"
+                              textValue="删除"
+                              className="text-danger"
+                              isDisabled={up.references.length > 0}
                             >
                               <IconTrash className="size-4" />
-                              删除
-                            </Button>
-                          </Tooltip.Trigger>
-                          <Tooltip.Content>删除上游代理（二次确认）</Tooltip.Content>
-                        </Tooltip>
-                      )}
+                              删除…
+                            </Dropdown.Item>
+                          </Dropdown.Menu>
+                        </Dropdown.Popover>
+                      </Dropdown>
                     </span>
                   </div>
                 </div>
@@ -467,7 +470,6 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
             onFeedback("success", `上游代理 ${name} 已保存`);
             reload();
           }}
-          onFeedback={onFeedback}
         />
       ) : null}
 
@@ -489,12 +491,10 @@ function ProxyFormDialog({
   proxy,
   onClose,
   onSaved,
-  onFeedback,
 }: {
   proxy: ProxyView | null;
   onClose: () => void;
   onSaved: (name: string) => void;
-  onFeedback: FeedbackFn;
 }) {
   const [name, setName] = useState(proxy?.name ?? "");
   const [host, setHost] = useState(proxy?.host ?? "");
@@ -510,17 +510,21 @@ function ProxyFormDialog({
   const authInvalid = authHalfFilled || authHasColon;
   const canSave = !nameInvalid && !hostInvalid && !portInvalid && !authInvalid && name && host && port;
 
-  function submit() {
-    if (!canSave) return;
-    void api
-      .proxiesPut({
+  async function submit(): Promise<string | null> {
+    // 校验未通过时返回错误文案而不是静默关窗；确认键保持可点以露出原因。
+    if (!canSave) return "请先修正表单中的校验错误再保存。";
+    try {
+      await api.proxiesPut({
         name: name.trim(),
         host: host.trim(),
         port: Number(port),
         ...(user && password ? { user, password } : {}),
-      })
-      .then(() => onSaved(name.trim()))
-      .catch((error: unknown) => reportError(onFeedback, error, `保存上游代理 ${name.trim()}`));
+      });
+      onSaved(name.trim());
+      return null;
+    } catch (error: unknown) {
+      return errorTitle(error, `保存上游代理 ${name.trim()}`);
+    }
   }
 
   return (
@@ -536,23 +540,27 @@ function ProxyFormDialog({
     >
       <TextField className="w-full" isInvalid={nameInvalid} value={name} onChange={setName}>
         <Label>名称</Label>
-        <Input spellCheck={false} />
-        <span className={`text-sm ${nameInvalid ? "text-danger" : "text-muted"}`}>
-          {nameInvalid ? "小写字母开头，限 a-z 0-9 _ -。" : "环境按名绑定。"}
-        </span>
+        <Input autoFocus spellCheck={false} />
+        {nameInvalid ? (
+          <FieldError>小写字母开头，限 a-z 0-9 _ -。</FieldError>
+        ) : (
+          <Description>环境按名绑定。</Description>
+        )}
       </TextField>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField className="w-full" isInvalid={hostInvalid} value={host} onChange={setHost}>
           <Label>地址</Label>
           <Input placeholder="proxy.corp.example.com" spellCheck={false} />
-          <span className={`text-sm ${hostInvalid ? "text-danger" : "text-muted"}`}>
-            {hostInvalid ? "只允许域名或 IP 字面量。" : "域名或 IP。"}
-          </span>
+          {hostInvalid ? (
+            <FieldError>只允许域名或 IP 字面量。</FieldError>
+          ) : (
+            <Description>域名或 IP。</Description>
+          )}
         </TextField>
         <TextField className="w-full" isInvalid={portInvalid} value={port} onChange={setPort}>
           <Label>端口</Label>
           <Input inputMode="numeric" placeholder="3128" spellCheck={false} />
-          {portInvalid ? <span className="text-sm text-danger">端口必须是数字。</span> : null}
+          {portInvalid ? <FieldError>端口必须是数字。</FieldError> : null}
         </TextField>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -565,11 +573,13 @@ function ProxyFormDialog({
           <Input type="password" />
         </TextField>
       </div>
-      <span className={`text-sm leading-relaxed ${authInvalid ? "text-danger" : "text-muted"}`}>
-        {authInvalid
-          ? "用户名与密码必须同时填写，且都不能含「:」或空白字符。"
-          : "留空表示不配置鉴权。"}
-      </span>
+      {authInvalid ? (
+        <p className="text-sm leading-relaxed text-danger" role="alert">
+          用户名与密码必须同时填写，且都不能含「:」或空白字符。
+        </p>
+      ) : (
+        <Hint>留空表示不配置鉴权。</Hint>
+      )}
     </FormDialog>
   );
 }

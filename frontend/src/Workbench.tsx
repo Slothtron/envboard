@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Input, Label, TextField } from "@heroui/react";
+import { Description, FieldError, Input, Label, TextField } from "@heroui/react";
 
 import { api } from "./api/client";
 import { openSnapshotStream } from "./api/stream";
@@ -8,7 +8,6 @@ import { envNeedsAttention, type ViewKey } from "./data";
 import { formatErrorNotice } from "./errors";
 import { ConfirmDialog, FormDialog } from "./dialogs";
 import { Boot } from "./Boot";
-import { SideBar } from "./SideBar";
 import { StatusBar } from "./StatusBar";
 import { TopBar, type MetricKey } from "./TopBar";
 import { FeedbackAlert } from "./shared";
@@ -59,7 +58,11 @@ export function Workbench() {
   const [newEnvName, setNewEnvName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  /* 反馈分槽：写错误（带原文层）独占一槽、不自动撤、不被成功提示顶掉；
+     成功/警告走另一槽，3.2s 自动撤。连续操作时错误始终可读。 */
+  const [errorFeedbackState, setErrorFeedbackState] = useState<Feedback | null>(null);
+  const [notice, setNotice] = useState<Feedback | null>(null);
+  const noticeTimer = useRef<number | null>(null);
   // boot 自检屏只属于「首次打开应用」：托盘重建的窗口直接进工作台（ADR-012）。
   const [booted, setBooted] = useState(() => window.__envboardRecreated === true);
   const finishBoot = useCallback(() => setBooted(true), []);
@@ -69,12 +72,16 @@ export function Workbench() {
 
   const pushFeedback = useCallback(
     (nextStatus: Feedback["status"], title: string, detail?: string) => {
-      setFeedback({ status: nextStatus, title, detail });
-      // 写操作失败（带原文层）不自动撤除：随后那次取数成功只说明"读得到"，
-      // 不能证明刚才那次写成功（envboard-engine::api::error 模块文档「错误的生命周期」）。
-      if (!detail) {
-        window.setTimeout(() => setFeedback(null), 3200);
+      if (detail) {
+        // 写操作失败（带原文层）独占错误槽、不自动撤除：随后那次取数成功只说明
+        // "读得到"，不能证明刚才那次写成功（envboard-engine::api::error 模块文档
+        // 「错误的生命周期」）。成功提示不得顶掉它。
+        setErrorFeedbackState({ status: nextStatus, title, detail });
+        return;
       }
+      setNotice({ status: nextStatus, title });
+      if (noticeTimer.current != null) window.clearTimeout(noticeTimer.current);
+      noticeTimer.current = window.setTimeout(() => setNotice(null), 3200);
     },
     [],
   );
@@ -204,14 +211,19 @@ export function Workbench() {
     });
   }, [pushFeedback]);
 
+  /* 返回 Promise 并把失败继续抛给 ConfigTab：表单依结果决定保留还是回退，
+     失败时不能谎报「已保存/已放弃」。 */
   const saveConfig = useCallback(
     (name: string, patch: Parameters<typeof api.envPatch>[1]) => {
-      api
+      return api
         .envPatch(name, patch)
-        .then(() => pushFeedback("success", `环境 ${name} 配置已保存`))
+        .then(() => {
+          pushFeedback("success", `环境 ${name} 配置已保存`);
+        })
         .catch((error: unknown) => {
           const f = errorFeedback(error, `保存 ${name} 配置`);
           pushFeedback(f.status, f.title, f.detail);
+          throw error;
         });
     },
     [pushFeedback],
@@ -241,18 +253,12 @@ export function Workbench() {
         counts={counts}
         coreVersion={statusInfo?.core.version ?? "…"}
         isRefreshing={isRefreshing}
-        metric={metric}
         streamConnected={streamConnected}
-        onMetricChange={setMetric}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onRefresh={refresh}
-      />
-
-      <SideBar
         navCounts={navCounts}
-        streamConnected={streamConnected}
         view={view}
         onViewChange={setView}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onRefresh={refresh}
       />
 
       <main aria-label="工作台主区" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -285,20 +291,31 @@ export function Workbench() {
         streamConnected={streamConnected}
       />
 
-      {/* 反馈区：方向C 移至外壳头下方右上，容器点击穿透（写错误不自动撤） */}
-      {feedback ? (
+      {/* 反馈区：方向C 移至外壳头下方右上，容器点击穿透。
+          错误槽在上（不自动撤、不被成功顶掉），轻提示槽在下（3.2s 自动撤）。 */}
+      {errorFeedbackState || notice ? (
         <div aria-live="polite" className="ph-feedback" role="status">
-          <FeedbackAlert
-            status={feedback.status}
-            title={feedback.title}
-            detail={feedback.detail}
-            onClose={() => setFeedback(null)}
-          />
+          {errorFeedbackState ? (
+            <FeedbackAlert
+              status={errorFeedbackState.status}
+              title={errorFeedbackState.title}
+              detail={errorFeedbackState.detail}
+              onClose={() => setErrorFeedbackState(null)}
+            />
+          ) : null}
+          {notice ? (
+            <FeedbackAlert
+              status={notice.status}
+              title={notice.title}
+              onClose={() => setNotice(null)}
+            />
+          ) : null}
         </div>
       ) : null}
 
       <FormDialog
         confirmLabel="创建"
+        confirmDisabled={!newEnvName.trim() || nameInvalid}
         isOpen={newEnvOpen}
         note="创建后环境处于已停止状态，需要在列表中启动。端口从 16000–16999 自动分配。"
         title="新建环境"
@@ -307,12 +324,12 @@ export function Workbench() {
       >
         <TextField className="w-full" isInvalid={nameInvalid} value={newEnvName} onChange={setNewEnvName}>
           <Label>环境名称</Label>
-          <Input placeholder="小写字母开头，限 a-z 0-9 _ -" spellCheck={false} />
-          <span className={`text-sm ${nameInvalid ? "text-danger" : "text-muted"}`}>
-            {nameInvalid
-              ? "名称不合法：小写字母开头，限 a-z 0-9 _ -。"
-              : "一个环境 = 一个实例 = 一个端口。"}
-          </span>
+          <Input autoFocus placeholder="小写字母开头，限 a-z 0-9 _ -" spellCheck={false} />
+          {nameInvalid ? (
+            <FieldError>名称不合法：小写字母开头，限 a-z 0-9 _ -。</FieldError>
+          ) : (
+            <Description>一个环境 = 一个实例 = 一个端口。</Description>
+          )}
         </TextField>
       </FormDialog>
 

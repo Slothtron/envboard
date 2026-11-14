@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Chip,
@@ -18,6 +18,7 @@ import {
   type EnvView,
 } from "../api/types";
 import { formatBytes, listenAddress } from "../data";
+import { ConfirmDialog } from "../dialogs";
 import { formatErrorNotice } from "../errors";
 import {
   IconArrowLeft,
@@ -88,6 +89,11 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
   const [capFilter, setCapFilter] = useState<CapFilter>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /* 清空是不可逆销毁数据：与删除环境/规则/代理同档，走二次确认（D-4）。 */
+  const [confirmClear, setConfirmClear] = useState(false);
+  /* 抽屉焦点管理：打开聚焦面板，关闭还给触发行。 */
+  const panelRef = useRef<HTMLElement>(null);
+  const returnFocusRef = useRef<number | null>(null);
 
   /* 抓包增量按 request_id 去重合并（events 帧是游标之后的新记录），并同步计数 */
   const mergeRecords = useCallback(
@@ -207,6 +213,39 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [drawerOpen, onBack]);
+
+  /* 抽屉打开 → 焦点移进面板；关闭 → 还给触发行（键盘可达性）。 */
+  useEffect(() => {
+    if (drawerOpen) {
+      panelRef.current?.focus();
+    } else if (returnFocusRef.current != null) {
+      const row = document.querySelector(
+        `tr[data-cap-row="${returnFocusRef.current}"]`,
+      );
+      (row as HTMLElement | null)?.focus();
+      returnFocusRef.current = null;
+    }
+  }, [drawerOpen]);
+
+  function openDetail(cap: CaptureRecord) {
+    returnFocusRef.current = cap.request_id;
+    setSelectedId(cap.request_id);
+    setDrawerOpen(true);
+  }
+
+  /* 键盘等价于双击：Enter/Space 打开焦点行的详情。react-aria Row 类型不暴露
+     onKeyDown，挂容器捕获阶段；只响应行自身，不截获单元格内控件的按键。 */
+  const onListKeyDownCapture = (e: React.KeyboardEvent) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const target = e.target as HTMLElement;
+    const row = target.closest?.("tr[data-cap-row]") as HTMLElement | null;
+    if (!row || target !== row) return;
+    const cap = records.find((r) => String(r.request_id) === row.dataset.capRow);
+    if (!cap) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openDetail(cap);
+  };
 
   function reload() {
     setStatus("loading");
@@ -370,7 +409,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
             size="sm"
             variant="outline"
             isDisabled={!debug?.capture || records.length === 0}
-            onPress={clearCapture}
+            onPress={() => setConfirmClear(true)}
           >
             清空
           </Button>
@@ -379,7 +418,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
 
       {/* 内容区：列表 + 悬浮详情面板（absolute，不挤占表格） */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden border-t border-border">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col" onKeyDownCapture={onListKeyDownCapture}>
           {status === "loading" ? (
             <TableSkeleton rows={6} />
           ) : status === "error" ? (
@@ -418,7 +457,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
                     if (next != null) setSelectedId(Number(next));
                   }}
                 >
-                  <Table.Header>
+                  <Table.Header className="sticky top-0 z-10 bg-surface-secondary">
                     <Table.Column isRowHeader>#</Table.Column>
                     <Table.Column>方法</Table.Column>
                     <Table.Column>状态</Table.Column>
@@ -442,11 +481,9 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
                   >
                     {(cap) => (
                       <Table.Row
+                        data-cap-row={cap.request_id}
                         id={String(cap.request_id)}
-                        onDoubleClick={() => {
-                          setSelectedId(cap.request_id);
-                          setDrawerOpen(true);
-                        }}
+                        onDoubleClick={() => openDetail(cap)}
                       >
                         <Table.Cell>
                           <span className="font-mono text-base text-muted">{cap.request_id}</span>
@@ -485,11 +522,14 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
           )}
         </div>
 
-        {/* 悬浮详情面板（非模态）：Esc 挂 window 捕获阶段；模态在场时让位。 */}
+        {/* 悬浮详情面板（非模态）：Esc 挂 window 捕获阶段；模态在场时让位。
+            tabIndex=-1 供打开时程序聚焦；关闭后焦点还给触发行。 */}
         <aside
           aria-label="抓包详情"
           aria-hidden={!drawerOpen}
           className={`wb-detail-panel ${drawerOpen ? "wb-detail-panel--open" : ""}`}
+          ref={panelRef}
+          tabIndex={-1}
         >
           {drawerOpen && current ? (
             <CaptureDetail
@@ -501,6 +541,18 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
           ) : null}
         </aside>
       </div>
+
+      <ConfirmDialog
+        confirmLabel="清空"
+        description={`将清空环境 ${debug?.env ?? env.name} 当前会话的全部抓包记录（${records.length} 条）。`}
+        isOpen={confirmClear}
+        title="确认清空抓包会话"
+        onConfirm={() => {
+          setConfirmClear(false);
+          clearCapture();
+        }}
+        onOpenChange={setConfirmClear}
+      />
     </div>
   );
 }

@@ -35,7 +35,7 @@ export function CertView({ onFeedback }: CertViewProps) {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-5">
-      <Surface className="flex flex-col p-0">
+      <Surface className="mx-auto flex w-full max-w-5xl flex-col p-0">
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <IconShield className="size-4 text-muted" />
           <h2 className="text-base font-semibold text-foreground">证书</h2>

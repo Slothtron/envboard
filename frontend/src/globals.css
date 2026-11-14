@@ -1,85 +1,84 @@
 /* ==========================================================================
-   envboard 工作台 · 全局样式（方向C · PHOSPHOR APPLIANCE 落地）
+   envboard 工作台 · 全局样式（方向A · 设备控制台 / 工具属性优先）
    --------------------------------------------------------------------------
    入口样式已含 @import "tailwindcss"; 与 @import "@heroui/styles"，此处不重复引入。
    暗色靠 <html class="dark" data-theme="dark"> 切换，本文件不写任何 dark: 工具覆盖。
    令牌区（:root / 暗色选择器）是唯一允许字面色值的地方（UI-1）；其余一律语义令牌。
    自定义结构样式走 BEM 类（ph-* / wb-*），不在 JSX 内联写死 hex / px。
+
+   方向A 原则：中性深灰底 + 单一强调色（钢蓝，仅主操作/选中/焦点）；
+   绿只表示「在线/健康」；无扫描线、无大光晕、无霓虹；结构先于风格。
+   阴影用 hex-alpha，避免纯黑 rgba(0, 0, 0（产物测试禁）。
    ========================================================================== */
 
-/* ------------------------- 令牌区 · 纸面终端（浅） ------------------------- */
+/* ------------------------- 令牌区 · 中性浅（仪器纸面） ------------------------- */
 :root {
   --font-mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
-  --font-sans: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
-  --default-font-family: var(--font-mono);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --default-font-family: var(--font-sans);
 
-  --background: #f2f4ec;
-  --foreground: #152a1b;
-  --surface: #fafbf5;
-  --surface-secondary: #e9eee0;
-  --surface-tertiary: #dfe6d2;
+  --background: #f2f3f5;
+  --foreground: #1a1d21;
+  --surface: #ffffff;
+  --surface-secondary: #eceef1;
+  --surface-tertiary: #e2e5e9;
   --overlay: #ffffff;
-  --muted: #48604e;
-  --default: #e4ead9;
+  --muted: #5b6470;
+  --default: #eceef1;
   --field-background: #ffffff;
-  --border: #d4dcc6;
-  --separator: #dde4cf;
-  --accent: #0e7a22;
-  --accent-foreground: #f6fbf2;
-  --success: #0e7a22;
-  --success-foreground: #f6fbf2;
+  --border: #d4d8dd;
+  --separator: #e0e3e7;
+  --accent: #2f6fbf;
+  --accent-foreground: #ffffff;
+  --success: #177245;
+  --success-foreground: #ffffff;
   --warning: #8a5a00;
   --danger: #c22626;
-  --focus: #0e7a22;
-  --backdrop: rgba(30, 42, 32, 0.4);
+  --focus: #2f6fbf;
+  --backdrop: #1a1d2166;
   --radius: 0.25rem;
   --field-radius: 0.25rem;
 
-  /* 方向C 专属令牌 */
-  --ph-cyan: #0c7490;
-  --ph-accent-dim: color-mix(in srgb, var(--accent) 10%, transparent);
-  --ph-cyan-dim: color-mix(in srgb, var(--ph-cyan) 10%, transparent);
-  --ph-glow: 0 0 0 rgba(0, 0, 0, 0);
-  --ph-scanline: rgba(0, 0, 0, 0);
-  --ph-shadow: 0 10px 30px rgba(40, 56, 44, 0.18);
+  /* 方向A 专属令牌 */
+  --ph-accent-dim: color-mix(in srgb, var(--accent) 8%, transparent);
+  --ph-shadow-1: 0 1px 2px #1a1d2114;
+  --ph-shadow-2: 0 12px 34px #1a1d212e;
   color-scheme: light;
 }
 
-/* ------------------------- 令牌区 · 磷光（深） ------------------------- */
+/* ------------------------- 令牌区 · 中性深（设备控制台） ------------------------- */
 :root[data-theme="dark"],
 :root.dark {
-  --background: #0a0f0c;
-  --foreground: #d9ffe3;
-  --surface: #101711;
-  --surface-secondary: #16211a;
-  --surface-tertiary: #1b2a20;
-  --overlay: #182420;
-  --muted: #7fa88c;
-  --default: #1b2a20;
-  --field-background: #0d1410;
-  --border: #1e2a22;
-  --separator: #182420;
-  --accent: #4af626;
-  --accent-foreground: #08130a;
-  --success: #4af626;
-  --success-foreground: #08130a;
-  --warning: #fbbf24;
-  --danger: #ff5c5c;
-  --focus: #4af626;
-  --backdrop: rgba(3, 7, 5, 0.66);
+  --background: #14161a;
+  --foreground: #e6e8eb;
+  --surface: #1b1e24;
+  --surface-secondary: #22262d;
+  --surface-tertiary: #2a2f37;
+  --overlay: #22262d;
+  --muted: #9aa3ad;
+  --default: #22262d;
+  --field-background: #171a1f;
+  --border: #2e343c;
+  --separator: #262b32;
+  --accent: #6b9bd8;
+  --accent-foreground: #10141a;
+  --success: #3fa06a;
+  --success-foreground: #10141a;
+  --warning: #e0a63a;
+  --danger: #e05252;
+  --focus: #6b9bd8;
+  --backdrop: #0b0d10a8;
   --radius: 0.25rem;
   --field-radius: 0.25rem;
 
-  --ph-cyan: #22d3ee;
-  --ph-accent-dim: color-mix(in srgb, var(--accent) 13%, transparent);
-  --ph-cyan-dim: color-mix(in srgb, var(--ph-cyan) 12%, transparent);
-  --ph-glow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
-  --ph-scanline: rgba(0, 0, 0, 0.16);
-  --ph-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --ph-accent-dim: color-mix(in srgb, var(--accent) 10%, transparent);
+  --ph-shadow-1: 0 1px 2px #0b0d1066;
+  --ph-shadow-2: 0 12px 40px #0b0d1080;
   color-scheme: dark;
 }
 
-/* ------------------------- 基底氛围 ------------------------- */
+/* ------------------------- 基底 ------------------------- */
 @layer base {
   html,
   body {
@@ -90,35 +89,11 @@
     background: var(--background);
     color: var(--foreground);
   }
-  /* 磷光氛围底（双 radial，取自本方向 palette） */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background:
-      radial-gradient(1100px 480px at 18% -8%, var(--ph-accent-dim), transparent 62%),
-      radial-gradient(900px 420px at 92% 108%, var(--ph-cyan-dim), transparent 60%);
-  }
-  /* 极淡 scanline：浅色 / reduced-motion 关闭 */
-  body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: 2000;
-    pointer-events: none;
-    background: repeating-linear-gradient(0deg, var(--ph-scanline) 0 1px, transparent 1px 3px);
-    opacity: 0.16;
-  }
-  :root[data-theme="light"] body::after {
-    display: none;
-  }
   ::selection {
     background: var(--accent);
     color: var(--accent-foreground);
   }
-  /* 自定义滚动条（取自本方向 palette） */
+  /* 自定义滚动条（中性，取自令牌） */
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--border) var(--surface);
@@ -139,9 +114,6 @@
     background: var(--muted);
   }
   @media (prefers-reduced-motion: reduce) {
-    body::after {
-      display: none;
-    }
     *,
     *::before,
     *::after {
@@ -181,8 +153,8 @@
     bottom: 0;
     width: min(clamp(420px, 36vw, 640px), calc(100% - 3rem));
     z-index: 30;
-    box-shadow: var(--ph-shadow);
-    animation: wb-drawer-in 200ms ease-out;
+    box-shadow: var(--ph-shadow-2);
+    animation: wb-drawer-in 160ms ease-out;
   }
 
   .wb-detail-panel--env.wb-detail-panel--open {
@@ -192,7 +164,7 @@
   @keyframes wb-drawer-in {
     from {
       opacity: 0;
-      transform: translateX(24px);
+      transform: translateX(16px);
     }
     to {
       opacity: 1;
@@ -200,52 +172,49 @@
     }
   }
 
+  /* 概览 KV：两列，避免「单块独占一行」；窄屏一列 */
   .wb-kv-grid {
     @apply grid gap-3;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  @media (max-width: 640px) {
+    .wb-kv-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .wb-header-row {
     @apply grid grid-cols-1 gap-3 rounded p-2 font-mono text-sm;
   }
-
   @media (min-width: 640px) {
     .wb-header-row {
       grid-template-columns: 180px minmax(0, 1fr);
     }
   }
 
-  /* ---------------- 方向C 外壳：顶部横向导航 ---------------- */
+  /* ---------------- 方向A 外壳：顶栏内联主导航 ---------------- */
   .ph-nav {
-    @apply flex items-center gap-1 overflow-x-auto border-b border-border bg-surface px-3;
-    min-height: 42px;
+    @apply flex items-center gap-1;
   }
   .ph-navitem {
-    @apply relative flex-none gap-2 font-mono text-sm;
+    @apply relative flex-none gap-2 text-sm;
   }
   .ph-navitem--active {
-    @apply text-accent;
+    @apply text-foreground font-semibold;
     box-shadow: inset 0 -2px 0 var(--accent);
-  }
-  .ph-navitem--active .ph-navcode {
-    color: var(--accent);
-  }
-  .ph-navcode {
-    @apply text-xs text-muted;
   }
   .ph-navbadge {
     @apply ml-1 rounded px-1 font-mono text-xs;
-    background: var(--ph-accent-dim);
-    color: var(--accent);
+    background: var(--surface-tertiary);
+    color: var(--muted);
   }
 
-  /* LED 状态点（语义色 + 磷光 glow） */
+  /* LED 状态点：语义色，无霓虹辉光（绿=在线/健康） */
   .ph-led {
     @apply inline-block size-2 flex-none rounded-full;
   }
   .ph-led--ok {
     background: var(--success);
-    box-shadow: var(--ph-glow);
   }
   .ph-led--warn {
     background: var(--warning);
@@ -257,7 +226,7 @@
     background: var(--muted);
   }
   .ph-led--live {
-    animation: ph-pulse 1.2s ease-in-out infinite;
+    animation: ph-pulse 1.6s ease-in-out infinite;
   }
   @keyframes ph-pulse {
     0%,
@@ -265,11 +234,11 @@
       opacity: 1;
     }
     50% {
-      opacity: 0.35;
+      opacity: 0.45;
     }
   }
 
-  /* 底部状态栏（appliance statusbar） */
+  /* 底部状态栏：只保留用户可用信息 */
   .ph-statusbar {
     @apply flex items-center gap-3 overflow-x-auto border-t border-border bg-surface px-6 font-mono text-xs text-muted;
     min-height: 32px;
@@ -284,14 +253,14 @@
   /* 反馈区：外壳头下方右上，容器点击穿透 */
   .ph-feedback {
     @apply pointer-events-none fixed right-4 z-50 flex flex-col gap-2;
-    top: 108px;
+    top: 64px;
   }
   .ph-feedback > * {
     @apply pointer-events-auto;
-    box-shadow: var(--ph-shadow);
+    box-shadow: var(--ph-shadow-2);
   }
 
-  /* boot sequence（签名时刻；reduced-motion 由 base 层降为即时） */
+  /* boot sequence（克制版；reduced-motion 由 base 层降为即时） */
   .ph-boot {
     @apply fixed inset-0 z-[3000] flex items-center justify-center bg-background;
   }
@@ -300,16 +269,16 @@
   }
   .ph-boot .ph-bootline {
     opacity: 0;
-    animation: ph-bootline 0.3s ease-out forwards;
+    animation: ph-bootline 0.25s ease-out forwards;
   }
   .ph-boot .ph-bootline:nth-child(1) { animation-delay: 0.02s; }
-  .ph-boot .ph-bootline:nth-child(2) { animation-delay: 0.12s; }
-  .ph-boot .ph-bootline:nth-child(3) { animation-delay: 0.22s; }
-  .ph-boot .ph-bootline:nth-child(4) { animation-delay: 0.32s; }
-  .ph-boot .ph-bootline:nth-child(5) { animation-delay: 0.42s; }
-  .ph-boot .ph-bootline:nth-child(6) { animation-delay: 0.52s; }
-  .ph-boot .ph-bootline:nth-child(7) { animation-delay: 0.62s; }
-  .ph-boot .ph-bootline:nth-child(8) { animation-delay: 0.72s; }
+  .ph-boot .ph-bootline:nth-child(2) { animation-delay: 0.1s; }
+  .ph-boot .ph-bootline:nth-child(3) { animation-delay: 0.18s; }
+  .ph-boot .ph-bootline:nth-child(4) { animation-delay: 0.26s; }
+  .ph-boot .ph-bootline:nth-child(5) { animation-delay: 0.34s; }
+  .ph-boot .ph-bootline:nth-child(6) { animation-delay: 0.42s; }
+  .ph-boot .ph-bootline:nth-child(7) { animation-delay: 0.5s; }
+  .ph-boot .ph-bootline:nth-child(8) { animation-delay: 0.58s; }
   @keyframes ph-bootline {
     from {
       opacity: 0;
@@ -327,6 +296,85 @@
     color: var(--warning);
   }
   .ph-bootcyan {
-    color: var(--ph-cyan);
+    color: var(--muted);
+  }
+
+  /* ---------------- 方向A 结构件 ---------------- */
+
+  /* 页内分段控件：外层 w-fit 容器提供「药丸」底/描边（见 JSX），
+     tablist 透明铺满该容器；tab 不拉伸（压过 HeroUI 的 flex-1 工具类）。
+     选中态由 SEG_TAB 的 data- 工具类提供。 */
+  .wb-seg [role="tablist"] {
+    gap: 2px;
+    background: transparent;
+    border: none;
+    padding: 0;
+  }
+  .wb-seg [role="tab"] {
+    flex: none !important;
+    width: auto !important;
+  }
+
+  /* 抽屉打开时把可用宽度让给表格（r3 §9.3 改法A）：列表右缘 = 抽屉左缘 − 8px，
+     列在收敛后的宽度内重新分配，操作列不再落在抽屉底下。 */
+  .wb-list-inset {
+    margin-right: calc(min(clamp(520px, 48vw, 860px), calc(100% - 3rem)) + 8px);
+  }
+
+  /* 面板级下划线 tab（r2 P1④⑤）：与页级药丸分段区分形态。 */
+  .wb-utabs [role="tablist"] {
+    width: 100%;
+    gap: 0.25rem;
+    padding: 0 1rem;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+  }
+  .wb-utabs [role="tab"] {
+    flex: none !important;
+    width: auto !important;
+    border-radius: 0;
+    padding: 0.5rem 0.625rem;
+    color: var(--muted);
+  }
+  .wb-utabs [role="tab"][data-selected="true"] {
+    color: var(--foreground);
+    font-weight: 600;
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  /* 表格密度：行高收到 ~56px，单行标识符；选中行单一accent指示 */
+  .table__cell {
+    padding-block: 0.75rem;
+  }
+  .table__column {
+    padding-block: 0.4rem;
+  }
+  .table__row {
+    transition: background-color 0.12s ease;
+  }
+  .table__row[data-hovered="true"] {
+    background: var(--surface-secondary);
+  }
+  .table__row[data-selected="true"] {
+    background: var(--ph-accent-dim);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .table__column {
+    @apply text-xs font-medium text-muted;
+    letter-spacing: 0.02em;
+  }
+
+  /* 主操作：单一accent实心，无渐变/辉光 */
+  .button--primary {
+    background: var(--accent);
+    color: var(--accent-foreground);
+  }
+  .button[data-focus-visible="true"] {
+    box-shadow: 0 0 0 2px var(--focus);
+  }
+
+  /* 表面：中性分层，仅细描边 + 轻投影 */
+  .surface {
+    box-shadow: var(--ph-shadow-1);
   }
 }

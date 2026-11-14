@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   AlertDialog,
   Button,
@@ -9,6 +9,7 @@ import {
 } from "@heroui/react";
 
 import { IconAlert, IconInfo } from "./icons";
+import { errorTitle } from "./errors";
 import { Hint } from "./shared";
 
 /* ------------------------------------------------------------------ */
@@ -93,6 +94,7 @@ export function FormDialog({
   note,
   children,
   confirmLabel = "确定",
+  confirmDisabled = false,
   onConfirm,
 }: {
   isOpen: boolean;
@@ -101,11 +103,50 @@ export function FormDialog({
   note?: string;
   children?: ReactNode;
   confirmLabel?: string;
-  onConfirm: () => void;
+  /** 校验未通过时禁用确认键：非法输入不能静默关窗（调用方接各自的 invalid）。 */
+  confirmDisabled?: boolean;
+  /** 返回非空字符串 = 展示在对话框内的错误文案（原样）；null/undefined/void = 成功并关窗。 */
+  onConfirm: () => void | string | null | Promise<void | string | null>;
 }) {
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  // 重开时清空：上一次的失败原因不得串到下一次输入。
+  useEffect(() => {
+    if (isOpen) {
+      setError(null);
+      setSubmitting(false);
+    }
+  }, [isOpen]);
+
+  async function handleConfirm(close: () => void) {
+    if (submitting) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      const result = await onConfirm();
+      if (typeof result === "string" && result.length > 0) {
+        setError(result);
+        return;
+      }
+      close();
+    } catch (err: unknown) {
+      // 只有抛错才走统一错误呈现；返回字符串由调用方决定文案。
+      setError(errorTitle(err, title));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <Modal>
-      <Modal.Backdrop isOpen={isOpen} onOpenChange={onOpenChange}>
+      <Modal.Backdrop
+        isOpen={isOpen}
+        onOpenChange={(open) => {
+          if (!open) setError(null);
+          onOpenChange(open);
+        }}
+      >
         <Modal.Container placement="center" size="md">
           <Modal.Dialog>
             {({ close }) => (
@@ -122,6 +163,15 @@ export function FormDialog({
                   <ScrollShadow className="max-h-96">
                     <div className="flex flex-col gap-4">
                       {children}
+                      {error ? (
+                        <p
+                          className="text-sm leading-relaxed text-danger"
+                          data-slot="form-error"
+                          role="alert"
+                        >
+                          {error}
+                        </p>
+                      ) : null}
                       {note ? (
                         <>
                           <Separator />
@@ -138,11 +188,9 @@ export function FormDialog({
                     取消
                   </Button>
                   <Button
+                    isDisabled={confirmDisabled || submitting}
                     variant="primary"
-                    onPress={() => {
-                      onConfirm();
-                      close();
-                    }}
+                    onPress={() => void handleConfirm(close)}
                   >
                     {confirmLabel}
                   </Button>

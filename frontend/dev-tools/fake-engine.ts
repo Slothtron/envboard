@@ -127,6 +127,21 @@ function findEnv(name: string): EnvState {
   return env;
 }
 
+/** 名称归一化 + 白名单校验：镜像真引擎 domain::environment（trim → 小写 →
+    `^[a-z][a-z0-9_-]{0,31}$`）。mock 不做这层就会放进真身必拒的名字，
+    走查时把「前端校验缺失」误判成「后端接受」。 */
+function normalizeName(raw: string, field: string, label: string): string {
+  const name = raw.trim().toLowerCase();
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+    fail(
+      "invalid_config",
+      `invalid ${label} '${raw}': must match ^[a-z][a-z0-9_-]{0,31}$`,
+      field,
+    );
+  }
+  return name;
+}
+
 function countRules(text: string): number {
   return text
     .split("\n")
@@ -340,11 +355,12 @@ export function dispatch(command: string, args: Args): unknown {
       return view(findEnv(str(args, "name")));
     case "env_create": {
       const body = (args.body ?? {}) as EnvCreateReq;
-      if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      if (typeof body.name !== "string") {
         fail("invalid_config", "environment name must not be empty", "name");
       }
-      if (envs.some((e) => e.name === body.name)) {
-        fail("conflict", `environment '${body.name}' already exists`, "name");
+      const name = normalizeName(body.name, "name", "environment name");
+      if (envs.some((e) => e.name === name)) {
+        fail("conflict", `environment '${name}' already exists`, "name");
       }
       let port: number;
       if (body.listen?.port !== undefined) {
@@ -356,7 +372,7 @@ export function dispatch(command: string, args: Args): unknown {
         port = allocatePort();
       }
       const env: EnvState = {
-        name: body.name,
+        name,
         host: body.listen?.host ?? "127.0.0.1",
         port,
         rules: body.rules ?? null,
@@ -638,7 +654,7 @@ export function dispatch(command: string, args: Args): unknown {
       return { name, text };
     }
     case "rules_import": {
-      const name = str(args, "name");
+      const name = normalizeName(str(args, "name"), "name", "rules name");
       const text = str(args, "text");
       rules.set(name, text);
       const summary: RuleSummary = { name, path: `(mock) state-dir/rules/${name}.rules` };
@@ -656,21 +672,26 @@ export function dispatch(command: string, args: Args): unknown {
       return [...proxies.values()].map(proxyView);
     case "proxies_put": {
       const body = (args.body ?? {}) as ProxyPutReq;
-      if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      if (typeof body.name !== "string") {
         fail("invalid_config", "proxy name must not be empty", "name");
       }
-      if (typeof body.host !== "string" || body.host.trim().length === 0) {
-        fail("invalid_config", "proxy host must not be empty", "host");
+      const name = normalizeName(body.name, "name", "upstream name");
+      if (typeof body.host !== "string" || !/^[A-Za-z0-9._-]+$/.test(body.host.trim())) {
+        fail("invalid_config", `'${body.host}' is not a valid domain name or IP literal`, "host");
       }
-      const existing = proxies.get(body.name);
+      const port = body.port ?? proxies.get(name)?.port;
+      if (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
+        fail("invalid_config", `port ${port} is out of range (1..=65535)`, "port");
+      }
+      const existing = proxies.get(name);
       const state: ProxyState = {
-        name: body.name,
-        host: body.host,
-        port: body.port ?? existing?.port ?? 8080,
+        name,
+        host: body.host.trim(),
+        port,
         user: body.user !== undefined ? body.user : (existing?.user ?? null),
         password: body.password !== undefined ? body.password : (existing?.password ?? null),
       };
-      proxies.set(body.name, state);
+      proxies.set(name, state);
       notifyEnv();
       return proxyView(state);
     }

@@ -34,26 +34,29 @@ export function StatusBar({ statusInfo, environments, streamConnected }: StatusB
   const utc = now.toISOString().slice(11, 19);
 
   return (
-    <footer className="ph-statusbar" aria-label="工作台状态栏">
+    <footer className="ph-statusbar font-sans" aria-label="工作台状态栏">
       <span className="flex flex-none items-center gap-2">
         <span aria-hidden="true" className={`ph-led ${streamConnected ? "ph-led--ok" : "ph-led--err"}`} />
-        <b>state</b>
-        <span className="truncate">{statusInfo?.config.state_dir ?? "…"}</span>
+        <span>{streamConnected ? "事件流已连接" : "事件流已断开"}</span>
       </span>
-      {warnings.map((w) => (
-        <span key={w} className="ph-warnchip">
-          <IconAlert className="size-3" />
-          {w}
-        </span>
-      ))}
+      {warnings.length === 0 ? (
+        <span className="flex-none">装配正常</span>
+      ) : (
+        warnings.map((w) => (
+          <span key={w} className="ph-warnchip">
+            <IconAlert className="size-3" />
+            {w}
+          </span>
+        ))
+      )}
       <span className="ml-auto flex flex-none items-center gap-3">
         <span>
-          端口区间 <b>{formatPortRange(statusInfo?.config.port_range)}</b>
+          端口区间 <b className="font-mono">{formatPortRange(statusInfo?.config.port_range)}</b>
         </span>
         <span>
-          丢弃 <b>{statusInfo?.events_dropped ?? 0}</b>
+          丢弃 <b className="font-mono">{statusInfo?.events_dropped ?? 0}</b>
         </span>
-        <span>{utc} UTC</span>
+        <span className="font-mono">{utc} UTC</span>
       </span>
     </footer>
   );

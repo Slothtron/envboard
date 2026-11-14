@@ -1,7 +1,32 @@
 import type { ReactNode } from "react";
 import { Alert, Button, Chip, Separator, Skeleton, Spinner, Surface } from "@heroui/react";
 
+import type { EnvView } from "./api/types";
+import { healthLabel, healthTone } from "./data";
 import { IconAlert, IconRefresh, IconTray } from "./icons";
+
+/* 页内分段控件的 tab 样式（宽度随文字、选中实心，区别于主导航下划线）。
+   用 data- 工具类保证生效（不依赖被 HeroUI 工具类压过的自定义层）。 */
+export const SEG_TAB =
+  "rounded px-3 py-1 text-sm text-muted data-[selected=true]:bg-surface data-[selected=true]:font-semibold data-[selected=true]:text-foreground";
+
+/* 唯一状态组件（方向A ⑬）：点 + 字 + 语义色，列表/抽屉/顶栏/状态栏同源。 */
+const STATUS_LED: Record<string, string> = {
+  success: "ph-led--ok",
+  warning: "ph-led--warn",
+  danger: "ph-led--err",
+  muted: "ph-led--idle",
+};
+
+export function StatusBadge({ health, className }: { health: EnvView["health"]; className?: string }) {
+  const led = STATUS_LED[healthTone(health)] ?? "ph-led--idle";
+  return (
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${className ?? ""}`}>
+      <span aria-hidden="true" className={`ph-led ${led}`} />
+      <span className="text-sm text-foreground">{healthLabel(health)}</span>
+    </span>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* 分区标题（替代原 HTML 的 .section-title：分组先于平铺）              */
@@ -9,7 +34,7 @@ import { IconAlert, IconRefresh, IconTray } from "./icons";
 
 export function SectionTitle({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
-    <div className="flex items-center gap-2 pb-2">
+    <div className="wb-section flex items-center gap-2 pb-2">
       <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">{children}</h3>
       <Separator className="flex-1" />
       {trailing}
@@ -195,9 +220,9 @@ export function FilterButton({
 /* 抓包：方法徽标与状态码着色（语义色贯穿列表）                          */
 /* ------------------------------------------------------------------ */
 
-const METHOD_COLOR: Record<string, "success" | "accent" | "warning" | "danger"> = {
-  GET: "success",
-  POST: "accent",
+const METHOD_COLOR: Record<string, "default" | "success" | "accent" | "warning" | "danger"> = {
+  GET: "default",
+  POST: "default",
   PUT: "warning",
   DELETE: "danger",
 };
@@ -212,10 +237,12 @@ export function MethodChip({ method }: { method: string }) {
 }
 
 export function statusTone(status: number): string {
-  if (status >= 500) return "font-mono font-semibold text-danger";
+  // 0 = ERR/缺响应：保留错误信号，不静默变灰。
+  if (status === 0 || status >= 500) return "font-mono font-semibold text-danger";
   if (status >= 400) return "font-mono font-semibold text-warning";
-  if (status >= 300) return "font-mono font-semibold text-accent";
-  return "font-mono font-semibold text-success";
+  if (status >= 300) return "font-mono font-semibold text-muted";
+  // 1xx/2xx：正常回执用正文色，绿色只留给健康态。
+  return "font-mono font-semibold text-foreground";
 }
 
 /* ------------------------------------------------------------------ */

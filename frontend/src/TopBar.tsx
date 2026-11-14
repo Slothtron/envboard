@@ -2,24 +2,11 @@ import { useState } from "react";
 import { Button, Chip, Tooltip } from "@heroui/react";
 
 import { IconGear, IconLayers, IconRefresh } from "./icons";
-import { FilterButton } from "./shared";
+import { SideBar } from "./SideBar";
+import type { ViewKey } from "./data";
 import { rememberTheme, storedChoice, type ThemeChoice } from "./theme";
 
 export type MetricKey = "all" | "running" | "issues" | "stopped";
-
-const LED_TONE: Record<MetricKey, string> = {
-  all: "ph-led--idle",
-  running: "ph-led--ok",
-  issues: "ph-led--warn",
-  stopped: "ph-led--idle",
-};
-
-const METRICS: Array<{ key: MetricKey; label: string }> = [
-  { key: "all", label: "全部" },
-  { key: "running", label: "运行中" },
-  { key: "issues", label: "需处理" },
-  { key: "stopped", label: "已停止" },
-];
 
 const THEME_LABEL: Record<ThemeChoice, string> = {
   dark: "深色",
@@ -29,27 +16,29 @@ const THEME_LABEL: Record<ThemeChoice, string> = {
 
 interface TopBarProps {
   counts: Record<MetricKey, number>;
-  metric: MetricKey;
-  /** 引擎 core 版本（GET /api/status）；加载中为「…」 */
   coreVersion: string;
-  onMetricChange: (key: MetricKey) => void;
   onRefresh: () => void;
-  /** 右上角全局设置入口（模态，不含证书） */
   onOpenSettings: () => void;
   isRefreshing: boolean;
-  /** 事件流连接态；false 时 LED 转危险色 */
   streamConnected: boolean;
+  view: ViewKey;
+  onViewChange: (view: ViewKey) => void;
+  navCounts: Partial<Record<ViewKey, number>>;
 }
 
+/**
+ * 方向A 单一顶栏：品牌 + 内联主导航（环境/证书）+ 不可点状态摘要 + 全局动作。
+ * 筛选只保留在环境页工具栏一处（去重复控件）；顶栏摘要仅展示、不可点。
+ */
 export function TopBar({
-  counts,
-  metric,
   coreVersion,
-  onMetricChange,
   onRefresh,
   onOpenSettings,
   isRefreshing,
   streamConnected,
+  view,
+  onViewChange,
+  navCounts,
 }: TopBarProps) {
   const [choice, setChoice] = useState<ThemeChoice>(() => storedChoice());
   const cycleTheme = () => {
@@ -59,45 +48,22 @@ export function TopBar({
   };
 
   return (
-    <header className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-surface px-6 py-2">
-      {/* 品牌：磷光方砖 + appliance 代号 */}
-      <div className="flex flex-none items-center gap-3">
+    <header className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-surface px-4 py-2">
+      <div className="flex flex-none items-center gap-2">
+        {/* 品牌签名：单色 steel-blue mark（克制，不发光） */}
         <span
           aria-hidden="true"
-          className="grid size-8 place-items-center rounded bg-accent text-accent-foreground"
+          className="grid size-7 place-items-center rounded bg-accent text-accent-foreground"
         >
           <IconLayers className="size-4" />
         </span>
-        <span className="flex items-baseline gap-2 leading-tight">
-          <span className="text-lg font-bold tracking-wide text-foreground">envboard</span>
-          <span className="font-mono text-xs text-muted">[APPLIANCE]</span>
-        </span>
+        <span className="text-base font-bold tracking-wide text-foreground">envboard</span>
       </div>
 
-      {/* 顶栏健康总览：点击即筛选列表（单一过滤入口） */}
-      <div
-        aria-label="全局概览（点击筛选列表）"
-        className="order-3 flex w-full flex-none flex-wrap items-center gap-1 sm:order-none sm:w-auto"
-        role="group"
-      >
-        {METRICS.map((m) => (
-          <FilterButton
-            key={m.key}
-            count={counts[m.key]}
-            isActive={metric === m.key}
-            onPress={() => onMetricChange(m.key)}
-          >
-            {m.key === "all" ? null : (
-              <span aria-hidden="true" className={`ph-led ${LED_TONE[m.key]}`} />
-            )}
-            {m.label}
-          </FilterButton>
-        ))}
-      </div>
+      <SideBar navCounts={navCounts} streamConnected={streamConnected} view={view} onViewChange={onViewChange} />
 
       <div className="ml-auto flex min-w-0 items-center gap-2">
-        <Chip className="hidden sm:inline-flex" color="success" size="sm" variant="soft">
-          <span aria-hidden="true" className="ph-led ph-led--ok" />
+        <Chip className="hidden sm:inline-flex" size="sm" variant="soft">
           <Chip.Label>core {coreVersion}</Chip.Label>
         </Chip>
         <Chip color={streamConnected ? "success" : "danger"} size="sm" variant="soft">
