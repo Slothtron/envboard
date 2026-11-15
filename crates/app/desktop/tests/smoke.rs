@@ -206,3 +206,50 @@ fn a_second_instance_activates_the_running_workbench() {
     drop(wb);
     let _ = std::fs::remove_dir_all(&state);
 }
+
+#[test]
+fn a_foreign_executable_is_rejected_for_activation() {
+    // SOP §6：激活管道校验调用方 exe 路径。把 exe 复制到别处（不同路径）再以
+    // 同 state-dir 运行 —— 它不是「本程序」，必须被拒绝（退出非 0），第一个实例
+    // 不为它开窗、继续存活。合法同 exe 的激活由上一个用例覆盖。
+    let state = state_dir("foreign");
+    let mut wb = spawn(&state, &[]);
+    assert!(
+        wait_lock(&state, Duration::from_secs(30)),
+        "第一个实例没起来（锁文件未出现）"
+    );
+
+    // 复制出一个「外来」可执行文件（路径不同于第一个实例；exe 自包含，无同目录 DLL）。
+    let foreign =
+        std::env::temp_dir().join(format!("envboard-smoke-foreign-{}.exe", std::process::id()));
+    std::fs::copy(envboard(), &foreign).expect("copy exe to a foreign path");
+
+    let second = Command::new(&foreign)
+        .arg("--state-dir")
+        .arg(&state)
+        .arg("--no-dialog")
+        .output()
+        .expect("spawn a foreign instance");
+    let _ = std::fs::remove_file(&foreign);
+
+    assert!(
+        !second.status.success(),
+        "外来可执行文件的激活必须被拒绝（退出非 0）：{second:?}"
+    );
+    let text = String::from_utf8_lossy(&second.stderr).into_owned();
+    assert!(text.contains("被拒绝"), "外来实例要说明它被拒绝：{text}");
+    assert!(
+        !text.contains("已有实例"),
+        "外来实例不能被当成合法激活：{text}"
+    );
+    assert!(
+        wb.is_running(),
+        "第一个实例必须继续存活（不为外来进程开窗）"
+    );
+    assert!(
+        state.join("lock").exists(),
+        "状态目录的单实例锁仍由第一个实例持有"
+    );
+    drop(wb);
+    let _ = std::fs::remove_dir_all(&state);
+}

@@ -37,7 +37,10 @@ preview 不发 NSIS：安装包是 perMachine，会装到同一个 `C:\Program F
 
 标签与版本号必须一致：workflow 会核对 `v$version` 与 `Cargo.toml` 的
 `[workspace.package] version`，不一致直接失败。**发预览要先把版本号改成
-`X.Y.Z-preview.N`**（根 `Cargo.toml` 与 `crates/app/desktop/Cargo.toml` 两处同步）。
+`X.Y.Z-preview.N`**。版本触点共六处，缺一会漂移：根 `Cargo.toml`
+`[workspace.package]`、`crates/app/desktop/Cargo.toml`（自成 workspace，字面写死）、
+`crates/app/desktop/tauri.conf.json`、`frontend/package.json`、`README.md`「当前版本」、
+`CHANGELOG.md`；改完根与 desktop 各跑 `cargo update -w --offline` 刷新两份 `Cargo.lock`。
 
 ```bash
 cd crates/app/desktop
@@ -64,8 +67,11 @@ cargo tauri build --no-bundle      # 只出裸 exe（preview 渠道的形态）
 - **便携包 zip**（exe + `envboard.portable`）：解压即用，数据在解压目录的
   `envboard-data\`，WebView2 profile、标题与端口段都是 portable 形态，可与安装版并存；
   整个目录可搬走，删目录即卸载。
-- **没有代码签名**：未签名 exe 第一次运行会撞 SmartScreen（"Windows 已保护你的
-  电脑"），点「更多信息 → 仍要运行」。去掉提示只能买证书签名。
+- **没有 Authenticode 签名，但有完整性与来源证明**：未签名 exe 第一次运行会撞
+  SmartScreen（"Windows 已保护你的电脑"），点「更多信息 → 仍要运行」；去掉该提示
+  只能买证书签名。Release 另附 `SHA256SUMS` 校验和与 cosign keyless 签名
+  （`.sigstore`），用 `sha256sum -c SHA256SUMS` 与
+  `cosign verify-blob --bundle <产物>.sigstore <产物>` 验证完整性与来源。
 - **杀软误报**：单文件 Rust 二进制偶发被启发式引擎标记，加白或上报即可。
 - **没有自动更新**：新版本从 Releases 重新下载覆盖即可；应用内不检查更新。
 - **平台**：首个版本只发 Windows x64。

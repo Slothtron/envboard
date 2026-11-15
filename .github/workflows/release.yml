@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: write
+  # cosign keyless 签名（Fulcio 短期证书 + Rekor 透明日志）需要 OIDC token。
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -132,6 +134,27 @@ jobs:
           ls -lh dist
           powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'dist/$zip')).Entries | ForEach-Object { \$_.FullName }"
 
+      # 完整性 + 供应链可审计（SOP §5）：SHA256SUMS 覆盖全部产物，cosign keyless
+      # 逐个签名（含 SHA256SUMS 本身）。.sigstore 随 dist/* 进 artifact 与 Release。
+      # 注意：cosign ≠ Authenticode，不消除 SmartScreen，只证明「产物来自本仓库本次构建」。
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum *.exe *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifacts (keyless)
+        shell: bash
+        run: |
+          cd dist
+          for f in *.exe *.zip SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore" "$f"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: envboard-windows-x64-${{ steps.version.outputs.channel }}
@@ -156,7 +179,9 @@ jobs:
             - `*_x64-setup.exe`：NSIS 安装包（perMachine，安装/卸载各一次 UAC），
               装到 `C:\Program Files\envboard`；数据在 `%LOCALAPPDATA%\envboard`。
 
-            未签名：首次运行会撞 SmartScreen，点「更多信息 → 仍要运行」。
+            未做 Authenticode 签名：首次运行仍会撞 SmartScreen，点「更多信息 → 仍要运行」。
+            产物附 SHA256SUMS 校验和与 cosign keyless 签名（`.sigstore`），可验证完整性与来源：
+            `sha256sum -c SHA256SUMS`；`cosign verify-blob --bundle <产物>.sigstore <产物>`。
 
       - name: Publish GitHub Release (preview)
         if: startsWith(github.ref, 'refs/tags/v') && steps.version.outputs.channel == 'preview'
@@ -176,4 +201,6 @@ jobs:
               独立目录；正式版的 `%LOCALAPPDATA%\envboard` 不受影响。
             - 默认端口段 `17000-17999`（正式版 `16000-16999`），两套环境可以同时跑。
 
-            未签名：首次运行会撞 SmartScreen，点「更多信息 → 仍要运行」。
+            未做 Authenticode 签名：首次运行仍会撞 SmartScreen，点「更多信息 → 仍要运行」。
+            产物附 SHA256SUMS 校验和与 cosign keyless 签名（`.sigstore`），可验证完整性与来源：
+            `sha256sum -c SHA256SUMS`；`cosign verify-blob --bundle <产物>.sigstore <产物>`。

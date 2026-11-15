@@ -3,7 +3,7 @@ name = "envboard-desktop"
 description = "envboard 桌面形态：Tauri 壳。WebView 里的界面经 IPC 直调 AdminService 门面，不起任何监听端口。"
 # 这几个字段不写 `.workspace = true`：本 crate 自成一个 workspace（见下），继承不到
 # 仓库根的 [workspace.package]，取值与根保持一致但字面写死。
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
@@ -68,8 +68,12 @@ envboard-engine-fake = { path = "../../core/engine-fake" }
 webview2-com = "=0.39.1"
 # Interface trait（.cast 拿 Settings3）；与 webview2-com-sys 同版保证类型同一。
 windows-core = "=0.62.2"
-# 二次启动激活（ADR-012）：命名内核事件 + 等待线程。只用 Foundation/Threading
-# 两个 feature；0.61 已在 tauri 依赖树里（lock 已含），不引入新版本。
-# WindowsAndMessaging 是窗口几何要用的 `IsZoomed`（tao 缓存的 `is_maximized`
-# 在最大化瞬间还来不及翻转，见 geometry 模块）。
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# 二次启动激活（ADR-012）+ 调用方校验（SOP §6）：命名管道 + 等待线程。
+# 0.61 已在 tauri 依赖树里（lock 已含），不引入新版本。各 feature 用途：
+# - Foundation/Threading：句柄/错误码 + OpenProcess/QueryFullProcessImageNameW；
+# - Pipes/Storage_FileSystem/Security/Security_Authorization：CreateNamedPipeW
+#   （需 Security+FileSystem）、CreateFileW、owner-only DACL（SDDL）；
+# - System_IO：ConnectNamedPipe/ReadFile/WriteFile 的 OVERLAPPED 参数门控在此；
+# - WindowsAndMessaging：窗口几何要用的 `IsZoomed`（tao 缓存的 `is_maximized`
+#   在最大化瞬间还来不及翻转，见 geometry 模块）。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_System_IO"] }

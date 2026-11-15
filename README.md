@@ -111,7 +111,7 @@ cd crates/app/desktop && cargo tauri build   # 发布产物 + NSIS 安装包
 
 ## 版本与许可
 
-当前版本 **0.2.1**（根 `Cargo.toml` 的 `[workspace.package]`），与 git tag 一致是
+当前版本 **0.2.2**（根 `Cargo.toml` 的 `[workspace.package]`），与 git tag 一致是
 发布前置条件。版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 [MIT](LICENSE) © Slothtron

@@ -4,6 +4,16 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 0.2.2 — 2026-11-15
+
+- **二次启动激活加调用方校验（SOP §6）**：激活机制从命名内核事件改为命名管道，
+  服务端用 `GetNamedPipeClientProcessId` + `QueryFullProcessImageNameW` 校验调用方
+  exe 路径，只有同一可执行文件才开窗，外来进程被拒（退出非 0）；管道加 owner-only
+  DACL 挡跨用户。合法的同程序二次启动仍拉回前台，语义不变。
+- **发布产物附完整性与来源证明（SOP §5）**：Release 增加 `SHA256SUMS` 校验和与
+  cosign keyless 签名（`.sigstore`，Fulcio + Rekor），可验证产物未被篡改、来自本仓库
+  本次构建。仍无 Authenticode 签名，SmartScreen 提示不变。
+
 ## 0.2.1 — 2026-11-15
 
 - **UI 方向改为「设备控制台」（方向A）**：中性深灰 / 浅灰双主题、单一钢蓝强调色

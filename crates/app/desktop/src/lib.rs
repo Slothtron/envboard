@@ -150,13 +150,18 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
         eprintln!("envboard: {tag} 形态，数据目录与正式版隔离（{app_name}）");
     }
 
-    // ADR-012：同一 state-dir 的第二个实例只做激活 —— 在 Tauri 之前就能判定，
-    // 不建窗口、不拿锁、不写状态。解析 state-dir 失败就照常启动（由 boot 报错）。
+    // ADR-012 + SOP §6：同一 state-dir 的第二个实例只做激活 —— 在 Tauri 之前就能
+    // 判定，不建窗口、不拿锁、不写状态。激活走命名管道并校验调用方 exe 路径，
+    // 外来进程被拒（Rejected）。解析 state-dir 失败就照常启动（由 boot 报错）。
     let waiter = match host_options(&cli, &app_name, &profile) {
         Ok(options) => match activation::preflight(&options) {
             activation::Preflight::Activated => {
                 eprintln!("envboard: 已有实例在运行，已请求它回到前台");
                 return std::process::ExitCode::SUCCESS;
+            }
+            activation::Preflight::Rejected => {
+                eprintln!("envboard: 激活请求被拒绝（调用方不是本程序）");
+                return std::process::ExitCode::FAILURE;
             }
             activation::Preflight::Owner(handle) => {
                 open_diagnostics(&cli, &options, &profile);
