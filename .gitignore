@@ -12,6 +12,9 @@ envboard.json
 # 仓库只留项目本身的文档（README.md / CHANGELOG.md / docs/ / rustdoc / examples 示例）。
 .agents/
 
+# 特性分支 worktree 落位（git worktree add .worktrees/<名>）：本机工作副本，不入库。
+.worktrees/
+
 # 真实 hosts 映射：含内网 IP 与内部域名，只在本机当导入源用，不入库。
 # 仓库里保留的是脱敏示例 examples/hosts.sample.txt。
 /examples/hosts.txt
