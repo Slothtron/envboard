@@ -4,7 +4,7 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## Unreleased — UI 第二轮整合（抓包密度 / 视觉收敛 / 功能快修）
+## 0.2.3 — 2026-11-16
 
 - **抓包列表**：补齐滚动容器高度约束（原先全链路无可滚容器，滚轮无效）；行高收到
   ~29–33px；`table-fixed` + 语义列宽 + 截断处全值 title；抽屉打开时按 `--wb-drawer-w`
@@ -23,7 +23,7 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 - **清理**：删除死组件/死图标/无效 CSS 覆盖与方向 C 残留注释；修复 Dropdown Trigger
   嵌套 button 的 DOM 警告。
 - **人工验收反馈（同日）**：顶栏信息簇文字统一为 sans 12px/行盒 1（去掉主题标签的
-  mono），与徽标、齿轮/刷新同一基线；前端不再展示端口区间（空态、新建说明、配置
+  mono），与徽标、齿轮同一基线；前端不再展示端口区间（空态、新建说明、配置
   字段、设置页、状态栏），端口仅保留「可自行修改」的说明；底部状态栏精简为装配
   告警（无告警显示「装配正常」）与事件丢弃（>0 才显示），移除 UTC 时钟与端口区间；
   原生标题栏随应用主题切换（dark/light/system，Rust 侧 `ui_prefs_set` 与建窗时
