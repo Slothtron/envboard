@@ -26,7 +26,6 @@ interface SideBarProps {
   view: ViewKey;
   onViewChange: (view: ViewKey) => void;
   navCounts: Partial<Record<ViewKey, number>>;
-  streamConnected: boolean;
 }
 
 export function SideBar({ view, onViewChange, navCounts }: SideBarProps) {

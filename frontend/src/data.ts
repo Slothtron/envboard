@@ -38,7 +38,8 @@ export type HealthTone = "success" | "warning" | "danger" | "muted";
 export function healthTone(health: string): HealthTone {
   if (health === "running") return "success";
   if (health === "starting") return "warning";
-  if (health === "failed" || health === "port_conflict") return "danger";
+  // unhealthy 是"旧快照仍在服务"的危险态，不能落成灰字（V-64）
+  if (health === "failed" || health === "port_conflict" || health === "unhealthy") return "danger";
   return "muted";
 }
 
@@ -46,8 +47,10 @@ export function healthLabel(health: string): string {
   return HEALTH_LABEL[health] ?? health;
 }
 
-/** 期望与实际不一致（含 failed/unhealthy/port_conflict）= 需处理。 */
+/** 期望与实际不一致（含 failed/unhealthy/port_conflict/rules_missing）= 需处理。
+    状态栏装配警告与「需处理」筛选共用本判定，口径必须一致（V-5/D7）。 */
 export function envNeedsAttention(env: EnvView): boolean {
+  if (env.rules_missing) return true;
   if (env.health === "failed" || env.health === "unhealthy" || env.health === "port_conflict") {
     return true;
   }
@@ -63,15 +66,6 @@ export function listenAddress(env: EnvView): string {
 /** 绑定 0.0.0.0 = 局域网可达（概览「对外服务」）。 */
 export function isPublicListen(env: EnvView): boolean {
   return env.listen.host !== "127.0.0.1" && env.listen.host !== "::1";
-}
-
-/** 端口区间展示：/api/status 回显字符串；兼容 tuple/object 历史形态。 */
-export function formatPortRange(
-  p: string | [number, number] | { start: number; end: number } | undefined,
-): string {
-  if (!p) return "…";
-  if (typeof p === "string") return p;
-  return Array.isArray(p) ? `${p[0]}-${p[1]}` : `${p.start}-${p.end}`;
 }
 
 export function formatBytes(size: number): string {

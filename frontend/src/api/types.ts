@@ -1,6 +1,6 @@
 /**
  * Admin API 的 TypeScript 镜像 —— 唯一权威是 `crates/core/protocol`（DTO）与
- * `crates/app/web/src/api.rs`（端点）。本文件逐键对齐其 wire 形状（snake_case），
+ * `crates/app/desktop` 的命令面（IPC `invoke`）。本文件逐键对齐其 wire 形状（snake_case），
  * 改后端契约必须同步这里（envboard-protocol crate 文档 的「唯一词汇」纪律）。
  */
 

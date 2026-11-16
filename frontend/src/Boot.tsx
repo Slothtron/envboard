@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 /**
- * 方向C 签名时刻：boot sequence（[ OK ] 行 staggered 揭示）。
+ * 启动自检屏（[ OK ] 行 staggered 揭示）。
  * 自动进入（~1s），任意键/点击跳过；reduced-motion 立即进入。
  * 完成后从 DOM 卸载，不残留遮罩挡点击。
  *
@@ -11,12 +11,11 @@ import { useEffect, useState } from "react";
 export function Boot({ onDone }: { onDone: () => void }) {
   const [lines] = useState(() => [
     { tone: "ph-bootcyan", text: "envboard-engine · 本地环境代理工作台" },
-    { tone: "ph-bootok", text: "[ OK ] 状态文件载入 %LOCALAPPDATA%\\envboard\\state" },
+    { tone: "ph-bootok", text: "[ OK ] 状态文件载入" },
     { tone: "ph-bootok", text: "[ OK ] 装配环境账本 · 规则集 · 上游代理" },
     { tone: "ph-bootok", text: "[ OK ] 根 CA 就绪 · ECDSA P-256" },
-    { tone: "ph-bootok", text: "[ OK ] 事件流 /api/events 接线" },
-    { tone: "ph-bootwarn", text: "[WARN] 需处理环境见状态栏装配警告" },
-    { tone: "ph-bootok", text: "[ OK ] 端口区间 16000-16999" },
+    { tone: "ph-bootok", text: "[ OK ] 事件流接线" },
+    { tone: "ph-bootcyan", text: "[ INFO ] 装配警告见状态栏" },
     { tone: "ph-bootcyan", text: "> 进入工作台" },
   ]);
 

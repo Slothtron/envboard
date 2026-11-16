@@ -354,6 +354,19 @@ pub fn run(app_dir_name: &str) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// 把主题选择应用到原生窗口：Windows 深色标题栏（DWM）随应用主题，
+/// `system` = 交回系统跟随。失败不致命——偏好照常落盘，标题栏沿用系统配色。
+pub(crate) fn apply_native_theme(window: &tauri::WebviewWindow, choice: prefs::ThemeChoice) {
+    let native = match choice {
+        prefs::ThemeChoice::Dark => Some(tauri::Theme::Dark),
+        prefs::ThemeChoice::Light => Some(tauri::Theme::Light),
+        prefs::ThemeChoice::System => None,
+    };
+    if let Err(error) = window.set_theme(native) {
+        eprintln!("[envboard] 设置原生窗口主题失败：{error}");
+    }
+}
+
 /// 壳加固（ADR-009）：禁 WebView2 默认右键菜单与浏览器加速键
 /// （Ctrl+R/F5 刷新、Ctrl+P 打印、Ctrl+F 查找、缩放、DevTools 键）。
 /// MS 文档明确**保留编辑键**（Ctrl+C/V/X/A/Z 等）——禁的是浏览器行为，

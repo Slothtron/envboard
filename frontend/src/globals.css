@@ -40,6 +40,16 @@
   --radius: 0.25rem;
   --field-radius: 0.25rem;
 
+  /* 字段四边描边（U4）：HeroUI 默认 --field-border-width:0px + 透明底边投影，
+     看起来"只有下边框"；这里补正并去掉向下投影。 */
+  --field-border-width: 1px;
+  --field-border: var(--border);
+  --field-shadow: none;
+  /* 圆角三档（T-2）：0 = 表格/面板 · var(--radius) = 控件/字段/徽标 · 浮层 6px */
+  --radius-overlay: 0.375rem;
+  /* sm 控件统一高度（顶栏信息簇 / 搜索框 / 工具条） */
+  --control-h-sm: 2rem;
+
   /* 方向A 专属令牌 */
   --ph-accent-dim: color-mix(in srgb, var(--accent) 8%, transparent);
   --ph-shadow-1: 0 1px 2px #1a1d2114;
@@ -151,14 +161,11 @@
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(clamp(420px, 36vw, 640px), calc(100% - 3rem));
+    /* 宽度由 --wb-drawer-w 提供（内容容器修饰类决定档位，见下方单一来源） */
+    width: var(--wb-drawer-w);
     z-index: 30;
     box-shadow: var(--ph-shadow-2);
     animation: wb-drawer-in 160ms ease-out;
-  }
-
-  .wb-detail-panel--env.wb-detail-panel--open {
-    width: min(clamp(520px, 48vw, 860px), calc(100% - 3rem));
   }
 
   @keyframes wb-drawer-in {
@@ -198,6 +205,8 @@
   }
   .ph-navitem {
     @apply relative flex-none gap-2 text-sm;
+    /* 直下划线：跟着按钮圆角会弯成"微笑"、观感贴边（U2） */
+    border-radius: 0;
   }
   .ph-navitem--active {
     @apply text-foreground font-semibold;
@@ -240,7 +249,7 @@
 
   /* 底部状态栏：只保留用户可用信息 */
   .ph-statusbar {
-    @apply flex items-center gap-3 overflow-x-auto border-t border-border bg-surface px-6 font-mono text-xs text-muted;
+    @apply flex items-center gap-3 overflow-x-auto border-t border-border bg-surface px-4 font-mono text-xs text-muted;
     min-height: 32px;
   }
   .ph-statusbar b {
@@ -250,13 +259,17 @@
     @apply flex flex-none items-center gap-1 rounded border border-warning/40 px-2 py-0.5 text-warning;
   }
 
-  /* 反馈区：外壳头下方右上，容器点击穿透 */
+  /* 反馈区：外壳头下方右上，容器点击穿透。
+     z 必须高于 HeroUI 模态遮罩（--z-index-overlay: 100000），否则模态内
+     操作的成功提示被遮罩盖住（V-4）；top 跟随顶栏高度（49px + 7px）。 */
   .ph-feedback {
-    @apply pointer-events-none fixed right-4 z-50 flex flex-col gap-2;
-    top: 64px;
+    @apply pointer-events-none fixed right-4 flex flex-col gap-2;
+    top: 56px;
+    z-index: 100001;
   }
   .ph-feedback > * {
     @apply pointer-events-auto;
+    max-width: min(480px, calc(100vw - 2rem));
     box-shadow: var(--ph-shadow-2);
   }
 
@@ -303,7 +316,10 @@
 
   /* 页内分段控件：外层 w-fit 容器提供「药丸」底/描边（见 JSX），
      tablist 透明铺满该容器；tab 不拉伸（压过 HeroUI 的 flex-1 工具类）。
-     选中态由 SEG_TAB 的 data- 工具类提供。 */
+     选中态由 SEG_TAB 的 data- 工具类提供；hover 用底色，不用 opacity（G-3）。 */
+  .wb-seg {
+    gap: 0;
+  }
   .wb-seg [role="tablist"] {
     gap: 2px;
     background: transparent;
@@ -314,11 +330,33 @@
     flex: none !important;
     width: auto !important;
   }
+  /* HeroUI 面板自带 p-2 / mt-4：分段控件会多出 32px 灰带与 8px 缩进（U2） */
+  .wb-seg .tabs__panel,
+  .wb-utabs .tabs__panel {
+    padding: 0;
+    margin-top: 0;
+  }
+  /* tab hover：补齐底色（HeroUI 默认 hover 是 opacity-70 变淡，方向反了） */
+  .wb-seg [role="tab"][data-hovered="true"],
+  .wb-utabs [role="tab"][data-hovered="true"],
+  .ph-navitem[data-hovered="true"] {
+    opacity: 1;
+    background: var(--surface-tertiary);
+  }
+
+  /* 抽屉宽度单一来源：让宽类与抽屉本体同吃 --wb-drawer-w（B2），
+     两个视图的宽度档由内容容器修饰类决定。 */
+  .wb-content {
+    --wb-drawer-w: min(clamp(520px, 48vw, 860px), calc(100% - 3rem));
+  }
+  .wb-content--capture {
+    --wb-drawer-w: min(clamp(420px, 36vw, 640px), calc(100% - 3rem));
+  }
 
   /* 抽屉打开时把可用宽度让给表格（r3 §9.3 改法A）：列表右缘 = 抽屉左缘 − 8px，
      列在收敛后的宽度内重新分配，操作列不再落在抽屉底下。 */
   .wb-list-inset {
-    margin-right: calc(min(clamp(520px, 48vw, 860px), calc(100% - 3rem)) + 8px);
+    margin-right: calc(var(--wb-drawer-w) + 8px);
   }
 
   /* 面板级下划线 tab（r2 P1④⑤）：与页级药丸分段区分形态。 */
@@ -342,12 +380,15 @@
     box-shadow: inset 0 -2px 0 var(--accent);
   }
 
-  /* 表格密度：行高收到 ~56px，单行标识符；选中行单一accent指示 */
+  /* 表格密度（U1b）：行高 ≈33px（行内按钮 24px + 4px×2 + 1px 行边），
+     单元格文字仍留 4px 呼吸；表头 ≈28px。选中行单一accent指示。 */
   .table__cell {
-    padding-block: 0.75rem;
+    padding-block: 0.25rem;
   }
-  .table__column {
-    padding-block: 0.4rem;
+  /* 行内操作按钮收到 24px，否则 sm 按钮 32px 会把行撑到 45px（U1b） */
+  .table__cell .button {
+    height: 1.5rem;
+    min-height: 1.5rem;
   }
   .table__row {
     transition: background-color 0.12s ease;
@@ -359,9 +400,17 @@
     background: var(--ph-accent-dim);
     box-shadow: inset 2px 0 0 var(--accent);
   }
+  /* 表头：字号/字重/字距 + 与表体一致的直角。
+     HeroUI secondary 的首末 th 圆角是 `.table-root--secondary :is(th…:first-child)`
+     （0,3,1），单类规则压不过 → 用双写类提特异性（U6）。 */
   .table__column {
     @apply text-xs font-medium text-muted;
     letter-spacing: 0.02em;
+    padding-block: 0.375rem;
+  }
+  .table-root--secondary.table-root--secondary th.table__column,
+  .table-root--secondary.table-root--secondary td.table__column {
+    border-radius: 0 !important;
   }
 
   /* 主操作：单一accent实心，无渐变/辉光 */
@@ -371,6 +420,54 @@
   }
   .button[data-focus-visible="true"] {
     box-shadow: 0 0 0 2px var(--focus);
+  }
+
+  /* 圆角三档收口（T-2）：控件/徽标 4px、浮层 6px；表格/面板 0 见上方表头规则。 */
+  .button,
+  .chip {
+    border-radius: var(--radius);
+  }
+  .ph-navitem {
+    border-radius: 0;
+  }
+  .modal__dialog,
+  .tooltip {
+    border-radius: var(--radius-overlay);
+  }
+
+  /* 顶栏信息簇：与 sm 控件同高，徽标不再是 20px 浮块（U3）。
+     文字行盒压到 1（12px）：chip 默认 leading-5（20px）会让 12px 字的
+     墨迹中心比 16px 图标低 ~2px，与「深色」/齿轮/刷新不在同一中线。 */
+  .ph-top-actions .chip {
+    height: var(--control-h-sm);
+    align-items: center;
+  }
+  .ph-top-actions .chip__label {
+    line-height: 1;
+  }
+  /* 图标光学居中：16px 图标的几何中心比 12px 文字的墨迹中心低约 1px，
+     在 sm 按钮里再上提 1px 才与文字基线看起来同一行。 */
+  .ph-top-actions svg {
+    transform: translateY(-1px);
+  }
+
+  /* 搜索框与工具条按钮同高（工具条统一 45px 高） */
+  .search-field__group {
+    height: var(--control-h-sm);
+  }
+
+  /* 行内代码（证书文件名等）：mono + 淡底，不再裸文字（V-59） */
+  code {
+    padding: 0.125rem 0.25rem;
+    border-radius: var(--radius);
+    background: var(--surface-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  /* KvGrid 奇数末项跨两列：两列布局不留半行空洞（G-7/V-57） */
+  .wb-kv-grid > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 
   /* 表面：中性分层，仅细描边 + 轻投影 */

@@ -26,6 +26,7 @@ import type { EnvPatchReq, EnvView } from "../api/types";
 import {
   envNeedsAttention,
   healthLabel,
+  healthTone,
   isPublicListen,
   listenAddress,
 } from "../data";
@@ -42,6 +43,7 @@ import {
   IconTrash,
 } from "../icons";
 import { Hint, InlineNotice, Kv, KvGrid, SectionTitle, StatusBadge } from "../shared";
+import { portError } from "../dialogs";
 import { RuleTextButton } from "./CatalogViews";
 
 export interface EnvironmentDetailProps {
@@ -72,10 +74,13 @@ export function EnvironmentDetail({
     <>
       <div className="flex flex-none flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-4 py-3">
         <div className="flex min-w-0 items-baseline gap-3">
-          <span className="truncate font-mono text-xl font-bold text-foreground">{env.name}</span>
+          <span className="truncate font-mono text-base font-semibold text-foreground">{env.name}</span>
           <StatusBadge health={env.health} />
-          {/* 窄抽屉放不下时隐藏监听地址（概览分组里仍完整展示） */}
-          <span className="hidden truncate font-mono text-sm text-muted 2xl:inline">
+          {/* 抽屉内同样常显监听地址：1440 屏曾因 2xl 断点被隐藏（V-63） */}
+          <span
+            className="min-w-0 truncate font-mono text-sm text-muted"
+            title={listenAddress(env)}
+          >
             {listenAddress(env)}
           </span>
         </div>
@@ -113,10 +118,11 @@ export function EnvironmentDetail({
 
           {/* 危险档收进「更多」菜单：不可逆，走 AlertDialog 二次确认 */}
           <Dropdown>
-            <Dropdown.Trigger>
-              <Button aria-label={`更多操作 ${env.name}`} size="sm" variant="ghost">
-                更多
-              </Button>
+            <Dropdown.Trigger
+              aria-label={`更多操作 ${env.name}`}
+              className="h-8 px-3 text-sm text-muted"
+            >
+              更多
             </Dropdown.Trigger>
             <Dropdown.Popover placement="bottom end">
               <Dropdown.Menu
@@ -140,7 +146,7 @@ export function EnvironmentDetail({
                   <IconClose className="size-4" />
                 </Button>
               </Tooltip.Trigger>
-              <Tooltip.Content>关闭（Esc）</Tooltip.Content>
+              <Tooltip.Content>关闭</Tooltip.Content>
             </Tooltip>
           ) : null}
         </div>
@@ -199,6 +205,9 @@ function OverviewTab({
   const cmd = env.proxy_command;
   const publicListen = isPublicListen(env);
   const riskyExposure = publicListen && !env.proxy_auth_enabled;
+  /* 实际状态色调与列表/状态栏同源（V-64）：危险态不能落成灰字 */
+  const tone = healthTone(env.health);
+  const actualTone = tone === "danger" ? "danger" : tone === "warning" ? "warning" : env.health === "running" ? "default" : "muted";
 
   async function copyCommand() {
     try {
@@ -231,7 +240,7 @@ function OverviewTab({
       <section>
         <SectionTitle>运行状态</SectionTitle>
         <KvGrid>
-          <Kv k="实际状态" v={healthLabel(env.health)} tone={env.health === "running" ? "default" : "muted"} />
+          <Kv k="实际状态" v={healthLabel(env.health)} tone={actualTone} />
           <Kv
             k="期望状态"
             v={env.desired === "running" ? "运行中" : "已停止"}
@@ -368,7 +377,8 @@ function ConfigTab({
   const authHalfFilled = authUser.length > 0 !== authPass.length > 0;
   const authHasColon = /[:\s]/.test(authUser) || /[:\s]/.test(authPass);
   const authInvalid = authHalfFilled || authHasColon;
-  const exposeRisk = isPublic && !(authUser && authPass);
+  /* 已启用鉴权（服务端意图）时不再因本地空白凭据栏误报高风险（V-61） */
+  const exposeRisk = isPublic && !env.proxy_auth_enabled && !(authUser && authPass);
 
   /* 回到服务端值：env 身份变化（切换环境）时无条件重置；
      同一环境的快照回流只在非编辑态重置（否则用户输入会被 tick 冲掉）。 */
@@ -402,7 +412,8 @@ function ConfigTab({
     setDirty(true);
   };
 
-  const portInvalid = port.length > 0 && !/^\d{1,5}$/.test(port);
+  const portErrorMsg = port.length === 0 ? "端口不能为空。" : portError(port);
+  const portInvalid = portErrorMsg !== null;
 
   async function submit() {
     const patch: EnvPatchReq = {};
@@ -451,7 +462,7 @@ function ConfigTab({
   }
 
   return (
-    <div className="flex max-w-3xl flex-col gap-4">
+    <div className="@container flex max-w-3xl flex-col gap-4">
       {dirty ? (
         <InlineNotice
           status="warning"
@@ -461,7 +472,7 @@ function ConfigTab({
             </Button>
           }
         >
-          有未保存的改动。端口与代理鉴权是<b>停机生效</b>字段，运行中保存会被拒绝。
+          有未保存的改动。
         </InlineNotice>
       ) : null}
 
@@ -480,7 +491,7 @@ function ConfigTab({
         <Description>纯展示字段，热生效。</Description>
       </TextField>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
         <TextField
           className="w-full"
           isInvalid={portInvalid}
@@ -493,11 +504,9 @@ function ConfigTab({
           <Label>监听端口</Label>
           <Input inputMode="numeric" spellCheck={false} />
           {portInvalid ? (
-            <FieldError>端口必须是数字。</FieldError>
+            <FieldError>{portErrorMsg}</FieldError>
           ) : (
-            <Description>
-              范围 16000–16999。<b>停机生效</b>。
-            </Description>
+            <Description>默认自动分配；可在 1–65535 内自定义端口。</Description>
           )}
         </TextField>
 
@@ -639,10 +648,10 @@ function ConfigTab({
                 <Checkbox.Control>
                   <Checkbox.Indicator />
                 </Checkbox.Control>
-                <span className="text-base">对外服务（绑定 0.0.0.0）</span>
+                <span className="text-sm">对外服务（绑定 0.0.0.0）</span>
               </Checkbox.Content>
             </Checkbox>
-            <Hint>默认只监听 127.0.0.1；勾选后局域网内可直接连此代理。停机生效。</Hint>
+            <Hint>默认只监听 127.0.0.1；勾选后局域网内可直接连此代理。</Hint>
 
             <Checkbox
               isSelected={capture}
@@ -655,14 +664,14 @@ function ConfigTab({
                 <Checkbox.Control>
                   <Checkbox.Indicator />
                 </Checkbox.Control>
-                <span className="text-base">抓包记录（只控记录，清空走抓包日志页显式动作）</span>
+                <span className="text-sm">抓包记录（只控记录，清空走抓包日志页显式动作）</span>
               </Checkbox.Content>
             </Checkbox>
             <Hint>热生效。开启后该环境实例记录 HTTPS 请求/响应，供「抓包日志」子页消费。</Hint>
 
             <div className="flex flex-col gap-2">
               <Label>代理访问鉴权</Label>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
                 <TextField
                   aria-label="代理用户名"
                   className="w-full"
@@ -673,7 +682,8 @@ function ConfigTab({
                     markDirty();
                   }}
                 >
-                  <Input placeholder="用户名" spellCheck={false} />
+                  <Label>用户名</Label>
+                  <Input spellCheck={false} />
                 </TextField>
                 <TextField
                   aria-label="代理密码"
@@ -685,6 +695,7 @@ function ConfigTab({
                     markDirty();
                   }}
                 >
+                  <Label>密码</Label>
                   <Input placeholder="留空则保持不变" spellCheck={false} type="password" />
                 </TextField>
               </div>
@@ -694,7 +705,7 @@ function ConfigTab({
                 </p>
               ) : (
                 <Hint>
-                  两栏必须同时填写，都不能含「:」或空白字符。凭据只进不出 —— 服务端永不回显。停机生效。
+                  两栏必须同时填写，都不能含「:」或空白字符。凭据只进不出 —— 服务端永不回显。
                 </Hint>
               )}
             </div>
@@ -714,7 +725,6 @@ function ConfigTab({
       <div className="flex items-center gap-2">
         {/* 保存用次档：该视图唯一主操作配额已由「新建环境」占用（D-4） */}
         <Button
-          className="font-semibold"
           size="sm"
           variant="secondary"
           isDisabled={portInvalid || authInvalid || !dirty}
@@ -739,6 +749,8 @@ function ConfigTab({
 
 function RulesTab({ env }: { env: EnvView }) {
   const [text, setText] = useState<string | null>(null);
+  /** 模态里保存过就 +1：预览必须跟着重读，不能停在编辑前的正文。 */
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -755,7 +767,7 @@ function RulesTab({ env }: { env: EnvView }) {
     return () => {
       cancelled = true;
     };
-  }, [env.rules, env.rules_missing]);
+  }, [env.rules, env.rules_missing, revision]);
 
   const preview = useMemo(() => {
     if (text === null) return null;
@@ -769,6 +781,18 @@ function RulesTab({ env }: { env: EnvView }) {
     return (
       <div className="flex flex-col gap-4">
         <Hint>该环境未绑定规则集，不覆盖任何域名。在「配置」页签绑定后即可按 hosts 规则改写上游目标。</Hint>
+      </div>
+    );
+  }
+
+  /* 账本缺失：不能永远停在"加载中…"（V-62） */
+  if (env.rules_missing) {
+    return (
+      <div className="flex flex-col gap-4">
+        <InlineNotice status="warning">
+          规则集 {env.rules} 在账本中已缺失（可能被删除或改名）。重新导入同名规则集，或在「配置」页签改绑定。
+        </InlineNotice>
+        <Hint>缺失期间该环境不覆盖任何域名；运行中的实例同样如此。</Hint>
       </div>
     );
   }
@@ -787,10 +811,14 @@ function RulesTab({ env }: { env: EnvView }) {
               <Chip.Label>账本中缺失</Chip.Label>
             </Chip>
           ) : null}
-          <RuleTextButton name={env.rules} variant="link" />
+          <RuleTextButton
+            name={env.rules}
+            variant="link"
+            onSaved={() => setRevision((n) => n + 1)}
+          />
         </div>
         <ScrollShadow className="max-h-56">
-          <pre className="whitespace-pre p-3 font-mono text-sm leading-relaxed text-muted">
+          <pre className="whitespace-pre-wrap break-all p-3 font-mono text-sm leading-relaxed text-foreground">
             {preview ?? "加载中…"}
           </pre>
         </ScrollShadow>

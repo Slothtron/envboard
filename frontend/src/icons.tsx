@@ -31,13 +31,6 @@ export const IconLayers = (p: IconProps) => (
   </Icon>
 );
 
-export const IconEye = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12Z" />
-    <circle cx="12" cy="12" r="2.6" />
-  </Icon>
-);
-
 export const IconRules = (p: IconProps) => (
   <Icon {...p}>
     <path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" />
@@ -106,12 +99,6 @@ export const IconTrash = (p: IconProps) => (
   </Icon>
 );
 
-export const IconChevronDown = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="m6 9 6 6 6-6" />
-  </Icon>
-);
-
 export const IconClose = (p: IconProps) => (
   <Icon {...p}>
     <path d="M18 6 6 18M6 6l12 12" />
@@ -165,12 +152,6 @@ export const IconArrowLeft = (p: IconProps) => (
   <Icon {...p}>
     <path d="M19 12H5" />
     <path d="m11 6-6 6 6 6" />
-  </Icon>
-);
-
-export const IconBolt = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" />
   </Icon>
 );
 

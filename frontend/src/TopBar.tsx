@@ -1,10 +1,9 @@
-import { useState } from "react";
 import { Button, Chip, Tooltip } from "@heroui/react";
 
-import { IconGear, IconLayers, IconRefresh } from "./icons";
+import { IconGear, IconLayers } from "./icons";
 import { SideBar } from "./SideBar";
 import type { ViewKey } from "./data";
-import { rememberTheme, storedChoice, type ThemeChoice } from "./theme";
+import type { ThemeChoice } from "./theme";
 
 export type MetricKey = "all" | "running" | "issues" | "stopped";
 
@@ -15,15 +14,15 @@ const THEME_LABEL: Record<ThemeChoice, string> = {
 };
 
 interface TopBarProps {
-  counts: Record<MetricKey, number>;
   coreVersion: string;
-  onRefresh: () => void;
   onOpenSettings: () => void;
-  isRefreshing: boolean;
   streamConnected: boolean;
   view: ViewKey;
   onViewChange: (view: ViewKey) => void;
   navCounts: Partial<Record<ViewKey, number>>;
+  /** 主题单一来源由 Workbench 持有（V-1）。 */
+  theme: ThemeChoice;
+  onThemeChange: (choice: ThemeChoice) => void;
 }
 
 /**
@@ -32,19 +31,17 @@ interface TopBarProps {
  */
 export function TopBar({
   coreVersion,
-  onRefresh,
   onOpenSettings,
-  isRefreshing,
   streamConnected,
   view,
   onViewChange,
   navCounts,
+  theme: choice,
+  onThemeChange,
 }: TopBarProps) {
-  const [choice, setChoice] = useState<ThemeChoice>(() => storedChoice());
   const cycleTheme = () => {
     const next: ThemeChoice = choice === "dark" ? "light" : choice === "light" ? "system" : "dark";
-    rememberTheme(next);
-    setChoice(next);
+    onThemeChange(next);
   };
 
   return (
@@ -60,9 +57,9 @@ export function TopBar({
         <span className="text-base font-bold tracking-wide text-foreground">envboard</span>
       </div>
 
-      <SideBar navCounts={navCounts} streamConnected={streamConnected} view={view} onViewChange={onViewChange} />
+      <SideBar navCounts={navCounts} view={view} onViewChange={onViewChange} />
 
-      <div className="ml-auto flex min-w-0 items-center gap-2">
+      <div className="ph-top-actions ml-auto flex min-w-0 items-center gap-2">
         <Chip className="hidden sm:inline-flex" size="sm" variant="soft">
           <Chip.Label>core {coreVersion}</Chip.Label>
         </Chip>
@@ -74,9 +71,15 @@ export function TopBar({
           <Chip.Label>{streamConnected ? "已连接" : "已断开"}</Chip.Label>
         </Chip>
 
-        <Button aria-label="切换主题" size="sm" variant="ghost" onPress={cycleTheme}>
-          <span className="font-mono text-xs">{THEME_LABEL[choice]}</span>
-        </Button>
+        <Tooltip delay={200}>
+          <Tooltip.Trigger>
+            <Button aria-label="切换主题" size="sm" variant="ghost" onPress={cycleTheme}>
+              {/* 与 chip 标签同字体（sans）/字号/行盒：mono 的 ascent 不同会让基线错开 */}
+              <span className="text-xs leading-none">{THEME_LABEL[choice]}</span>
+            </Button>
+          </Tooltip.Trigger>
+          <Tooltip.Content>切换主题（当前：{THEME_LABEL[choice]}）</Tooltip.Content>
+        </Tooltip>
 
         <Tooltip delay={200}>
           <Tooltip.Trigger>
@@ -87,21 +90,6 @@ export function TopBar({
           <Tooltip.Content>设置</Tooltip.Content>
         </Tooltip>
 
-        <Tooltip delay={200}>
-          <Tooltip.Trigger>
-            <Button
-              isIconOnly
-              aria-label="刷新"
-              size="sm"
-              variant="ghost"
-              isPending={isRefreshing}
-              onPress={onRefresh}
-            >
-              <IconRefresh className="size-4" />
-            </Button>
-          </Tooltip.Trigger>
-          <Tooltip.Content>刷新</Tooltip.Content>
-        </Tooltip>
       </div>
     </header>
   );

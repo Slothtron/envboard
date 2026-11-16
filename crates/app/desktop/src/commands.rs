@@ -5,7 +5,7 @@
 //! 文案（`src/errors.ts`）不认识传输，只认这个形状。
 
 use serde_json::Value;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 use crate::Shell;
 use crate::ops;
@@ -49,13 +49,20 @@ pub fn ui_prefs_get(shell: State<'_, Shell>) -> Option<String> {
         .map(|theme| theme.as_str().to_string())
 }
 
-/// 写主题偏好：壳侧原子写进 state-dir 的 ui.json（不依赖 WebView localStorage）。
+/// 写主题偏好：壳侧原子写进 state-dir 的 ui.json（不依赖 WebView localStorage），
+/// 同时把选择应用到原生窗口（深色标题栏随应用主题切换，system = 跟随系统）。
 #[tauri::command]
-pub fn ui_prefs_set(shell: State<'_, Shell>, theme: String) -> Result<(), CmdError> {
+pub fn ui_prefs_set(
+    shell: State<'_, Shell>,
+    window: WebviewWindow,
+    theme: String,
+) -> Result<(), CmdError> {
     let choice = crate::prefs::ThemeChoice::parse(&theme).ok_or_else(|| {
         envboard_engine::Error::invalid_config("theme", format!("unknown theme {theme:?}"))
     })?;
-    shell.ui_prefs.set_theme(choice).map_err(Into::into)
+    shell.ui_prefs.set_theme(choice).map_err(CmdError::from)?;
+    crate::apply_native_theme(&window, choice);
+    Ok(())
 }
 
 #[tauri::command]

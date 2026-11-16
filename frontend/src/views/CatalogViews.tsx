@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
+  Checkbox,
   Chip,
   Description,
   Dropdown,
@@ -24,48 +25,45 @@ import {
   IconServer,
   IconTrash,
 } from "../icons";
-import { ConfirmDialog, FormDialog, TextDialog } from "../dialogs";
+import { ConfirmDialog, FormDialog, RuleEditorDialog, portError } from "../dialogs";
 import { EmptyState, ErrorState, Hint, TableSkeleton } from "../shared";
 
 type FeedbackFn = (status: "success" | "warning" | "danger", title: string, detail?: string) => void;
 
 /**
- * 「查看原文」：桌面形态没有浏览器新标签页（target=_blank 会死路），
- * 原文经 IPC 取回进只读模态。两种触发形态：目录行按钮 / 详情页文字链接。
+ * 「编辑原文」入口：桌面形态没有浏览器新标签页（target=_blank 会死路），
+ * 正文经 IPC 取回进**可编辑**模态（textarea + 复制 + 保存，右键菜单被壳禁用
+ * ADR-009，复制必须有按钮）。两种触发形态：目录行按钮 / 详情页文字链接。
  */
-export function RuleTextButton({ name, variant = "button" }: { name: string; variant?: "button" | "link" }) {
+export function RuleTextButton({
+  name,
+  variant = "button",
+  onSaved,
+}: {
+  name: string;
+  variant?: "button" | "link";
+  /** 保存成功后通知宿主重读正文（详情抽屉的预览要跟着更新）。 */
+  onSaved?: () => void;
+}) {
   const [open, setOpen] = useState(false);
-  const [text, setText] = useState<string | null>(null);
-  const load = () => {
-    setOpen(true);
-    setText(null);
-    api
-      .rulesGet(name)
-      .then((result) => setText(result.text))
-      .catch(() => setText("（读取失败）"));
-  };
+  const openEditor = () => setOpen(true);
   return (
     <>
       {variant === "link" ? (
         <button
-          className="text-sm text-muted underline decoration-border underline-offset-4"
+          className="text-sm text-accent underline decoration-accent/40 underline-offset-4 hover:decoration-accent"
           type="button"
-          onClick={load}
+          onClick={openEditor}
         >
-          查看原文
+          编辑原文
         </button>
       ) : (
-        <Button size="sm" variant="secondary" onPress={load}>
+        <Button size="sm" variant="secondary" onPress={openEditor}>
           <IconEdit className="size-4" />
-          查看原文
+          编辑原文
         </Button>
       )}
-      <TextDialog
-        isOpen={open}
-        onOpenChange={setOpen}
-        title={`规则集原文 · ${name}`}
-        text={text ?? "加载中…"}
-      />
+      <RuleEditorDialog isOpen={open} name={name} onOpenChange={setOpen} onSaved={onSaved} />
     </>
   );
 }
@@ -159,7 +157,7 @@ export function RulesView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-6 py-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1.5">
         <SearchField aria-label="搜索规则集" className="flex-none" value={search} onChange={setSearch}>
           <SearchField.Group>
             <SearchField.SearchIcon />
@@ -177,7 +175,7 @@ export function RulesView({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto bg-surface p-5">
+      <div className="min-h-0 flex-1 overflow-y-auto bg-surface p-4">
         <Surface className="flex min-h-full flex-col p-0">
           <div className="flex items-center gap-2 border-b border-border px-4 py-3">
             <IconRules className="size-4 text-muted" />
@@ -185,6 +183,9 @@ export function RulesView({
             <Chip size="sm" variant="soft">
               <Chip.Label>{names?.length ?? 0}</Chip.Label>
             </Chip>
+          </div>
+          <div className="border-b border-border px-4 py-2">
+            <Hint>被引用关系实时来自环境绑定；删除规则集会让绑定它的环境标记「规则缺失」。</Hint>
           </div>
 
           {status === "loading" ? <TableSkeleton rows={3} /> : null}
@@ -226,7 +227,10 @@ export function RulesView({
                   <div className="flex flex-wrap items-center gap-3 px-4 py-3" data-rule-name={rule.name}>
                     {/* 名称列固定宽：让各行「被引用」起点横向对齐 */}
                     <span className="flex w-56 flex-none flex-col gap-1">
-                      <span className="truncate font-mono text-base font-semibold text-foreground">
+                      <span
+                        className="truncate font-mono text-sm font-semibold text-foreground"
+                        title={rule.name}
+                      >
                         {rule.name}
                       </span>
                     </span>
@@ -241,19 +245,18 @@ export function RulesView({
                           </Chip>
                         ))
                       ) : (
-                        <Chip size="sm" variant="soft">
-                          <Chip.Label>未被引用</Chip.Label>
-                        </Chip>
+                        <span className="text-sm text-muted">未被引用</span>
                       )}
                     </span>
 
                     <span className="ml-auto flex items-center gap-2">
                       <RuleTextButton name={rule.name} />
                       <Dropdown>
-                        <Dropdown.Trigger>
-                          <Button aria-label={`更多操作 ${rule.name}`} size="sm" variant="ghost">
-                            更多
-                          </Button>
+                        <Dropdown.Trigger
+                          aria-label={`更多操作 ${rule.name}`}
+                          className="h-8 px-3 text-sm text-muted"
+                        >
+                          更多
                         </Dropdown.Trigger>
                         <Dropdown.Popover placement="bottom end">
                           <Dropdown.Menu
@@ -275,10 +278,6 @@ export function RulesView({
               ))
             : null}
         </Surface>
-
-        <div className="p-3">
-          <Hint>被引用关系实时来自环境绑定；删除规则集会让绑定它的环境标记「规则缺失」。</Hint>
-        </div>
       </div>
 
       <FormDialog
@@ -306,7 +305,7 @@ export function RulesView({
         </TextField>
         <TextField className="w-full" value={importText} onChange={setImportText}>
           <Label>规则正文</Label>
-          <TextArea rows={6} spellCheck={false} />
+          <TextArea className="font-mono" rows={6} spellCheck={false} />
         </TextField>
       </FormDialog>
 
@@ -350,7 +349,7 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-6 py-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1.5">
         <div className="ml-auto">
           {/* 该视图唯一的主操作 */}
           <Button size="sm" variant="primary" onPress={() => setEditTarget("new")}>
@@ -360,7 +359,7 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto bg-surface p-5">
+      <div className="min-h-0 flex-1 overflow-y-auto bg-surface p-4">
         <Surface className="flex min-h-full flex-col p-0">
           <div className="flex items-center gap-2 border-b border-border px-4 py-3">
             <IconServer className="size-4 text-muted" />
@@ -399,10 +398,16 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
                   <div className="flex flex-wrap items-center gap-3 px-4 py-3" data-proxy-name={up.name}>
                     {/* 名称列固定宽：与规则库行同构 */}
                     <span className="flex w-56 flex-none flex-col gap-1">
-                      <span className="truncate font-mono text-base font-semibold text-foreground">
+                      <span
+                        className="truncate font-mono text-sm font-semibold text-foreground"
+                        title={up.name}
+                      >
                         {up.name}
                       </span>
-                      <span className="truncate font-mono text-sm text-muted">
+                      <span
+                        className="truncate font-mono text-sm text-muted"
+                        title={`${up.host}:${up.port}`}
+                      >
                         {up.host}:{up.port} · {up.has_auth ? "鉴权已配置" : "无鉴权"}
                       </span>
                     </span>
@@ -416,9 +421,7 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
                           </Chip>
                         ))
                       ) : (
-                        <Chip size="sm" variant="soft">
-                          <Chip.Label>未被引用</Chip.Label>
-                        </Chip>
+                        <span className="text-sm text-muted">未被引用</span>
                       )}
                     </span>
 
@@ -429,10 +432,11 @@ export function ProxiesView({ onFeedback }: { onFeedback: FeedbackFn }) {
                       </Button>
                       {/* 删除入「更多」菜单；被引用时禁用，原因由行内「被引用」chips 随行可见 */}
                       <Dropdown>
-                        <Dropdown.Trigger>
-                          <Button aria-label={`更多操作 ${up.name}`} size="sm" variant="ghost">
-                            更多
-                          </Button>
+                        <Dropdown.Trigger
+                          aria-label={`更多操作 ${up.name}`}
+                          className="h-8 px-3 text-sm text-muted"
+                        >
+                          更多
                         </Dropdown.Trigger>
                         <Dropdown.Popover placement="bottom end">
                           <Dropdown.Menu
@@ -501,14 +505,27 @@ function ProxyFormDialog({
   const [port, setPort] = useState(String(proxy?.port ?? ""));
   const [user, setUser] = useState("");
   const [password, setPassword] = useState("");
+  /** 编辑已配鉴权代理时留空保存 = 清除鉴权；必须显式勾选确认（D1）。 */
+  const [confirmClearAuth, setConfirmClearAuth] = useState(false);
 
   const nameInvalid = name.length > 0 && !/^[a-z][a-z0-9_-]*$/.test(name);
   const hostInvalid = host.length > 0 && !/^[A-Za-z0-9._-]+$/.test(host);
-  const portInvalid = port.length > 0 && !/^\d{1,5}$/.test(port);
+  const portErrorMsg = port.length === 0 ? "端口不能为空。" : portError(port);
+  const portInvalid = portErrorMsg !== null;
   const authHalfFilled = (user.length > 0) !== (password.length > 0);
   const authHasColon = /[:\s]/.test(user) || /[:\s]/.test(password);
   const authInvalid = authHalfFilled || authHasColon;
-  const canSave = !nameInvalid && !hostInvalid && !portInvalid && !authInvalid && name && host && port;
+  /** 编辑态下留空凭据：会导致服务端清除鉴权。 */
+  const clearAuthNeeded = proxy?.has_auth === true && user.length === 0 && password.length === 0;
+  const canSave =
+    !nameInvalid &&
+    !hostInvalid &&
+    !portInvalid &&
+    !authInvalid &&
+    Boolean(name) &&
+    Boolean(host) &&
+    Boolean(port) &&
+    (!clearAuthNeeded || confirmClearAuth);
 
   async function submit(): Promise<string | null> {
     // 校验未通过时返回错误文案而不是静默关窗；确认键保持可点以露出原因。
@@ -540,14 +557,15 @@ function ProxyFormDialog({
     >
       <TextField className="w-full" isInvalid={nameInvalid} value={name} onChange={setName}>
         <Label>名称</Label>
-        <Input autoFocus spellCheck={false} />
+        {/* 编辑态名称只读：改名=新建一条，旧代理会连同引用残留（V-41） */}
+        <Input autoFocus readOnly={proxy !== null} spellCheck={false} />
         {nameInvalid ? (
           <FieldError>小写字母开头，限 a-z 0-9 _ -。</FieldError>
         ) : (
-          <Description>环境按名绑定。</Description>
+          <Description>{proxy ? "名称不可修改（环境按名绑定）。" : "环境按名绑定。"}</Description>
         )}
       </TextField>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
         <TextField className="w-full" isInvalid={hostInvalid} value={host} onChange={setHost}>
           <Label>地址</Label>
           <Input placeholder="proxy.corp.example.com" spellCheck={false} />
@@ -560,10 +578,10 @@ function ProxyFormDialog({
         <TextField className="w-full" isInvalid={portInvalid} value={port} onChange={setPort}>
           <Label>端口</Label>
           <Input inputMode="numeric" placeholder="3128" spellCheck={false} />
-          {portInvalid ? <FieldError>端口必须是数字。</FieldError> : null}
+          {portInvalid ? <FieldError>{portErrorMsg}</FieldError> : null}
         </TextField>
       </div>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
         <TextField className="w-full" isInvalid={authInvalid} value={user} onChange={setUser}>
           <Label>用户名（可选）</Label>
           <Input spellCheck={false} />
@@ -577,6 +595,23 @@ function ProxyFormDialog({
         <p className="text-sm leading-relaxed text-danger" role="alert">
           用户名与密码必须同时填写，且都不能含「:」或空白字符。
         </p>
+      ) : proxy?.has_auth ? (
+        /* 凭据只进不出：留空保存会整体替换为"无鉴权"，必须显式确认（D1） */
+        <div className="flex flex-col gap-2 rounded border border-warning/30 bg-warning-soft p-3">
+          <p className="text-sm leading-relaxed text-foreground">
+            凭据不回显。两栏留空保存会<b>清除</b>该代理现有的鉴权。
+          </p>
+          {clearAuthNeeded ? (
+            <Checkbox isSelected={confirmClearAuth} onChange={setConfirmClearAuth}>
+              <Checkbox.Content>
+                <Checkbox.Control>
+                  <Checkbox.Indicator />
+                </Checkbox.Control>
+                <span className="text-sm">我确认保存后清除鉴权</span>
+              </Checkbox.Content>
+            </Checkbox>
+          ) : null}
+        </div>
       ) : (
         <Hint>留空表示不配置鉴权。</Hint>
       )}

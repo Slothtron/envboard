@@ -7,7 +7,7 @@
  * 每帧 = `{event, data}`（event 名沿用退场 SSE 的词汇）。命令返回流 id，
  * `close()` 调 `unwatch(id)` 取消 Rust 侧轮询任务 —— 只丢 Channel 不够，
  * 那会泄漏任务（见 crates/app/desktop/src/stream.rs 头注释）。
- * 连接态回调给 UI（侧栏底部指示 + 顶栏徽章）：命令登记成功 = 已连接。
+ * 连接态回调给 UI（顶栏徽章）：命令登记成功 = 已连接。
  */
 
 import { Channel, invoke } from "@tauri-apps/api/core";

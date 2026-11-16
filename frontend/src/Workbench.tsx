@@ -4,7 +4,7 @@ import { Description, FieldError, Input, Label, TextField } from "@heroui/react"
 import { api } from "./api/client";
 import { openSnapshotStream } from "./api/stream";
 import type { EnvView, StatusInfo } from "./api/types";
-import { envNeedsAttention, type ViewKey } from "./data";
+import { type ViewKey } from "./data";
 import { formatErrorNotice } from "./errors";
 import { ConfirmDialog, FormDialog } from "./dialogs";
 import { Boot } from "./Boot";
@@ -12,6 +12,7 @@ import { StatusBar } from "./StatusBar";
 import { TopBar, type MetricKey } from "./TopBar";
 import { FeedbackAlert } from "./shared";
 import { SettingsDialog } from "./SettingsDialog";
+import { rememberTheme, subscribeTheme, storedChoice, type ThemeChoice } from "./theme";
 import { CertView } from "./views/CertView";
 import { EnvironmentsView, type LoadStatus } from "./views/EnvironmentsView";
 
@@ -53,6 +54,17 @@ export function Workbench() {
   const [selected, setSelected] = useState<string | null>(null);
   const [streamConnected, setStreamConnected] = useState(false);
   const [statusInfo, setStatusInfo] = useState<StatusInfo | null>(null);
+  /* 主题单一来源（V-1）：顶栏与设置模态共享同一选择；rememberTheme 与
+     ui.json 对账都会经 subscribeTheme 通知，避免两处标签不同步。 */
+  const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => storedChoice());
+  const changeTheme = useCallback((next: ThemeChoice) => {
+    rememberTheme(next);
+    setThemeChoice(next);
+  }, []);
+  useEffect(
+    () => subscribeTheme(() => setThemeChoice(storedChoice())),
+    [],
+  );
 
   const [newEnvOpen, setNewEnvOpen] = useState(false);
   const [newEnvName, setNewEnvName] = useState("");
@@ -153,13 +165,6 @@ export function Workbench() {
       .finally(() => setIsRefreshing(false));
   }, [applyEnvironments, pushFeedback]);
 
-  const counts = useMemo<Record<MetricKey, number>>(() => {
-    const running = environments.filter((e) => e.health === "running").length;
-    const stopped = environments.filter((e) => e.health === "stopped").length;
-    const issues = environments.filter(envNeedsAttention).length;
-    return { all: environments.length, running, stopped, issues };
-  }, [environments]);
-
   const navCounts = useMemo<Partial<Record<ViewKey, number>>>(
     () => ({ environments: environments.length }),
     [environments.length],
@@ -250,15 +255,14 @@ export function Workbench() {
   return (
     <div className="relative z-10 flex h-screen flex-col bg-background text-foreground">
       <TopBar
-        counts={counts}
         coreVersion={statusInfo?.core.version ?? "…"}
-        isRefreshing={isRefreshing}
         streamConnected={streamConnected}
         navCounts={navCounts}
+        theme={themeChoice}
         view={view}
         onViewChange={setView}
+        onThemeChange={changeTheme}
         onOpenSettings={() => setSettingsOpen(true)}
-        onRefresh={refresh}
       />
 
       <main aria-label="工作台主区" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -288,10 +292,9 @@ export function Workbench() {
       <StatusBar
         environments={environments}
         statusInfo={statusInfo}
-        streamConnected={streamConnected}
       />
 
-      {/* 反馈区：方向C 移至外壳头下方右上，容器点击穿透。
+      {/* 反馈区：方向A 移至外壳头下方右上，容器点击穿透。
           错误槽在上（不自动撤、不被成功顶掉），轻提示槽在下（3.2s 自动撤）。 */}
       {errorFeedbackState || notice ? (
         <div aria-live="polite" className="ph-feedback" role="status">
@@ -317,7 +320,7 @@ export function Workbench() {
         confirmLabel="创建"
         confirmDisabled={!newEnvName.trim() || nameInvalid}
         isOpen={newEnvOpen}
-        note="创建后环境处于已停止状态，需要在列表中启动。端口从 16000–16999 自动分配。"
+        note="创建后环境处于已停止状态，需要在列表中启动；端口自动分配，之后可在配置里修改。"
         title="新建环境"
         onConfirm={createEnv}
         onOpenChange={setNewEnvOpen}
@@ -337,7 +340,8 @@ export function Workbench() {
         coreVersion={statusInfo?.core.version ?? ""}
         isOpen={settingsOpen}
         status={statusInfo}
-        onFeedback={pushFeedback}
+        theme={themeChoice}
+        onThemeChange={changeTheme}
         onOpenChange={setSettingsOpen}
       />
 

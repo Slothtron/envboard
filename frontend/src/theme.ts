@@ -19,8 +19,23 @@ const systemDark = () =>
 
 export function storedChoice(): ThemeChoice {
   const raw = localStorage.getItem(STORAGE_KEY);
-  // 方向C 默认磷光深色；未存选择时不再跟随系统浅色。
+  // 方向A 默认中性深色；未存选择时不再跟随系统浅色。
   return raw === "light" || raw === "dark" || raw === "system" ? raw : "dark";
+}
+
+/* 主题变化的订阅面：顶栏按钮与设置模态共享同一选择（V-1），
+   任一入口改主题（含启动后与 ui.json 对账）都会通知所有订阅者。 */
+const themeListeners = new Set<() => void>();
+
+export function subscribeTheme(listener: () => void): () => void {
+  themeListeners.add(listener);
+  return () => {
+    themeListeners.delete(listener);
+  };
+}
+
+function notifyTheme(): void {
+  for (const listener of themeListeners) listener();
 }
 
 /** 把选择写进 DOM（class 与 data-theme 同步，HeroUI 与自定义 CSS 各认其一）。 */
@@ -44,6 +59,7 @@ export function initTheme(): void {
 export function rememberTheme(choice: ThemeChoice): void {
   localStorage.setItem(STORAGE_KEY, choice);
   applyTheme(choice);
+  notifyTheme();
   // 写穿到 ui.json：WebView 销毁不保证 localStorage 刷盘，profile 才是权威。
   void api.uiPrefsSet(choice).catch(() => undefined);
 }
@@ -55,6 +71,7 @@ export async function reconcileThemeFromProfile(): Promise<void> {
     if (stored === "light" || stored === "dark" || stored === "system") {
       localStorage.setItem(STORAGE_KEY, stored);
       applyTheme(stored);
+      notifyTheme();
     } else {
       void api.uiPrefsSet(storedChoice()).catch(() => undefined);
     }

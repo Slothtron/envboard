@@ -34,7 +34,7 @@ export function CertView({ onFeedback }: CertViewProps) {
   }, [reloadCa]);
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-5">
+    <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <Surface className="mx-auto flex w-full max-w-5xl flex-col p-0">
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <IconShield className="size-4 text-muted" />
@@ -61,10 +61,10 @@ function CertPanel({
   onFeedback: (status: "success" | "warning" | "danger", title: string, detail?: string) => void;
   reloadCa: () => void;
 }) {
-  const [certBusy, setCertBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<"install" | "uninstall" | null>(null);
 
   async function installCert() {
-    setCertBusy(true);
+    setBusyAction("install");
     try {
       await api.caInstallCert();
       reloadCa();
@@ -73,12 +73,12 @@ function CertPanel({
       const f = formatErrorNotice(error, "安装根证书");
       onFeedback("danger", f.title, f.detail);
     } finally {
-      setCertBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function uninstallCert() {
-    setCertBusy(true);
+    setBusyAction("uninstall");
     try {
       const result = await api.caUninstallCert();
       reloadCa();
@@ -93,7 +93,7 @@ function CertPanel({
       const f = formatErrorNotice(error, "卸载根证书");
       onFeedback("danger", f.title, f.detail);
     } finally {
-      setCertBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -102,11 +102,14 @@ function CertPanel({
       <Alert className="mb-4" status="warning">
         <Alert.Indicator />
         <Alert.Content>
-          <Alert.Title>共享 CA 未物化</Alert.Title>
+          <Alert.Title>证书信息暂不可用</Alert.Title>
           <Alert.Description>
-            本宿主没有可用的共享 CA（测试注入的假引擎不物化证书）。以真实引擎启动后刷新。
+            无法读取共享 CA。请确认服务已启动；若刚启动，稍等片刻后重试。
           </Alert.Description>
         </Alert.Content>
+        <Button size="sm" variant="secondary" onPress={reloadCa}>
+          重试
+        </Button>
       </Alert>
     );
   }
@@ -124,7 +127,7 @@ function CertPanel({
           <Alert.Content>
             <Alert.Title>根证书已就绪且已受信任</Alert.Title>
             <Alert.Description>
-              被代理的 HTTPS 流量可以正常解密与改写。<b>其他设备需单独安装这份证书并配置代理。</b>
+              被代理的 HTTPS 流量可以正常解密与改写。
             </Alert.Description>
           </Alert.Content>
         </Alert>
@@ -140,7 +143,7 @@ function CertPanel({
             <Alert.Description>
               {trust
                 ? "本机客户端会报证书不受信任：点「安装证书」直接写入当前用户信任库（免管理员）。"
-                : "被代理的 HTTPS 流量可以正常解密与改写。其他设备需单独安装这份证书并配置代理。"}
+                : "被代理的 HTTPS 流量可以正常解密与改写。"}
             </Alert.Description>
           </Alert.Content>
         </Alert>
@@ -148,22 +151,24 @@ function CertPanel({
 
       <div className="flex flex-wrap items-center gap-2">
         <Button
-          isDisabled={certBusy || trust?.current_user === "installed"}
+          isDisabled={busyAction !== null || trust?.current_user === "installed"}
+          isPending={busyAction === "install"}
           size="sm"
           variant="primary"
           onPress={installCert}
         >
           <IconShield className="size-4" />
-          {certBusy ? "处理中…" : "安装证书"}
+          安装证书
         </Button>
         <Button
           className="btn-action--warn"
-          isDisabled={certBusy || trust?.current_user !== "installed"}
+          isDisabled={busyAction !== null || trust?.current_user !== "installed"}
+          isPending={busyAction === "uninstall"}
           size="sm"
           variant="outline"
           onPress={uninstallCert}
         >
-          {certBusy ? "处理中…" : "卸载证书"}
+          卸载证书
         </Button>
       </div>
 
@@ -181,7 +186,7 @@ function CertPanel({
         {trust?.detail ? <Hint>{trust.detail}</Hint> : null}
         <Hint>
           安装与卸载都直接作用于<b>当前用户</b>的 ROOT 存储（免管理员、可逆）；没有向导，
-          也不写入计算机存储。
+          也不写入计算机存储。其他设备需单独安装这份证书并配置代理。
         </Hint>
         {trust?.machine === "installed" ? (
           <Hint>
@@ -209,7 +214,7 @@ function CertPanel({
 
       <Hint>
         其他设备：把「文件路径」对应的 <code>envboard-ca-cert.pem</code> 拷到目标设备，
-        按系统提示安装并信任（桌面形态不提供下载入口与局域网直链）。
+        按系统提示安装并信任。
       </Hint>
     </div>
   );

@@ -28,6 +28,7 @@ import {
   IconDownload,
   IconPlay,
   IconStop,
+  IconTrash,
 } from "../icons";
 import {
   EmptyState,
@@ -206,6 +207,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
       if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
       if (drawerOpen) {
         setDrawerOpen(false);
+        setSelectedId(null);
         return;
       }
       onBack();
@@ -304,7 +306,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
   return (
     <div aria-label="抓包日志" className="flex min-h-0 flex-1 flex-col">
       {/* 面包屑工具条：返回 + 环境身份 + 会话动作 */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-6 py-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1.5">
         <Button aria-label="返回环境列表" size="sm" variant="ghost" onPress={onBack}>
           <IconArrowLeft className="size-4" />
           环境列表
@@ -335,7 +337,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
           <Chip color={capturing ? "success" : "default"} size="sm" variant="soft">
             <span
               aria-hidden="true"
-              className={`size-2 rounded-full ${capturing ? "bg-success" : "bg-muted"}`}
+              className={`ph-led ${capturing ? "ph-led--ok ph-led--live" : "ph-led--idle"}`}
             />
             <Chip.Label>
               会话 #{debug.capture.session.id} · 已捕获 {debug.capture.captured}
@@ -390,18 +392,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
               </Tooltip.Trigger>
               <Tooltip.Content>停止抓包（已捕获的会话保留，可重新开始）</Tooltip.Content>
             </Tooltip>
-          ) : (
-            <Button
-              aria-label="停止抓包：当前未在抓包"
-              className="btn-action--warn"
-              size="sm"
-              variant="outline"
-              isDisabled
-            >
-              <IconStop className="size-4" />
-              停止
-            </Button>
-          )}
+          ) : null}
 
           <Button
             aria-label="清空抓包会话"
@@ -411,14 +402,18 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
             isDisabled={!debug?.capture || records.length === 0}
             onPress={() => setConfirmClear(true)}
           >
+            <IconTrash className="size-4" />
             清空
           </Button>
         </div>
       </div>
 
-      {/* 内容区：列表 + 悬浮详情面板（absolute，不挤占表格） */}
-      <div className="relative flex min-h-0 flex-1 overflow-hidden border-t border-border">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col" onKeyDownCapture={onListKeyDownCapture}>
+      {/* 内容区：列表 + 悬浮详情面板（absolute；让宽由 --wb-drawer-w 提供） */}
+      <div className="wb-content wb-content--capture relative flex min-h-0 flex-1 overflow-hidden">
+        <div
+          className={`${drawerOpen ? "wb-list-inset " : ""}flex min-h-0 min-w-0 flex-1 flex-col`}
+          onKeyDownCapture={onListKeyDownCapture}
+        >
           {status === "loading" ? (
             <TableSkeleton rows={6} />
           ) : status === "error" ? (
@@ -445,11 +440,12 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
               }
             />
           ) : (
-            <Table>
-              <Table.ScrollContainer data-full-bleed>
+            <div className="min-h-0 flex-1 overflow-hidden bg-surface">
+            <Table className="h-full min-h-0" variant="secondary">
+              <Table.ScrollContainer className="h-full min-h-0 overflow-auto" data-full-bleed>
                 <Table.Content
                   aria-label="抓包记录"
-                  className="min-w-240"
+                  className={`table-fixed ${drawerOpen ? "min-w-0" : "min-w-240"}`}
                   selectedKeys={selectedId != null ? [String(selectedId)] : []}
                   selectionMode="single"
                   onSelectionChange={(keys) => {
@@ -458,12 +454,12 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
                   }}
                 >
                   <Table.Header className="sticky top-0 z-10 bg-surface-secondary">
-                    <Table.Column isRowHeader>#</Table.Column>
-                    <Table.Column>方法</Table.Column>
-                    <Table.Column>状态</Table.Column>
-                    <Table.Column>域名</Table.Column>
+                    <Table.Column className="w-14" isRowHeader>#</Table.Column>
+                    <Table.Column className="w-20">方法</Table.Column>
+                    <Table.Column className="w-16">状态</Table.Column>
+                    <Table.Column className="w-[30%]">域名</Table.Column>
                     <Table.Column>路径</Table.Column>
-                    <Table.Column className="text-end">大小</Table.Column>
+                    <Table.Column className="w-24 text-end">大小</Table.Column>
                   </Table.Header>
                   <Table.Body
                     items={visible}
@@ -481,33 +477,48 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
                   >
                     {(cap) => (
                       <Table.Row
+                        className="cursor-pointer"
                         data-cap-row={cap.request_id}
                         id={String(cap.request_id)}
                         onDoubleClick={() => openDetail(cap)}
                       >
                         <Table.Cell>
-                          <span className="font-mono text-base text-muted">{cap.request_id}</span>
+                          <span className="font-mono text-sm text-muted">{cap.request_id}</span>
                         </Table.Cell>
                         <Table.Cell>
                           <MethodChip method={cap.request.method} />
                         </Table.Cell>
                         <Table.Cell>
-                          <span className={statusTone(cap.response?.status ?? 0)}>
+                          <span
+                            className={
+                              cap.error !== null
+                                ? "font-mono font-semibold text-danger"
+                                : cap.response
+                                  ? statusTone(cap.response.status)
+                                  : "font-mono font-semibold text-muted"
+                            }
+                          >
                             {cap.error !== null ? "ERR" : (cap.response?.status ?? "—")}
                           </span>
                         </Table.Cell>
                         <Table.Cell>
-                          <span className="truncate font-mono text-base text-muted">
+                          <span
+                            className="truncate font-mono text-sm text-muted"
+                            title={cap.request.authority}
+                          >
                             {cap.request.authority}
                           </span>
                         </Table.Cell>
                         <Table.Cell>
-                          <span className="truncate font-mono text-base text-foreground">
+                          <span
+                            className="truncate font-mono text-sm text-foreground"
+                            title={cap.request.path}
+                          >
                             {cap.request.path}
                           </span>
                         </Table.Cell>
                         <Table.Cell className="text-end">
-                          <span className="font-mono text-base text-muted">
+                          <span className="font-mono text-sm text-muted">
                             {formatBytes(
                               (cap.request.body?.size ?? 0) + (cap.response?.body?.size ?? 0),
                             )}
@@ -519,6 +530,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
                 </Table.Content>
               </Table.ScrollContainer>
             </Table>
+            </div>
           )}
         </div>
 
@@ -536,7 +548,10 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
               capture={current}
               env={env}
               onFeedback={onFeedback}
-              onClose={() => setDrawerOpen(false)}
+              onClose={() => {
+                setDrawerOpen(false);
+                setSelectedId(null);
+              }}
             />
           ) : null}
         </aside>
@@ -555,6 +570,17 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
       />
     </div>
   );
+}
+
+/* 状态码着色唯一口径（V-36）：5xx/ERR 危险、4xx 警告、3xx 弱化、其余正文色。 */
+function overviewStatusTone(
+  status: number,
+  hasError: boolean,
+): "default" | "warning" | "danger" | "muted" {
+  if (hasError || status >= 500) return "danger";
+  if (status >= 400) return "warning";
+  if (status >= 300) return "muted";
+  return "default";
 }
 
 /* ------------------------------------------------------------------ */
@@ -590,7 +616,7 @@ function CaptureDetail({
     { k: "会话", v: `#${capture.session}` },
     { k: "时间", v: new Date(capture.time).toLocaleString("zh-CN", { hour12: false }) },
     { k: "方法", v: capture.request.method },
-    { k: "状态码", v: capture.error !== null ? "ERR" : String(status), tone: status >= 400 || capture.error !== null ? ("danger" as const) : ("default" as const) },
+    { k: "状态码", v: capture.error !== null ? "ERR" : String(status), tone: overviewStatusTone(status, capture.error !== null) },
     { k: "请求大小", v: formatBytes(capture.request.body?.size ?? 0) },
     { k: "响应大小", v: formatBytes(capture.response?.body?.size ?? 0) },
   ];
@@ -600,7 +626,7 @@ function CaptureDetail({
       <div className="flex flex-none flex-col gap-2 border-b border-border px-4 py-3">
         <div className="flex w-full items-center gap-3">
           <MethodChip method={capture.request.method} />
-          <span className="min-w-0 flex-1 truncate font-mono text-lg font-bold text-foreground">
+          <span className="min-w-0 flex-1 truncate font-mono text-lg font-semibold text-foreground">
             {capture.request.path}
           </span>
           <Chip size="sm" variant="soft">
@@ -618,7 +644,7 @@ function CaptureDetail({
                 <IconClose className="size-4" />
               </Button>
             </Tooltip.Trigger>
-            <Tooltip.Content>关闭（Esc）</Tooltip.Content>
+            <Tooltip.Content>关闭</Tooltip.Content>
           </Tooltip>
         </div>
         <div className="flex w-full items-center gap-2">
@@ -670,7 +696,7 @@ function CaptureDetail({
               </Tabs.List>
             </Tabs.ListContainer>
 
-            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto pt-3" id="overview">
+            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="overview">
               <KvGrid>
                 {overview.map((item) => (
                   <Kv key={item.k} k={item.k} v={item.v} tone={"tone" in item ? item.tone : "default"} />
@@ -678,11 +704,11 @@ function CaptureDetail({
               </KvGrid>
             </Tabs.Panel>
 
-            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto pt-3" id="req-headers">
+            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="req-headers">
               <HeaderRows rows={capture.request.headers} />
             </Tabs.Panel>
 
-            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto pt-3" id="req-body">
+            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="req-body">
               <BodyBlock body={capture.request.body} />
             </Tabs.Panel>
           </Tabs>
@@ -714,11 +740,11 @@ function CaptureDetail({
               </Tabs.List>
             </Tabs.ListContainer>
 
-            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto pt-3" id="resp-headers">
+            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="resp-headers">
               <HeaderRows rows={capture.response?.headers ?? []} />
             </Tabs.Panel>
 
-            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto pt-3" id="resp-body">
+            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="resp-body">
               <BodyBlock body={capture.response?.body ?? null} />
             </Tabs.Panel>
           </Tabs>
@@ -736,8 +762,10 @@ function HeaderRows({ rows }: { rows: Array<[string, string]> }) {
       <SectionTitle>头部字段</SectionTitle>
       {rows.map(([k, v], i) => (
         <div key={`${k}-${i}`} className="wb-header-row">
-          <span className="truncate text-muted">{k}</span>
-          <span className="truncate text-foreground">{v}</span>
+          <span className="truncate text-muted" title={k}>
+            {k}
+          </span>
+          <span className="min-w-0 break-all text-foreground">{v}</span>
         </div>
       ))}
       <Hint>头部按原始顺序展示，未做归一化。</Hint>
@@ -751,11 +779,7 @@ function BodyBlock({ body }: { body: CaptureRecord["request"]["body"] }) {
     return <Hint>该消息没有正文。</Hint>;
   }
   if ("omitted" in body) {
-    return (
-      <Hint>
-        正文过大（{formatBytes(body.size)}），已省略存储。完整内容看实例日志。
-      </Hint>
-    );
+    return <Hint>正文过大（{formatBytes(body.size)}），已省略存储。</Hint>;
   }
   if (body.encoding === "base64") {
     return (
@@ -767,7 +791,7 @@ function BodyBlock({ body }: { body: CaptureRecord["request"]["body"] }) {
   }
   return (
     <ScrollShadow className="wb-body-block">
-      <pre className="whitespace-pre-wrap break-all font-mono text-sm leading-relaxed text-muted">
+      <pre className="whitespace-pre-wrap break-all font-mono text-sm leading-relaxed text-foreground">
         {body.content}
       </pre>
     </ScrollShadow>

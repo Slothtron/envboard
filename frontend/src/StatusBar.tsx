@@ -1,13 +1,9 @@
-import { useEffect, useState } from "react";
-
 import type { EnvView, StatusInfo } from "./api/types";
-import { formatPortRange } from "./data";
 import { IconAlert } from "./icons";
 
 interface StatusBarProps {
   statusInfo: StatusInfo | null;
   environments: EnvView[];
-  streamConnected: boolean;
 }
 
 /** 装配警告：由环境健康推导（与门面语义一致），状态栏集中呈现。 */
@@ -22,23 +18,17 @@ function assemblyWarnings(envs: EnvView[]): string[] {
   return out;
 }
 
-/** 方向C 外壳：底部 appliance 状态栏（state dir / 装配警告 / 端口区间 / 丢弃计数 / UTC）。 */
-export function StatusBar({ statusInfo, environments, streamConnected }: StatusBarProps) {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(t);
-  }, []);
-
+/**
+ * 方向A 外壳：底部状态栏只保留「需要人处理的信息」——
+ * 装配告警（无告警时一句「装配正常」）与事件丢弃（>0 才出现）。
+ * 端口区间是后端的默认行为（用户可自行改端口），UTC 时钟无操作价值，均不展示。
+ */
+export function StatusBar({ statusInfo, environments }: StatusBarProps) {
   const warnings = assemblyWarnings(environments);
-  const utc = now.toISOString().slice(11, 19);
+  const dropped = statusInfo?.events_dropped ?? 0;
 
   return (
     <footer className="ph-statusbar font-sans" aria-label="工作台状态栏">
-      <span className="flex flex-none items-center gap-2">
-        <span aria-hidden="true" className={`ph-led ${streamConnected ? "ph-led--ok" : "ph-led--err"}`} />
-        <span>{streamConnected ? "事件流已连接" : "事件流已断开"}</span>
-      </span>
       {warnings.length === 0 ? (
         <span className="flex-none">装配正常</span>
       ) : (
@@ -49,15 +39,11 @@ export function StatusBar({ statusInfo, environments, streamConnected }: StatusB
           </span>
         ))
       )}
-      <span className="ml-auto flex flex-none items-center gap-3">
-        <span>
-          端口区间 <b className="font-mono">{formatPortRange(statusInfo?.config.port_range)}</b>
+      {dropped > 0 ? (
+        <span className="ml-auto flex flex-none items-center gap-1">
+          事件丢弃 <b className="font-mono">{dropped}</b>
         </span>
-        <span>
-          丢弃 <b className="font-mono">{statusInfo?.events_dropped ?? 0}</b>
-        </span>
-        <span className="font-mono">{utc} UTC</span>
-      </span>
+      ) : null}
     </footer>
   );
 }

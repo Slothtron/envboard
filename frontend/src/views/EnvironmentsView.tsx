@@ -6,6 +6,7 @@ import {
   ListBox,
   SearchField,
   Select,
+  Separator,
   Table,
   Tabs,
   Tooltip,
@@ -13,7 +14,7 @@ import {
 } from "@heroui/react";
 
 import type { EnvPatchReq, EnvView } from "../api/types";
-import { envNeedsAttention, listenAddress, type EnvSection } from "../data";
+import { envNeedsAttention, healthTone, listenAddress, type EnvSection } from "../data";
 import { ProxiesView, RulesView } from "./CatalogViews";
 import { IconPlus, IconStop, IconPlay } from "../icons";
 import { EmptyState, ErrorState, FilterButton, SEG_TAB, StatusBadge, TableSkeleton } from "../shared";
@@ -112,11 +113,18 @@ export function EnvironmentsView({
       );
     });
     const dir = sort.direction === "descending" ? -1 : 1;
-    const severity: Record<string, number> = { failed: 0, degraded: 1, running: 2, stopped: 3 };
+    /* 状态排序与 data.ts healthTone 同源：危险 0 · 过渡 1 · 健康 2 · 停止 3（V-16） */
+    const severityRank = (health: string): number => {
+      const tone = healthTone(health);
+      if (tone === "danger") return 0;
+      if (tone === "warning") return 1;
+      if (tone === "success") return 2;
+      return 3;
+    };
     list = [...list].sort((a, b) => {
       let cmp: number;
       if (sort.column === "port") cmp = a.listen.port - b.listen.port;
-      else if (sort.column === "status") cmp = (severity[a.health] ?? 9) - (severity[b.health] ?? 9);
+      else if (sort.column === "status") cmp = severityRank(a.health) - severityRank(b.health);
       else cmp = a.name.localeCompare(b.name);
       return cmp * dir || a.name.localeCompare(b.name);
     });
@@ -184,7 +192,7 @@ export function EnvironmentsView({
       hint={
         search || metricFilter !== "all"
           ? "当前搜索词或状态筛选排除了全部环境。清除筛选即可看到完整列表。"
-          : "还没有任何环境。新建一个环境后，它会获得一个 16000–16999 之间的端口。"
+          : "还没有任何环境。新建一个环境后，它会自动分配一个端口，之后可在配置里修改。"
       }
       action={
         search || metricFilter !== "all" ? (
@@ -229,7 +237,7 @@ export function EnvironmentsView({
         if (next !== "instances") setDetailOpen(false);
       }}
     >
-      <div className="bg-surface px-4 pt-1 pb-0">
+      <div className="bg-surface px-4 py-2">
         <div className="w-fit rounded border border-border bg-surface-secondary p-0.5">
           <Tabs.List aria-label="环境工作台">
             <Tabs.Tab className={SEG_TAB} id="instances">
@@ -246,7 +254,7 @@ export function EnvironmentsView({
 
       <Tabs.Panel className="flex min-h-0 flex-1 flex-col" id="instances">
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1.5">
           <SearchField
             aria-label="搜索环境、端口或规则"
             className="min-w-40 flex-none"
@@ -298,7 +306,6 @@ export function EnvironmentsView({
           </div>
 
           <div className="ml-auto flex items-center gap-2">
-            <span className="hidden text-sm text-muted sm:inline">双击行或按 Enter 查看详情</span>
             <Button size="sm" variant="primary" onPress={onNew}>
               <IconPlus className="size-4" />
               新建环境
@@ -306,7 +313,7 @@ export function EnvironmentsView({
           </div>
         </div>
 
-        <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div className="wb-content relative flex min-h-0 flex-1 overflow-hidden">
           <div
             className={`${detailOpen ? "wb-list-inset " : ""}flex min-h-0 min-w-0 flex-1 flex-col`}
             onKeyDownCapture={onListKeyDownCapture}
@@ -352,7 +359,7 @@ export function EnvironmentsView({
                             </Table.SortableColumnHeader>
                           )}
                         </Table.Column>
-                        <Table.Column allowsSorting className="w-[122px]" id="status">
+                        <Table.Column allowsSorting className="w-[150px]" id="status">
                           {({ sortDirection }) => (
                             <Table.SortableColumnHeader sortDirection={sortDirection}>
                               状态
@@ -478,7 +485,7 @@ function EnvRow({
         {/* 单行标识符；描述移入 title 与详情（行高密度） */}
         <span
           className="block truncate font-mono text-sm font-semibold text-foreground"
-          title={env.description}
+          title={env.name}
         >
           {env.name}
         </span>
@@ -543,10 +550,11 @@ function EnvRow({
           </Tooltip>
 
           <Dropdown>
-            <Dropdown.Trigger>
-              <Button aria-label={`更多操作 ${env.name}`} size="sm" variant="ghost">
-                更多
-              </Button>
+            <Dropdown.Trigger
+              aria-label={`更多操作 ${env.name}`}
+              className="h-6 px-3 text-sm text-muted"
+            >
+              更多
             </Dropdown.Trigger>
             <Dropdown.Popover placement="bottom end">
               <Dropdown.Menu
@@ -563,6 +571,7 @@ function EnvRow({
                 <Dropdown.Item id="restart" textValue="重启" isDisabled={!isRunning}>
                   重启
                 </Dropdown.Item>
+                <Separator className="my-1" />
                 <Dropdown.Item id="delete" textValue="删除" className="text-danger">
                   删除…
                 </Dropdown.Item>

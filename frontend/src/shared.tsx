@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
-import { Alert, Button, Chip, Separator, Skeleton, Spinner, Surface } from "@heroui/react";
+import { Alert, Button, Chip, Separator, Skeleton, Surface } from "@heroui/react";
 
 import type { EnvView } from "./api/types";
 import { healthLabel, healthTone } from "./data";
-import { IconAlert, IconRefresh, IconTray } from "./icons";
+import { IconAlert, IconClose, IconRefresh, IconTray } from "./icons";
 
 /* 页内分段控件的 tab 样式（宽度随文字、选中实心，区别于主导航下划线）。
-   用 data- 工具类保证生效（不依赖被 HeroUI 工具类压过的自定义层）。 */
+   用 data- 工具类保证生效（不依赖被 HeroUI 工具类压过的自定义层）。
+   选中语言规范：页级=药丸分段（本常量）、面板级=下划线（wb-utabs）、
+   主导航=直下划线（ph-navitem）；hover 一律加底色，不用 opacity。 */
 export const SEG_TAB =
   "rounded px-3 py-1 text-sm text-muted data-[selected=true]:bg-surface data-[selected=true]:font-semibold data-[selected=true]:text-foreground";
 
@@ -34,7 +36,7 @@ export function StatusBadge({ health, className }: { health: EnvView["health"]; 
 
 export function SectionTitle({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
-    <div className="wb-section flex items-center gap-2 pb-2">
+    <div className="flex items-center gap-2 pb-2">
       <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">{children}</h3>
       <Separator className="flex-1" />
       {trailing}
@@ -55,6 +57,14 @@ const KV_TONE: Record<KvTone, string> = {
   muted: "text-muted",
 };
 
+/* 警示块底色随 tone 走：避免"红底橙字"的语义混搭（G-8） */
+const KV_ALERT: Record<KvTone, string> = {
+  default: "",
+  warning: "border border-warning/30 bg-warning-soft",
+  danger: "border border-danger/30 bg-danger-soft",
+  muted: "",
+};
+
 export function KvGrid({ children }: { children: ReactNode }) {
   return <div className="wb-kv-grid">{children}</div>;
 }
@@ -72,7 +82,7 @@ export function Kv({
 }) {
   return (
     <Surface
-      className={`flex min-w-0 flex-col gap-1 p-3 ${alert ? "border border-danger/30 bg-danger-soft" : ""}`}
+      className={`flex min-w-0 flex-col gap-1 p-3 ${alert ? KV_ALERT[tone] : ""}`}
       variant={alert ? "default" : "secondary"}
     >
       <span className="text-sm text-muted">{k}</span>
@@ -89,10 +99,10 @@ export function Kv({
 
 export function TableSkeleton({ rows = 5 }: { rows?: number }) {
   return (
-    <div className="flex flex-col gap-3 p-4">
-      <Skeleton className="h-6 w-full rounded" />
+    <div className="flex flex-col gap-1 p-4">
+      <Skeleton className="h-7 w-full rounded" />
       {Array.from({ length: rows }).map((_, i) => (
-        <Skeleton key={i} className="h-10 w-full rounded" />
+        <Skeleton key={i} className="h-[2.125rem] w-full rounded" />
       ))}
     </div>
   );
@@ -149,16 +159,6 @@ export function ErrorState({
   );
 }
 
-/** 瞬时阻塞：按钮侧用 isPending，区域级用 Spinner */
-export function BlockingSpinner({ label = "加载中" }: { label?: string }) {
-  return (
-    <div className="flex items-center justify-center gap-2 p-6 text-sm text-muted">
-      <Spinner size="sm" />
-      {label}
-    </div>
-  );
-}
-
 /** 页内反馈区（替代 Toast —— Toast 不在冻结清单内） */
 export function FeedbackAlert({
   status,
@@ -179,8 +179,8 @@ export function FeedbackAlert({
         <Alert.Title>{title}</Alert.Title>
         {detail ? <Alert.Description>{detail}</Alert.Description> : null}
       </Alert.Content>
-      <Button size="sm" variant="ghost" onPress={onClose}>
-        关闭
+      <Button aria-label="关闭通知" isIconOnly size="sm" variant="ghost" onPress={onClose}>
+        <IconClose className="size-4" />
       </Button>
     </Alert>
   );
@@ -210,7 +210,7 @@ export function FilterButton({
     >
       {children}
       {typeof count === "number" ? (
-        <span className="font-mono text-sm opacity-75">{count}</span>
+        <span className="font-mono text-sm text-muted">{count}</span>
       ) : null}
     </Button>
   );
@@ -229,8 +229,8 @@ const METHOD_COLOR: Record<string, "default" | "success" | "accent" | "warning" 
 
 export function MethodChip({ method }: { method: string }) {
   return (
-    /* tertiary（描边）变体：与状态码的 soft 填充 Chip 拉开层级，避免同色误读 */
-    <Chip color={METHOD_COLOR[method] ?? "default"} size="sm" variant="tertiary">
+    /* soft 填充：方法列读作徽标（tertiary 实为无边框裸文字，G-1） */
+    <Chip color={METHOD_COLOR[method] ?? "default"} size="sm" variant="soft">
       <Chip.Label>{method}</Chip.Label>
     </Chip>
   );
@@ -259,7 +259,7 @@ export function InlineNotice({
   action?: ReactNode;
 }) {
   return (
-    <Alert className="mb-4" status={status}>
+    <Alert status={status}>
       <Alert.Indicator>
         <IconAlert className="size-4" />
       </Alert.Indicator>

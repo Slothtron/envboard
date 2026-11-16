@@ -223,6 +223,14 @@ fn build_workbench(app: &AppHandle, first: bool) -> Result<WebviewWindow, String
 
     // ADR-009 的 WebView2 settings 不会随着重建自动重放，必须再钉一次。
     crate::harden_window(&window);
+    // 原生标题栏主题随应用主题（首次无偏好时与前端默认一致 = 深色）。
+    if let Some(shell) = app.try_state::<Shell>() {
+        let choice = shell
+            .ui_prefs
+            .theme()
+            .unwrap_or(crate::prefs::ThemeChoice::Dark);
+        crate::apply_native_theme(&window, choice);
+    }
     // 窗口还不可见：几何记忆（ADR-012）在这里贴回去，用户看不到任何挪动。
     if let Some(geometry) = desired {
         crate::geometry::apply(&window, &geometry);
