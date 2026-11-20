@@ -906,7 +906,7 @@ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
 name = "envboard-admin"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "envboard-engine",
  "envboard-manager",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-desktop"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "clap",
  "envboard-admin",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-engine"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-engine-fake"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "envboard-engine",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-events"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-host"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "envboard-admin",
  "envboard-engine",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-manager"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "envboard-engine",
  "envboard-events",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "envboard-protocol"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",

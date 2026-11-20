@@ -4,6 +4,20 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 0.2.4 — 2026-11-20
+
+- **抓包·后端拆字段**：`http::Uri` 在序列化点拆 `path`/`query`（记录 v2，转发/日志/轨迹零改动）；
+  路径列仅展示 PATH，query 进详情独立「参数」tab（表格化，重复 key/空值/解码）。
+- **抓包·正文格式化**：按 content-type 语法高亮 + 美化（JSON/HTML/XML/CSS/JS，零依赖手写），
+  pretty/raw 切换；超大正文跳过高亮。
+- **抓包·资源类型过滤**：DevTools 风格快捷过滤（Fetch/XHR/文档/CSS/JS/图片/媒体/字体/其他），
+  与状态过滤正交 AND 组合。
+- **抓包·性能**：原生表格 + 手写窗口化（行 memo / 帧合流 / 单趟计数 / 随后端字节预算淘汰），
+  修复长会话卡顿与前端记录只增不减；2682 行帧间隔 P50 17ms（原 76 行即 244ms）。
+- **抓包·交互**：截断文本 hover 限宽可换行 tooltip（仅真截断才挂）；贴底自动跟随 + 回到底部
+  快捷按钮；列表滚动条与详情面板分界融合；工具栏紧凑化 121→71px（过滤 chip 12px/20px）。
+- **协议**：`DebugEvents` 增加 additive 字段 `oldest`（缓冲最旧 request_id），供读侧同步淘汰。
+
 ## 0.2.3 — 2026-11-16
 
 - **抓包列表**：补齐滚动容器高度约束（原先全链路无可滚容器，滚轮无效）；行高收到
