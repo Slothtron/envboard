@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Button,
   Chip,
   Kbd,
-  ScrollShadow,
   Separator,
-  Table,
   Tabs,
   Tooltip,
 } from "@heroui/react";
@@ -18,6 +16,8 @@ import {
   type EnvView,
 } from "../api/types";
 import { formatBytes, listenAddress } from "../data";
+import { BodyBlock, contentTypeOf } from "../bodyFormat";
+import { CaptureTable } from "./CaptureTable";
 import { ConfirmDialog } from "../dialogs";
 import { formatErrorNotice } from "../errors";
 import {
@@ -33,7 +33,6 @@ import {
 import {
   EmptyState,
   ErrorState,
-  FilterButton,
   Hint,
   Kv,
   KvGrid,
@@ -45,6 +44,9 @@ import {
 
 type CapFilter = "all" | "err" | "s2" | "s3" | "s4" | "s5";
 
+/** 资源类型（浏览器 DevTools Network 风格）：与状态过滤正交，AND 组合。 */
+type ResFilter = "all" | "fetch" | "doc" | "css" | "js" | "img" | "media" | "font" | "other";
+
 const CAP_FILTERS: Array<{ key: CapFilter; label: string }> = [
   { key: "all", label: "全部" },
   { key: "err", label: "异常" },
@@ -52,6 +54,18 @@ const CAP_FILTERS: Array<{ key: CapFilter; label: string }> = [
   { key: "s3", label: "3xx" },
   { key: "s4", label: "4xx" },
   { key: "s5", label: "5xx" },
+];
+
+const RES_FILTERS: Array<{ key: ResFilter; label: string }> = [
+  { key: "all", label: "全部类型" },
+  { key: "fetch", label: "Fetch/XHR" },
+  { key: "doc", label: "文档" },
+  { key: "css", label: "CSS" },
+  { key: "js", label: "JS" },
+  { key: "img", label: "图片" },
+  { key: "media", label: "媒体" },
+  { key: "font", label: "字体" },
+  { key: "other", label: "其他" },
 ];
 
 function matchFilter(cap: CaptureRecord, filter: CapFilter): boolean {
@@ -72,6 +86,34 @@ function matchFilter(cap: CaptureRecord, filter: CapFilter): boolean {
   }
 }
 
+/**
+ * 资源类型判定：优先看响应 content-type，缺失时看 path 扩展名。
+ * 抓包记录不含浏览器 initiator type，故 Fetch/XHR 取「JSON/XML/文本数据」这类
+ * 非文档、非静态资源的请求（现代 SPA 的 API 调用绝大多数落这里）。
+ */
+function resourceTypeOf(cap: CaptureRecord): Exclude<ResFilter, "all"> {
+  const ct =
+    cap.response?.headers.find(([k]) => k.toLowerCase() === "content-type")?.[1]?.toLowerCase() ??
+    "";
+  if (ct.startsWith("text/html") || ct === "application/xhtml+xml") return "doc";
+  if (ct.includes("json") || ct.includes("xml") || ct === "text/plain") return "fetch";
+  if (ct.includes("javascript") || ct.includes("ecmascript")) return "js";
+  if (ct.includes("text/css")) return "css";
+  if (ct.startsWith("image/")) return "img";
+  if (ct.startsWith("audio/") || ct.startsWith("video/")) return "media";
+  if (ct.includes("font") || ct.includes("woff")) return "font";
+  // content-type 缺失：按扩展名兜底（如实心 favicon / 脚本 / 样式）。
+  const path = cap.request.path.toLowerCase();
+  if (/\.(css)$/.test(path)) return "css";
+  if (/\.(js|mjs|cjs|jsx|ts)$/.test(path)) return "js";
+  if (/\.(png|jpe?g|gif|svg|webp|ico|bmp|avif)$/.test(path)) return "img";
+  if (/\.(mp3|mp4|webm|ogg|wav|flac|m4a)$/.test(path)) return "media";
+  if (/\.(woff2?|ttf|otf|eot)$/.test(path)) return "font";
+  if (/\.(html?|htm|xhtml)$/.test(path)) return "doc";
+  if (/\.(json|xml)$/.test(path)) return "fetch";
+  return "other";
+}
+
 export interface CaptureViewProps {
   /** 列表行入口锁定的环境（工作区级抓包会话仍按环境单例）。 */
   env: EnvView;
@@ -88,6 +130,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
   const [debug, setDebug] = useState<DebugViewState | null>(null);
   const [status, setStatus] = useState<"loading" | "error" | "ready">("loading");
   const [capFilter, setCapFilter] = useState<CapFilter>("all");
+  const [resFilter, setResFilter] = useState<ResFilter>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   /* 清空是不可逆销毁数据：与删除环境/规则/代理同档，走二次确认（D-4）。 */
@@ -96,14 +139,18 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
   const panelRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<number | null>(null);
 
-  /* 抓包增量按 request_id 去重合并（events 帧是游标之后的新记录），并同步计数 */
+  /* 抓包增量按 request_id 去重合并（events 帧是游标之后的新记录），并同步计数。
+     未变化的记录保持原对象引用 → memo 行整棵跳过重渲染（窗口化表格的前提）。
+     oldest = 后端缓冲内最旧 id：字节预算淘汰的记录前端同步丢弃，
+     否则长会话下前端只增不减，渲染与内存无界增长（卡顿根因之一）。 */
   const mergeRecords = useCallback(
-    (incoming: CaptureRecord[], captured: number, dropped: number) => {
+    (incoming: CaptureRecord[], captured: number, dropped: number, oldest: number | null) => {
       setDebug((prev) => {
         if (!prev?.capture) return prev;
         const byId = new Map(prev.capture.records.map((r) => [r.request_id, r]));
         for (const rec of incoming) byId.set(rec.request_id, rec);
-        const records = [...byId.values()].sort((a, b) => a.request_id - b.request_id);
+        let records = [...byId.values()].sort((a, b) => a.request_id - b.request_id);
+        if (oldest != null) records = records.filter((r) => r.request_id >= oldest);
         return {
           ...prev,
           capture: { ...prev.capture, records, captured, dropped },
@@ -120,6 +167,8 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
     setDebug(null);
     setSelectedId(null);
     setDrawerOpen(false);
+    setCapFilter("all");
+    setResFilter("all");
 
     const running = env.health === "running";
     api
@@ -148,15 +197,35 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
         if (!cancelled) setStatus("error");
       });
 
+    /* events 帧合流：500ms 一拍（突发时更密），逐帧 setState 会让渲染追不上推送。
+       攒进 pending，rAF 里一次性合并提交；快照帧先到先清 pending（整幅覆盖增量）。 */
+    let pending: { records: CaptureRecord[]; captured: number; dropped: number; oldest: number | null } | null = null;
+    let raf = 0;
+    const flush = () => {
+      raf = 0;
+      if (!pending || cancelled) return;
+      const p = pending;
+      pending = null;
+      mergeRecords(p.records, p.captured, p.dropped, p.oldest);
+    };
     const stream = openDebugStream(
       (frame) => {
         if (cancelled) return;
+        pending = null;
         setDebug({ env: frame.env, capture: frame.capture });
         setStatus("ready");
       },
       (frame) => {
         if (cancelled) return;
-        mergeRecords(frame.records, frame.captured, frame.dropped);
+        if (pending) {
+          pending.records.push(...frame.records);
+          pending.captured = frame.captured;
+          pending.dropped = frame.dropped;
+          pending.oldest = frame.oldest;
+        } else {
+          pending = { records: [...frame.records], captured: frame.captured, dropped: frame.dropped, oldest: frame.oldest };
+        }
+        if (raf === 0) raf = requestAnimationFrame(flush);
       },
       () => {
         /* 抓包流断线自动重连；连接态由快照流统一展示 */
@@ -164,6 +233,7 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
     );
     return () => {
       cancelled = true;
+      if (raf !== 0) cancelAnimationFrame(raf);
       stream.close();
     };
     // 只按环境身份重建：健康态变化不应重开会话（是否自动开启取进入瞬间的状态）。
@@ -174,20 +244,32 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
   const capturing = ownsSession;
   const records = ownsSession ? (debug?.capture?.records ?? []) : [];
 
-  const counts = useMemo(() => {
-    return {
-      all: records.length,
-      err: records.filter((c) => matchFilter(c, "err")).length,
-      s2: records.filter((c) => matchFilter(c, "s2")).length,
-      s3: records.filter((c) => matchFilter(c, "s3")).length,
-      s4: records.filter((c) => matchFilter(c, "s4")).length,
-      s5: records.filter((c) => matchFilter(c, "s5")).length,
-    } satisfies Record<CapFilter, number>;
+  /* 单趟扫描：每条记录的资源类型只算一次（原实现 8 个过滤键各扫一遍，
+     resourceTypeOf 的 header find + 正则被重复执行 8N 次）。 */
+  const { counts, resTypes } = useMemo(() => {
+    const cap = { all: records.length, err: 0, s2: 0, s3: 0, s4: 0, s5: 0 } satisfies Record<CapFilter, number>;
+    const res = { all: records.length, fetch: 0, doc: 0, css: 0, js: 0, img: 0, media: 0, font: 0, other: 0 } satisfies Record<ResFilter, number>;
+    const types = new Map<number, Exclude<ResFilter, "all">>();
+    for (const c of records) {
+      const status = c.response?.status ?? 0;
+      if (status >= 400 || c.error !== null) cap.err += 1;
+      if (status >= 200 && status < 300) cap.s2 += 1;
+      else if (status >= 300 && status < 400) cap.s3 += 1;
+      else if (status >= 400 && status < 500) cap.s4 += 1;
+      else if (status >= 500) cap.s5 += 1;
+      const t = resourceTypeOf(c);
+      types.set(c.request_id, t);
+      res[t] += 1;
+    }
+    return { counts: { cap, res }, resTypes: types };
   }, [records]);
 
   const visible = useMemo(
-    () => records.filter((c) => matchFilter(c, capFilter)),
-    [records, capFilter],
+    () =>
+      records.filter(
+        (c) => matchFilter(c, capFilter) && (resFilter === "all" || resTypes.get(c.request_id) === resFilter),
+      ),
+    [records, capFilter, resFilter, resTypes],
   );
 
   const current = useMemo(
@@ -229,24 +311,38 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
     }
   }, [drawerOpen]);
 
-  function openDetail(cap: CaptureRecord) {
+  /* 稳定引用：memo 行的 props 不因父组件重渲染而变化。 */
+  const handleSelect = useCallback((id: number) => setSelectedId(id), []);
+  const handleOpen = useCallback((cap: CaptureRecord) => {
     returnFocusRef.current = cap.request_id;
     setSelectedId(cap.request_id);
     setDrawerOpen(true);
-  }
+  }, []);
 
-  /* 键盘等价于双击：Enter/Space 打开焦点行的详情。react-aria Row 类型不暴露
-     onKeyDown，挂容器捕获阶段；只响应行自身，不截获单元格内控件的按键。 */
+  /* 键盘等价于双击：Enter/Space 打开焦点行的详情；↑/↓ 在行间移动焦点并选中
+     （原生 tr 自带焦点，roving tabindex 见 CaptureRow）。挂容器捕获阶段，
+     只响应行自身，不截获单元格内控件的按键。 */
   const onListKeyDownCapture = (e: React.KeyboardEvent) => {
-    if (e.key !== "Enter" && e.key !== " ") return;
     const target = e.target as HTMLElement;
     const row = target.closest?.("tr[data-cap-row]") as HTMLElement | null;
     if (!row || target !== row) return;
-    const cap = records.find((r) => String(r.request_id) === row.dataset.capRow);
-    if (!cap) return;
-    e.preventDefault();
-    e.stopPropagation();
-    openDetail(cap);
+    if (e.key === "Enter" || e.key === " ") {
+      const cap = records.find((r) => String(r.request_id) === row.dataset.capRow);
+      if (!cap) return;
+      e.preventDefault();
+      e.stopPropagation();
+      handleOpen(cap);
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const sibling = (e.key === "ArrowDown" ? row.nextElementSibling : row.previousElementSibling) as HTMLElement | null;
+      const next = sibling?.matches("tr[data-cap-row]") ? sibling : null;
+      if (!next) return;
+      e.preventDefault();
+      const id = Number(next.dataset.capRow);
+      setSelectedId(id);
+      next.focus();
+    }
   };
 
   function reload() {
@@ -305,106 +401,124 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
 
   return (
     <div aria-label="抓包日志" className="flex min-h-0 flex-1 flex-col">
-      {/* 面包屑工具条：返回 + 环境身份 + 会话动作 */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1.5">
-        <Button aria-label="返回环境列表" size="sm" variant="ghost" onPress={onBack}>
-          <IconArrowLeft className="size-4" />
-          环境列表
-        </Button>
-        <Separator orientation="vertical" className="h-5" />
-        <span className="flex min-w-0 items-baseline gap-2">
-          <span className="truncate font-mono text-base font-semibold text-foreground">
-            {env.name}
-          </span>
-          <span className="whitespace-nowrap font-mono text-sm text-muted">
-            {listenAddress(env)}
-          </span>
-        </span>
-
-        {!capturing ? (
-          <Button
-            isDisabled={env.health !== "running"}
-            size="sm"
-            variant="primary"
-            onPress={startCapture}
-          >
-            <IconPlay className="size-4" />
-            开启抓包
+      {/* 工具条两行（第七轮）：第一行身份+会话动作（单行自然对齐），
+          第二行紧凑过滤 chip（12px/20px 高，状态|资源单行横排，超宽横滚）。
+          旧版两行 32px 过滤按钮把整条工具栏撑到 121px，单行项被居中显得错位。 */}
+      <div className="flex flex-col border-b border-border bg-surface px-4">
+        <div className="flex flex-wrap items-center gap-2 py-1.5">
+          <Button aria-label="返回环境列表" size="sm" variant="ghost" onPress={onBack}>
+            <IconArrowLeft className="size-4" />
+            环境列表
           </Button>
-        ) : null}
+          <Separator orientation="vertical" className="h-5" />
+          <span className="flex min-w-0 items-baseline gap-2">
+            <span className="truncate font-mono text-sm font-semibold text-foreground">
+              {env.name}
+            </span>
+            <span className="whitespace-nowrap font-mono text-xs text-muted">
+              {listenAddress(env)}
+            </span>
+          </span>
 
-        {debug?.capture ? (
-          <Chip color={capturing ? "success" : "default"} size="sm" variant="soft">
-            <span
-              aria-hidden="true"
-              className={`ph-led ${capturing ? "ph-led--ok ph-led--live" : "ph-led--idle"}`}
-            />
-            <Chip.Label>
-              会话 #{debug.capture.session.id} · 已捕获 {debug.capture.captured}
-              {debug.capture.dropped > 0 ? ` · 丢弃 ${debug.capture.dropped}` : ""}
-            </Chip.Label>
-          </Chip>
-        ) : null}
-
-        <Separator orientation="vertical" className="h-5" />
-
-        <div aria-label="快捷过滤" className="flex flex-wrap items-center gap-2" role="group">
-          {CAP_FILTERS.map((f) => (
-            <FilterButton
-              key={f.key}
-              count={counts[f.key]}
-              isActive={capFilter === f.key}
-              onPress={() => setCapFilter(f.key)}
+          {!capturing ? (
+            <Button
+              isDisabled={env.health !== "running"}
+              size="sm"
+              variant="primary"
+              onPress={startCapture}
             >
-              {f.label}
-            </FilterButton>
-          ))}
-        </div>
-
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            isDisabled={!debug?.env || records.length === 0}
-            size="sm"
-            variant="secondary"
-            onPress={async () => {
-              if (!debug?.env) return;
-              try {
-                const { filename, text } = await api.envCapturesExport(debug.env, "har");
-                downloadText(filename, text, "application/json");
-                onFeedback("success", "HAR 导出已开始");
-              } catch (error) {
-                const f = formatErrorNotice(error, "导出 HAR");
-                onFeedback("danger", f.title, f.detail);
-              }
-            }}
-          >
-            <IconDownload className="size-4" />
-            导出 HAR
-          </Button>
-
-          {capturing ? (
-            <Tooltip delay={200}>
-              <Tooltip.Trigger>
-                <Button className="btn-action--warn" size="sm" variant="outline" onPress={stopCapture}>
-                  <IconStop className="size-4" />
-                  停止
-                </Button>
-              </Tooltip.Trigger>
-              <Tooltip.Content>停止抓包（已捕获的会话保留，可重新开始）</Tooltip.Content>
-            </Tooltip>
+              <IconPlay className="size-4" />
+              开启抓包
+            </Button>
           ) : null}
 
-          <Button
-            aria-label="清空抓包会话"
-            className="btn-action--danger"
-            size="sm"
-            variant="outline"
-            isDisabled={!debug?.capture || records.length === 0}
-            onPress={() => setConfirmClear(true)}
-          >
-            <IconTrash className="size-4" />
-            清空
-          </Button>
+          {debug?.capture ? (
+            <Chip color={capturing ? "success" : "default"} size="sm" variant="soft">
+              <span
+                aria-hidden="true"
+                className={`ph-led ${capturing ? "ph-led--ok ph-led--live" : "ph-led--idle"}`}
+              />
+              <Chip.Label>
+                会话 #{debug.capture.session.id} · 已捕获 {debug.capture.captured}
+                {debug.capture.dropped > 0 ? ` · 丢弃 ${debug.capture.dropped}` : ""}
+              </Chip.Label>
+            </Chip>
+          ) : null}
+
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              isDisabled={!debug?.env || records.length === 0}
+              size="sm"
+              variant="secondary"
+              onPress={async () => {
+                if (!debug?.env) return;
+                try {
+                  const { filename, text } = await api.envCapturesExport(debug.env, "har");
+                  downloadText(filename, text, "application/json");
+                  onFeedback("success", "HAR 导出已开始");
+                } catch (error) {
+                  const f = formatErrorNotice(error, "导出 HAR");
+                  onFeedback("danger", f.title, f.detail);
+                }
+              }}
+            >
+              <IconDownload className="size-4" />
+              导出 HAR
+            </Button>
+
+            {capturing ? (
+              <Tooltip delay={200}>
+                <Tooltip.Trigger>
+                  <Button className="btn-action--warn" size="sm" variant="outline" onPress={stopCapture}>
+                    <IconStop className="size-4" />
+                    停止
+                  </Button>
+                </Tooltip.Trigger>
+                <Tooltip.Content>停止抓包（已捕获的会话保留，可重新开始）</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+
+            <Button
+              aria-label="清空抓包会话"
+              className="btn-action--danger"
+              size="sm"
+              variant="outline"
+              isDisabled={!debug?.capture || records.length === 0}
+              onPress={() => setConfirmClear(true)}
+            >
+              <IconTrash className="size-4" />
+              清空
+            </Button>
+          </div>
+        </div>
+
+        {/* 过滤行：状态 | 资源类型 单行横排，超宽横向滚动（不折行撑高）。 */}
+        <div className="wb-cap-filters flex items-center gap-1 overflow-x-auto pb-1.5">
+          <div aria-label="状态过滤" className="flex flex-none items-center gap-1" role="group">
+            {CAP_FILTERS.map((f) => (
+              <FilterChip
+                key={f.key}
+                count={counts.cap[f.key]}
+                isActive={capFilter === f.key}
+                onPress={() => setCapFilter(f.key)}
+              >
+                {f.label}
+              </FilterChip>
+            ))}
+          </div>
+          <Separator orientation="vertical" className="mx-1 h-4 flex-none" />
+          <div aria-label="资源类型过滤" className="flex flex-none items-center gap-1" role="group">
+            {RES_FILTERS.map((f) => (
+              <FilterChip
+                key={f.key}
+                count={counts.res[f.key]}
+                isActive={resFilter === f.key}
+                onPress={() => setResFilter(f.key)}
+              >
+                {f.label}
+              </FilterChip>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -441,95 +555,31 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
             />
           ) : (
             <div className="min-h-0 flex-1 overflow-hidden bg-surface">
-            <Table className="h-full min-h-0" variant="secondary">
-              <Table.ScrollContainer className="h-full min-h-0 overflow-auto" data-full-bleed>
-                <Table.Content
-                  aria-label="抓包记录"
-                  className={`table-fixed ${drawerOpen ? "min-w-0" : "min-w-240"}`}
-                  selectedKeys={selectedId != null ? [String(selectedId)] : []}
-                  selectionMode="single"
-                  onSelectionChange={(keys) => {
-                    const next = Array.from(keys as Set<string | number>)[0];
-                    if (next != null) setSelectedId(Number(next));
-                  }}
-                >
-                  <Table.Header className="sticky top-0 z-10 bg-surface-secondary">
-                    <Table.Column className="w-14" isRowHeader>#</Table.Column>
-                    <Table.Column className="w-20">方法</Table.Column>
-                    <Table.Column className="w-16">状态</Table.Column>
-                    <Table.Column className="w-[30%]">域名</Table.Column>
-                    <Table.Column>路径</Table.Column>
-                    <Table.Column className="w-24 text-end">大小</Table.Column>
-                  </Table.Header>
-                  <Table.Body
-                    items={visible}
-                    renderEmptyState={() => (
-                      <EmptyState
-                        title="没有匹配的请求"
-                        hint="当前快捷过滤排除了全部抓包记录。切回「全部」即可看到完整会话。"
-                        action={
-                          <Button size="sm" variant="secondary" onPress={() => setCapFilter("all")}>
-                            清除过滤
-                          </Button>
-                        }
-                      />
-                    )}
-                  >
-                    {(cap) => (
-                      <Table.Row
-                        className="cursor-pointer"
-                        data-cap-row={cap.request_id}
-                        id={String(cap.request_id)}
-                        onDoubleClick={() => openDetail(cap)}
+              <CaptureTable
+                records={visible}
+                selectedId={selectedId}
+                onSelect={handleSelect}
+                onOpen={handleOpen}
+                drawerOpen={drawerOpen}
+                emptyState={
+                  <EmptyState
+                    title="没有匹配的请求"
+                    hint="当前状态或资源类型过滤排除了全部抓包记录。清除过滤即可看到完整会话。"
+                    action={
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onPress={() => {
+                          setCapFilter("all");
+                          setResFilter("all");
+                        }}
                       >
-                        <Table.Cell>
-                          <span className="font-mono text-sm text-muted">{cap.request_id}</span>
-                        </Table.Cell>
-                        <Table.Cell>
-                          <MethodChip method={cap.request.method} />
-                        </Table.Cell>
-                        <Table.Cell>
-                          <span
-                            className={
-                              cap.error !== null
-                                ? "font-mono font-semibold text-danger"
-                                : cap.response
-                                  ? statusTone(cap.response.status)
-                                  : "font-mono font-semibold text-muted"
-                            }
-                          >
-                            {cap.error !== null ? "ERR" : (cap.response?.status ?? "—")}
-                          </span>
-                        </Table.Cell>
-                        <Table.Cell>
-                          <span
-                            className="truncate font-mono text-sm text-muted"
-                            title={cap.request.authority}
-                          >
-                            {cap.request.authority}
-                          </span>
-                        </Table.Cell>
-                        <Table.Cell>
-                          <span
-                            className="truncate font-mono text-sm text-foreground"
-                            title={cap.request.path}
-                          >
-                            {cap.request.path}
-                          </span>
-                        </Table.Cell>
-                        <Table.Cell className="text-end">
-                          <span className="font-mono text-sm text-muted">
-                            {formatBytes(
-                              (cap.request.body?.size ?? 0) + (cap.response?.body?.size ?? 0),
-                            )}
-                          </span>
-                        </Table.Cell>
-                      </Table.Row>
-                    )}
-                  </Table.Body>
-                </Table.Content>
-              </Table.ScrollContainer>
-            </Table>
+                        清除过滤
+                      </Button>
+                    }
+                  />
+                }
+              />
             </div>
           )}
         </div>
@@ -572,6 +622,36 @@ export function CaptureView({ env, onBack, onFeedback }: CaptureViewProps) {
   );
 }
 
+/**
+ * 紧凑过滤 chip（第七轮）：12px 字 / 20px 高的文本 toggle + 计数，
+ * 选中 accent 淡底。替代 32px 的 FilterButton，避免两行按钮撑高工具栏。
+ * 原生 button（非 HeroUI）以精确控制密度；aria-pressed 保持可访问性。
+ */
+function FilterChip({
+  isActive,
+  count,
+  onPress,
+  children,
+}: {
+  isActive: boolean;
+  count?: number;
+  onPress: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      aria-pressed={isActive}
+      className="wb-fchip"
+      data-active={isActive || undefined}
+      onClick={onPress}
+      type="button"
+    >
+      {children}
+      {typeof count === "number" ? <span className="wb-fchip-count">{count}</span> : null}
+    </button>
+  );
+}
+
 /* 状态码着色唯一口径（V-36）：5xx/ERR 危险、4xx 警告、3xx 弱化、其余正文色。 */
 function overviewStatusTone(
   status: number,
@@ -600,7 +680,9 @@ function CaptureDetail({
   const status = capture.response?.status ?? 0;
 
   async function copyCurl() {
-    const curl = `curl -x http://${env.listen.host}:${env.listen.port} 'https://${capture.request.authority}${capture.request.path}'`;
+    // path 与 query 分存（v2）：拼回完整目标，query 非空才补 '?'。
+    const target = `${capture.request.path}${capture.request.query ? `?${capture.request.query}` : ""}`;
+    const curl = `curl -x http://${env.listen.host}:${env.listen.port} 'https://${capture.request.authority}${target}'`;
     try {
       await navigator.clipboard.writeText(curl);
     } catch {
@@ -620,6 +702,12 @@ function CaptureDetail({
     { k: "请求大小", v: formatBytes(capture.request.body?.size ?? 0) },
     { k: "响应大小", v: formatBytes(capture.response?.body?.size ?? 0) },
   ];
+
+  // 参数 tab 的计数与 QueryRows 同口径（URLSearchParams，重复 key 各计一条）。
+  const queryCount = useMemo(
+    () => Array.from(new URLSearchParams(capture.request.query)).length,
+    [capture.request.query],
+  );
 
   return (
     <>
@@ -672,7 +760,7 @@ function CaptureDetail({
         <section aria-label="请求信息" className="flex min-h-0 flex-1 flex-col">
           <Tabs
             align="start"
-            className="flex min-h-0 flex-1 flex-col"
+            className="wb-dtabs flex min-h-0 flex-1 flex-col"
             defaultSelectedKey="overview"
             variant="secondary"
           >
@@ -686,6 +774,13 @@ function CaptureDetail({
                   请求头
                   <Chip className="ml-2" size="sm" variant="soft">
                     <Chip.Label>{capture.request.headers.length}</Chip.Label>
+                  </Chip>
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+                <Tabs.Tab id="req-query">
+                  参数
+                  <Chip className="ml-2" size="sm" variant="soft">
+                    <Chip.Label>{queryCount}</Chip.Label>
                   </Chip>
                   <Tabs.Indicator />
                 </Tabs.Tab>
@@ -708,8 +803,12 @@ function CaptureDetail({
               <HeaderRows rows={capture.request.headers} />
             </Tabs.Panel>
 
+            <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="req-query">
+              <QueryRows query={capture.request.query} />
+            </Tabs.Panel>
+
             <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="req-body">
-              <BodyBlock body={capture.request.body} />
+              <BodyBlock body={capture.request.body} contentType={contentTypeOf(capture.request.headers)} />
             </Tabs.Panel>
           </Tabs>
         </section>
@@ -720,7 +819,7 @@ function CaptureDetail({
         <section aria-label="响应信息" className="flex min-h-0 flex-1 flex-col">
           <Tabs
             align="start"
-            className="flex min-h-0 flex-1 flex-col"
+            className="wb-dtabs flex min-h-0 flex-1 flex-col"
             defaultSelectedKey="resp-headers"
             variant="secondary"
           >
@@ -745,7 +844,7 @@ function CaptureDetail({
             </Tabs.Panel>
 
             <Tabs.Panel className="min-h-0 flex-1 overflow-y-auto p-3" id="resp-body">
-              <BodyBlock body={capture.response?.body ?? null} />
+              <BodyBlock body={capture.response?.body ?? null} contentType={contentTypeOf(capture.response?.headers ?? [])} />
             </Tabs.Panel>
           </Tabs>
         </section>
@@ -773,27 +872,85 @@ function HeaderRows({ rows }: { rows: Array<[string, string]> }) {
   );
 }
 
-/** 请求 / 响应体等宽文本块（utf8 直显；超限 omitted 给提示） */
-function BodyBlock({ body }: { body: CaptureRecord["request"]["body"] }) {
-  if (body === null || body === undefined) {
-    return <Hint>该消息没有正文。</Hint>;
-  }
-  if ("omitted" in body) {
-    return <Hint>正文过大（{formatBytes(body.size)}），已省略存储。</Hint>;
-  }
-  if (body.encoding === "base64") {
-    return (
-      <Hint>
-        二进制正文（{formatBytes(body.size)}），base64 预览：
-        <span className="mt-1 block truncate font-mono">{body.content.slice(0, 120)}…</span>
-      </Hint>
-    );
+/**
+ * 表格单元格截断文本：inline span 的 truncate 不生效（overflow 对非块级无效），
+ * 改 block 让省略号真正裁切、不再撑破列宽。
+ * **仅在实际发生截断时才挂 Tooltip**（第六轮）：短文本（如 `/`）hover 不再弹出
+ * 无意义的全文气泡，也省掉每行 2 个 Tooltip 的 press/hover 订阅。截断判定在
+ * hover 进入时量 `scrollWidth > clientWidth`（列宽随抽屉让宽变化，按需测量而非
+ * 常驻 ResizeObserver）；Tooltip 受控 isOpen，未截断时恒关。
+ * Trigger 默认渲染 div[role=button] 且可聚焦，传 tabIndex=-1 避免 tab 停靠点泛滥。
+ */
+export function TruncatedText({ text, className }: { text: string; className?: string }) {
+  const spanRef = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+
+  const measure = () => {
+    const el = spanRef.current;
+    if (el) setTruncated(el.scrollWidth > el.clientWidth + 1);
+  };
+
+  return (
+    <Tooltip delay={200} isOpen={open && truncated} onOpenChange={setOpen}>
+      <Tooltip.Trigger
+        tabIndex={-1}
+        className="block min-w-0"
+        onPointerEnter={measure}
+        onFocus={measure}
+      >
+        <span ref={spanRef} className={`block max-w-full truncate ${className ?? ""}`}>{text}</span>
+      </Tooltip.Trigger>
+      <Tooltip.Content className="wb-capture-tip">{text}</Tooltip.Content>
+    </Tooltip>
+  );
+}
+
+/** query 参数表格：URLSearchParams 解析（保留重复 key / 空值 / 自动解码），两列展示。
+ *  用语义化 <table> 而非 HeroUI Table：详情抽屉嵌在 Tabs.Panel 里，react-aria Table
+ *  在该嵌套下会触发 concurrent 渲染异常；原生表格无此问题且同样是表格形式。 */
+function QueryRows({ query }: { query: string }) {
+  const rows = useMemo(
+    () =>
+      Array.from(new URLSearchParams(query).entries()).map(([k, v], i) => ({
+        id: `${k}-${i}`,
+        k,
+        v,
+      })),
+    [query],
+  );
+  if (rows.length === 0) {
+    return <Hint>该请求没有 query 参数。</Hint>;
   }
   return (
-    <ScrollShadow className="wb-body-block">
-      <pre className="whitespace-pre-wrap break-all font-mono text-sm leading-relaxed text-foreground">
-        {body.content}
-      </pre>
-    </ScrollShadow>
+    <div className="flex flex-col gap-2">
+      <div className="overflow-auto rounded border border-border">
+        <table aria-label="query 参数" className="w-full table-fixed border-collapse text-sm">
+          <thead>
+            <tr className="bg-surface-secondary text-left">
+              <th className="w-[38%] border-b border-border px-3 py-2 font-medium text-muted">参数</th>
+              <th className="border-b border-border px-3 py-2 font-medium text-muted">值</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id} className="border-b border-border last:border-0">
+                <td className="px-3 py-2 align-top">
+                  <span className="block truncate font-mono text-muted" title={row.k}>
+                    {row.k}
+                  </span>
+                </td>
+                <td className="px-3 py-2 align-top">
+                  <span className="block whitespace-pre-wrap break-all font-mono text-foreground">
+                    {row.v === "" ? <span className="text-muted">（空）</span> : row.v}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Hint>按 URL 解码展示；重复参数逐行列出。</Hint>
+    </div>
   );
 }

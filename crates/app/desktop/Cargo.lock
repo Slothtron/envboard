@@ -946,6 +946,7 @@ dependencies = [
  "async-trait",
  "envboard-events",
  "envboard-protocol",
+ "http",
  "rcgen",
  "rustls",
  "rustls-pemfile",

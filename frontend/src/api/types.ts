@@ -76,7 +76,10 @@ export interface CaptureRecord {
   time: number;
   request: {
     method: string;
+    /** 纯路径，不含 query（v2 起后端用 http::Uri 拆分）。 */
     path: string;
+    /** 原始查询串，不含前导 '?'；无 query 为 ""。拼回目标 = path + (query ? "?"+query : "")。 */
+    query: string;
     authority: string;
     headers: Array<[string, string]>;
     body: BodyEncoding | null;
@@ -127,6 +130,8 @@ export interface DebugEvents {
   records: CaptureRecord[];
   captured: number;
   dropped: number;
+  /** 后端缓冲内最旧的 request_id（null = 空缓冲）；前端据此同步淘汰，防只增不减。 */
+  oldest: number | null;
 }
 
 /* ---------------- 其余响应 ---------------- */

@@ -67,9 +67,13 @@
 //!   丢弃。丢弃路径只有两个：手动 clear（缓冲清零，会话延续，generation +1）
 //!   与实例消亡。`session.id / started_at / generation` 供 UI 明示。
 //! - 记录形状：`{version, session, request_id, time, duration_ms,
-//!   request{method,path,authority,headers,body}, response{status,headers,body}, error}`；
+//!   request{method,path,query,authority,headers,body}, response{status,headers,body}, error}`；
 //!   duration_ms 是上游交换耗时（请求行到达 → 响应体收齐，不含写回客户端）。
 //!   成对落"盘"（内存条目），无半条记录。
+//! - **v2 起 path 与 query 分存**：`path` 只含路径（不含 `?`），`query` 为原始查询串
+//!   （不含前导 `?`，无 query 为 `""`），由 `http::Uri` 解析请求目标得到；
+//!   拼回完整目标 = `path + (query 非空 ? "?"+query : "")`。v1 的 path 含 query，
+//!   属语义变更（见 `envboard-protocol` 兼容纪律），消费方须同批升级。
 //! - **缺失而非截断**：单侧 body 超 256 KiB → 只记头与元数据、body 标
 //!   `omitted: true`；body 按原始字节存（utf8 直存 / 二进制 base64 标注），
 //!   解码延迟到展示端。

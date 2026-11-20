@@ -839,10 +839,13 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
         Ok(Exchange::Parts(part)) => {
             let (status, response_headers, response_body) = part;
             if cfg.capture {
+                // 抓包记录存拆分后的 path/query；转发请求行、二级代理、日志与轨迹仍用
+                // 含 query 的原 `path`，行为不变。用 http::Uri 解析，畸形目标降级原样。
+                let (capture_path, capture_query) = crate::http::split_request_target(&path);
                 shared.capture.push(
                     request_id,
                     serde_json::json!({
-                        "version": 1,
+                        "version": 2,
                         "session": shared.capture.session_id(),
                         "request_id": request_id,
                         "time": started_ms,
@@ -852,7 +855,8 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
                         "duration_ms": clock.elapsed().as_millis() as u64,
                         "request": {
                             "method": method,
-                            "path": path,
+                            "path": capture_path,
+                            "query": capture_query,
                             "authority": authority,
                             "headers": head.headers,
                             "body": crate::capture::encode_body(&request_body),

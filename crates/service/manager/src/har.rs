@@ -7,6 +7,7 @@
 
 use std::sync::Mutex;
 
+use envboard_engine::http::split_request_target;
 use envboard_engine::{Error, ErrorCode};
 use serde_json::{Value, json};
 
@@ -127,7 +128,9 @@ pub fn parse_session(id: u64, name: &str, body: &Value) -> Result<ImportedSessio
             .unwrap_or("GET")
             .to_string();
         let url = request.get("url").and_then(Value::as_str).unwrap_or("");
-        let (authority, path) = split_url(url);
+        let (authority, request_target) = split_url(url);
+        // 与实时抓包同一口径：path 去 query，query 单独存（不含前导 '?'）。
+        let (path, query) = split_request_target(&request_target);
         let mut request_bytes = 0usize;
         let body_shape = |body: Option<&Value>, counted: &mut usize| -> Value {
             let text = body
@@ -156,7 +159,7 @@ pub fn parse_session(id: u64, name: &str, body: &Value) -> Result<ImportedSessio
         };
         bytes += request_bytes + response_bytes;
         records.push(json!({
-            "version": 1,
+            "version": 2,
             "session": id,
             "request_id": index + 1,
             "time": entry.get("startedDateTime").cloned().unwrap_or(Value::Null),
@@ -171,6 +174,7 @@ pub fn parse_session(id: u64, name: &str, body: &Value) -> Result<ImportedSessio
                 "method": method,
                 "authority": authority,
                 "path": path,
+                "query": query,
                 "headers": har_headers(request.get("headers")),
                 "body": request_body,
             },
@@ -205,7 +209,8 @@ fn har_headers(value: Option<&Value>) -> Value {
     }
 }
 
-/// URL → (authority, path)。导入数据是展示面，解析失败降级为原样 url。
+/// URL → (authority, request_target)。request_target 仍含 query，随后交给
+/// `split_request_target` 拆成 (path, query)；导入是展示面，解析失败降级为原样 url。
 fn split_url(url: &str) -> (String, String) {
     let rest = url
         .strip_prefix("http://")
@@ -253,7 +258,8 @@ mod tests {
         let record = &session.entries[0];
         assert_eq!(record["request"]["method"], "GET");
         assert_eq!(record["request"]["authority"], "svc.test:8443");
-        assert_eq!(record["request"]["path"], "/x?q=1");
+        assert_eq!(record["request"]["path"], "/x");
+        assert_eq!(record["request"]["query"], "q=1");
         assert_eq!(record["response"]["status"], 200);
         // HAR 的 entry.time 就是毫秒耗时：导入会话与实时会话用同一列渲染。
         assert_eq!(record["duration_ms"], 42);

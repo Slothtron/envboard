@@ -43,6 +43,9 @@ envboard-protocol = { path = "crates/core/protocol" }
 #      （tauri-build 的静态 CRT 会毒化根工作区 doctest，见其 Cargo.toml 注释），
 #      故 tauri 系依赖不在本清单登记。
 async-trait = "0.1.92"
+# HTTP 请求目标解析（抓包记录拆 path/query）：Uri 原生支持 origin-form 与 absolute-form，
+# 比手写 split_once('?') 稳；本地两套 registry 源缓存均已暖，离线可解析。
+http = "1.5.0"
 libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

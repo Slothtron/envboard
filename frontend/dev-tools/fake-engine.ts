@@ -31,6 +31,7 @@ import {
   seedHar,
   seedProxies,
   seedRules,
+  splitRequestTarget,
   type EnvState,
   type HarSession,
   type ProxyState,
@@ -241,14 +242,16 @@ function makeRecord(env: EnvState): CaptureRecord {
   trafficCursor += 1;
   const requestId = env.nextRequestId;
   env.nextRequestId += 1;
+  const { path, query } = splitRequestTarget(spec.path);
   return {
-    version: 1,
+    version: 2,
     session: env.sessionId,
     request_id: requestId,
     time: Date.now(),
     request: {
       method: spec.method,
-      path: spec.path,
+      path,
+      query,
       authority: spec.authority,
       headers: [
         ["host", spec.authority],
@@ -285,6 +288,7 @@ function debugTick(): void {
     records: [record],
     captured: env.captured,
     dropped: env.dropped,
+    oldest: env.records.length > 0 ? env.records[0].request_id : null,
   };
   for (const reg of streams.values()) {
     if (reg.kind === "debug") emit(reg.channel, "events", frame);
@@ -520,7 +524,7 @@ export function dispatch(command: string, args: Args): unknown {
         time: 1,
         request: {
           method: r.request.method,
-          url: `https://${r.request.authority}${r.request.path}`,
+          url: `https://${r.request.authority}${r.request.path}${r.request.query ? `?${r.request.query}` : ""}`,
           httpVersion: "HTTP/2.0",
           headers: r.request.headers.map(([name, value]) => ({ name, value })),
           queryString: [],
@@ -595,21 +599,24 @@ export function dispatch(command: string, args: Args): unknown {
           const e = entry as { request?: { method?: string; url?: string }; response?: { status?: number } };
           let authority = "imported.example.com";
           let path = "/";
+          let query = "";
           try {
             const url = new URL(e.request?.url ?? "https://imported.example.com/");
             authority = url.host;
-            path = url.pathname + url.search;
+            path = url.pathname;
+            query = url.search.replace(/^\?/, "");
           } catch {
             /* 形状宽容：坏 URL 不挡导入 */
           }
           return {
-            version: 1,
+            version: 2,
             session: 900 + id,
             request_id: index + 1,
             time: session.importedAt,
             request: {
               method: e.request?.method ?? "GET",
               path,
+              query,
               authority,
               headers: [["host", authority]],
               body: null,

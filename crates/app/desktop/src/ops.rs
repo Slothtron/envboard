@@ -224,6 +224,15 @@ fn har_from_records(env: &str, records: &[Value]) -> Value {
         .filter_map(|record| {
             let request = record.get("request")?;
             let response = record.get("response")?;
+            // 抓包记录 v2 起 path 与 query 分存（query 不含前导 '?'）；
+            // HAR 的 url 必须拼回查询串，否则导出丢参数。旧记录缺 query 字段按 "" 处理。
+            let query = request.get("query").and_then(Value::as_str).unwrap_or("");
+            let request_url = format!(
+                "http://{}{}{}",
+                request.get("authority").and_then(Value::as_str).unwrap_or(""),
+                request.get("path").and_then(Value::as_str).unwrap_or(""),
+                if query.is_empty() { String::new() } else { format!("?{query}") },
+            );
             let body_to_har = |body: &Value| -> Value {
                 let size = body.get("size").and_then(Value::as_u64).unwrap_or(0);
                 if body.get("omitted").is_some() {
@@ -245,9 +254,7 @@ fn har_from_records(env: &str, records: &[Value]) -> Value {
                 },
                 "request": {
                     "method": request.get("method").cloned().unwrap_or(Value::Null),
-                    "url": format!("http://{}{}",
-                        request.get("authority").and_then(Value::as_str).unwrap_or(""),
-                        request.get("path").and_then(Value::as_str).unwrap_or("")),
+                    "url": request_url,
                     "httpVersion": "HTTP/1.1",
                     "headers": headers_to_har(request.get("headers")),
                     "queryString": [],

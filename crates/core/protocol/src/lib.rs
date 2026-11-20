@@ -56,7 +56,7 @@
 //! `{ok, cursor, environments, error?}`（ok:false 时 environments 为空）；
 //! [`DebugSnapshot`] `{cursor, env, capture}`（无会话时 env/capture 为 null、
 //! cursor 为 0；会话换代即 `session.id`/`generation` 变化 → 重发 snapshot）；
-//! [`DebugEvents`] `{cursor, records, captured, dropped}`。
+//! [`DebugEvents`] `{cursor, records, captured, dropped, oldest}`。
 //!
 //! ## 安全约定（桌面形态，ADR-006）
 //!
@@ -405,12 +405,15 @@ pub struct DebugSnapshot {
 }
 
 /// 调试实时流的 events 帧（增量）：游标域是 [`Cursor::Request`]。
+/// `oldest` = 缓冲内最旧 request_id（None = 空缓冲）：读侧据此同步淘汰，
+/// 与字节预算淘汰保持一致（ additive 字段，旧读侧忽略即可）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DebugEvents {
     pub cursor: u64,
     pub records: Vec<Value>,
     pub captured: u64,
     pub dropped: u64,
+    pub oldest: Option<u64>,
 }
 
 #[cfg(test)]

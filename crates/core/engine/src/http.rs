@@ -514,6 +514,21 @@ pub fn split_authority(authority: &str, default_port: u16) -> Option<(String, u1
     Some((host.to_string(), port))
 }
 
+/// 抓包记录用：把请求目标拆成 (纯 path, query)。query 不含前导 `?`，无 query 为 ""。
+///
+/// 用 `http::Uri` 解析（origin-form `/x?q=1` 与 absolute-form `http://h/x?q=1` 都支持），
+/// 比手写 `split_once('?')` 稳：问号在 path 里的转义、`#fragment` 等交给标准解析器。
+/// 解析失败（畸形目标）降级为原样 path + 空 query，保持既有宽松行为，不 panic。
+pub fn split_request_target(target: &str) -> (String, String) {
+    match target.parse::<::http::Uri>() {
+        Ok(uri) => (
+            uri.path().to_string(),
+            uri.query().unwrap_or("").to_string(),
+        ),
+        Err(_) => (target.to_string(), String::new()),
+    }
+}
+
 /// 101 之后的裸字节透传：先冲掉 BufReader 里已到达的字节，再双向互抄。
 pub async fn tunnel<CL, UL>(
     client_reader: &mut BufReader<CL>,
@@ -547,6 +562,29 @@ mod tests {
                 .collect(),
             body: Vec::new(),
         }
+    }
+
+    #[test]
+    fn split_request_target_splits_path_and_query() {
+        // origin-form，带 / 不带 query
+        assert_eq!(split_request_target("/x"), ("/x".into(), "".into()));
+        assert_eq!(split_request_target("/x?q=1"), ("/x".into(), "q=1".into()));
+        assert_eq!(
+            split_request_target("/x?a=1&b=2"),
+            ("/x".into(), "a=1&b=2".into())
+        );
+        // absolute-form：Uri 直接给出 path 与 query
+        assert_eq!(
+            split_request_target("http://svc.test/x?q=1"),
+            ("/x".into(), "q=1".into())
+        );
+        // 值里含转义的 '?' 仍按第一个 ? 拆（Uri 的标准行为）
+        assert_eq!(
+            split_request_target("/x?next=%2Fa%3Fb%3D1"),
+            ("/x".into(), "next=%2Fa%3Fb%3D1".into())
+        );
+        // 畸形目标：解析失败降级为原样 path + 空 query，不 panic
+        assert_eq!(split_request_target("/x y"), ("/x y".into(), "".into()));
     }
 
     #[tokio::test]

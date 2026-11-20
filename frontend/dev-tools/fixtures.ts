@@ -53,6 +53,13 @@ export interface HarSession {
 
 const now = Date.now();
 
+/** 与后端 http::Uri 拆分同口径：path 去 query，query 不含前导 '?'（无则 ""）。 */
+export function splitRequestTarget(target: string): { path: string; query: string } {
+  const q = target.indexOf("?");
+  if (q < 0) return { path: target, query: "" };
+  return { path: target.slice(0, q), query: target.slice(q + 1) };
+}
+
 function record(
   sessionId: number,
   requestId: number,
@@ -61,37 +68,42 @@ function record(
   path: string,
   status: number,
   ageMs: number,
+  resp?: { type: string; text: string },
 ): CaptureRecord {
   const reqBody =
     method === "POST"
       ? { encoding: "utf8" as const, size: 27, content: '{"probe":"envboard-mock"}' }
       : null;
+  const { path: purePath, query } = splitRequestTarget(path);
+  const respText = resp?.text ?? `{"status":${status},"ok":true}`;
   return {
-    version: 1,
+    version: 2,
     session: sessionId,
     request_id: requestId,
     time: now - ageMs,
     request: {
       method,
-      path,
+      path: purePath,
+      query,
       authority,
       headers: [
         ["host", authority],
         ["user-agent", "envboard-mock/0.2.0"],
         ["accept", "application/json"],
+        ...(reqBody ? [["content-type", "application/json"] as [string, string]] : []),
       ],
       body: reqBody,
     },
     response: {
       status,
       headers: [
-        ["content-type", "application/json"],
+        ["content-type", resp?.type ?? "application/json"],
         ["x-mock", "envboard-dev-tools"],
       ],
       body: {
         encoding: "utf8",
-        size: 19,
-        content: `{"status":${status},"ok":true}`,
+        size: respText.length,
+        content: respText,
       },
     },
     error: null,
@@ -129,11 +141,20 @@ export function seedEnvs(): EnvState[] {
         "INFO  capture: session 1 started",
       ],
       records: [
-        record(1, 1, "GET", "api.example.com", "/v1/users", 200, 52_000),
+        record(1, 1, "GET", "api.example.com", "/v1/users?page=2&tag=a&tag=b&fields=", 200, 52_000),
         record(1, 2, "POST", "api.example.com", "/v1/orders", 201, 41_000),
-        record(1, 3, "GET", "cdn.example.com", "/assets/app.js", 304, 30_000),
-        record(1, 4, "GET", "api.example.com", "/v1/missing", 404, 18_000),
-        record(1, 5, "GET", "api.example.com", "/v1/health", 200, 6_000),
+        record(1, 3, "GET", "cdn.example.com", "/assets/app.js", 304, 30_000, {
+          type: "application/javascript",
+          text: 'const boot = async () => {\n  // load config\n  const res = await fetch("/api/config");\n  return res.json();\n};\nexport default boot;\n',
+        }),
+        record(1, 4, "GET", "api.example.com", "/3rd/plussvr/cmgr/v1/companies/637573260/privileges/very/long/segment/that/should/be/truncated/in/the/path/column", 404, 18_000, {
+          type: "text/css",
+          text: ".panel {\n  color: #1a1d21;\n  padding: 8px 12px;\n}\n.panel > .title { font-weight: 600; }\n",
+        }),
+        record(1, 5, "GET", "api.example.com", "/v1/health?next=%2Fv1%2Fusers%3Fx%3D1", 200, 6_000, {
+          type: "text/html",
+          text: '<!doctype html>\n<html lang="zh">\n<head><meta charset="utf-8"><title>ok</title></head>\n<body><div class="wrap"><p>healthy</p></div></body>\n</html>\n',
+        }),
       ],
       sessionId: 1,
       sessionStartedAt: now - 120_000,

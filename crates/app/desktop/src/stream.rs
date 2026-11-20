@@ -152,6 +152,7 @@ pub fn watch_debug(shell: State<'_, Shell>, on_event: Channel<Value>) -> u64 {
                     records: delta.records,
                     captured: counts.0,
                     dropped: counts.1,
+                    oldest: delta.oldest,
                 };
                 if on_event
                     .send(json!({"event": "events", "data": frame}))
