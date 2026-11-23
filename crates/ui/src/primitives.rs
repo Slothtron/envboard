@@ -63,30 +63,67 @@ pub enum Shape {
     DotBang,
 }
 
-fn marker(tone: Tone, shape: Shape) -> AnyElement {
-    match shape {
-        Shape::DotBar => view()
-            .w(px(10.0))
-            .h(px(m::BAR_W))
-            .bg(move || (tone.dot())())
-            .into_element(),
-        Shape::DotVBar => view()
-            .w(px(m::BAR_W))
-            .h(px(9.0))
-            .bg(move || (tone.dot())())
-            .into_element(),
-        Shape::DotBang => text("!")
-            .text_size(px(10.0))
-            .font_family(f::FONT_TEXT)
-            .text_color(move || (tone.dot())())
-            .into_element(),
-        Shape::Dot | Shape::Ring => view().w(px(0.0)).into_element(),
-    }
+fn solid_of(shape: Shape) -> bool {
+    !matches!(shape, Shape::Ring)
+}
+
+/// 形状随行变的那种标记：`tone`/`shape` 是每次求值的闭包，虚拟列表把同一格
+/// 挪到另一行时只重跑这几条绑定，不重建格（见 [`status_cell_live`]）。
+fn marker_live<To, Sh>(tone: To, shape: Sh) -> impl IntoElement
+where
+    To: Fn() -> Tone + Copy + 'static,
+    Sh: Fn() -> Shape + Copy + 'static,
+{
+    view()
+        .child(when(
+            move || matches!(shape(), Shape::DotBar),
+            move || {
+                view()
+                    .w(px(10.0))
+                    .h(px(m::BAR_W))
+                    .bg(move || (tone().dot())())
+            },
+        ))
+        .child(when(
+            move || matches!(shape(), Shape::DotVBar),
+            move || {
+                view()
+                    .w(px(m::BAR_W))
+                    .h(px(9.0))
+                    .bg(move || (tone().dot())())
+            },
+        ))
+        .child(when(
+            move || matches!(shape(), Shape::DotBang),
+            move || {
+                text("!")
+                    .text_size(px(10.0))
+                    .font_family(f::FONT_TEXT)
+                    .text_color(move || (tone().dot())())
+            },
+        ))
 }
 
 /// 点 · 形状 · 文字，`width` 宽（列表里传列宽，抽屉头里传自然宽）。
 pub fn status_cell(tone: Tone, shape: Shape, label: &'static str, width: f32) -> impl IntoElement {
-    let solid = !matches!(shape, Shape::Ring);
+    status_cell_live(move || tone, move || shape, label, width)
+}
+
+/// [`status_cell`] 的随行版：语气、形状、文字都从闭包现取。
+///
+/// 为虚拟列表（`virtual_list` 只造视口附近的行、把一个格挪给别的行）而加：
+/// 格的**结构**造一次，行换了只重跑读位置的绑定；`Tone`/`Shape` 要是常量，
+/// 被复用的格就会一直显示上一行的状态。
+pub fn status_cell_live<To, Sh>(
+    tone: To,
+    shape: Sh,
+    label: impl IntoReactive<SharedString> + 'static,
+    width: f32,
+) -> impl IntoElement
+where
+    To: Fn() -> Tone + Copy + 'static,
+    Sh: Fn() -> Shape + Copy + 'static,
+{
     view()
         .w(px(width))
         .flex_row()
@@ -99,21 +136,21 @@ pub fn status_cell(tone: Tone, shape: Shape, label: &'static str, width: f32) ->
                 .rounded(px(3.0))
                 .border_1()
                 .border_color(move || {
-                    if solid {
+                    if solid_of(shape()) {
                         AdaptiveColor::TRANSPARENT
                     } else {
-                        (tone.dot())()
+                        (tone().dot())()
                     }
                 })
                 .bg(move || {
-                    if solid {
-                        (tone.dot())()
+                    if solid_of(shape()) {
+                        (tone().dot())()
                     } else {
                         AdaptiveColor::TRANSPARENT
                     }
                 }),
         )
-        .child(marker(tone, shape))
+        .child(marker_live(tone, shape))
         .child(view().w(px(6.0)))
         .child(
             text(label)
@@ -204,7 +241,10 @@ pub fn mono_cell(label: impl IntoReactive<SharedString> + 'static, width: f32) -
 }
 
 /// 静默的次要列（规则名、最近活动）：三级墨，不和名字抢。
-pub fn quiet_cell(label: impl IntoReactive<SharedString> + 'static, width: f32) -> impl IntoElement {
+pub fn quiet_cell(
+    label: impl IntoReactive<SharedString> + 'static,
+    width: f32,
+) -> impl IntoElement {
     cell_base(label, width, f::FONT_TEXT, t::ink_tertiary)
 }
 
@@ -225,13 +265,7 @@ where
             .items_center()
             .border_b_1()
             .border_color(|| t::divider())
-            .bg(move || {
-                if is_sel() {
-                    t::selection()
-                } else {
-                    t::layer()
-                }
-            })
+            .bg(move || if is_sel() { t::selection() } else { t::layer() })
             .hover(move |s| {
                 if is_sel() {
                     s.bg(move || t::selection())
@@ -244,13 +278,7 @@ where
                 view()
                     .w(px(m::BAR_W))
                     .h(px(m::ROW_H))
-                    .bg(move || {
-                        if is_sel() {
-                            t::accent()
-                        } else {
-                            t::layer()
-                        }
-                    }),
+                    .bg(move || if is_sel() { t::accent() } else { t::layer() }),
             )
             .children(cells)
             .into_element()
@@ -312,6 +340,17 @@ pub fn btn_text<O: Fn() + Copy + 'static>(
     ink: fn() -> AdaptiveColor,
     on: O,
 ) -> impl IntoElement {
+    btn_text_live(label, ink, on)
+}
+
+/// [`btn_text`] 的随行版：文案与墨色随行变（虚拟列表里同一格会挪给另一行，
+/// 行内动作按钮的字与色必须跟着重取）。
+pub fn btn_text_live<L, I, O>(label: L, ink: I, on: O) -> impl IntoElement
+where
+    L: IntoReactive<SharedString> + 'static,
+    I: Fn() -> AdaptiveColor + Copy + 'static,
+    O: Fn() + Copy + 'static,
+{
     view()
         .h(px(24.0))
         .px(px(6.0))
@@ -428,15 +467,11 @@ where
                 }),
         )
         .child(vspacer(6.0))
-        .child(
-            view().w(px(20.0)).h(px(2.0)).bg(move || {
-                if is_sel() {
-                    t::accent()
-                } else {
-                    t::page()
-                }
-            }),
-        )
+        .child(view().w(px(20.0)).h(px(2.0)).bg(
+            move || {
+                if is_sel() { t::accent() } else { t::page() }
+            },
+        ))
 }
 
 // ---- 详情件 --------------------------------------------------------------
@@ -468,12 +503,14 @@ pub fn kv(
                     .text_color(|| t::ink_secondary()),
             ),
         )
-        .child(view().flex_1().child(
-            text(v)
-                .text_size(px(f::CAPTION))
-                .font_family(if mono { f::FONT_MONO } else { f::FONT_TEXT })
-                .text_color(|| t::ink()),
-        ))
+        .child(
+            view().flex_1().child(
+                text(v)
+                    .text_size(px(f::CAPTION))
+                    .font_family(if mono { f::FONT_MONO } else { f::FONT_TEXT })
+                    .text_color(|| t::ink()),
+            ),
+        )
 }
 
 /// 3 pt 语气条 + 标题 + 说明，卡里唯一的一块颜色。

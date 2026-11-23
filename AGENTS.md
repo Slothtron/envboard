@@ -124,11 +124,14 @@
 | 桌面 | `mise run verify-desktop` | smoke / artifact / 命令面契约 |
 | 界面 golden | `cargo test -p envboard-nsh --test golden -- --ignored` | 三张基线（`crates/app/nsh/tests/golden/`）逐像素；`UPDATE_GOLDEN=1` 重拍；`NG_GOLDEN=1` 自动走 `model::fixture()`，不碰真状态目录。**要拉前台，别在用户主屏跑**：用 Anode 座席（`seat_display` 1920×1200@125%，`seat_exec` 里跑同一条命令），主屏锁屏时也能验 |
 | 中文 IME | 座席内 `ime9.ps1 -Exe <exe>` | 点 UIA 定位的输入框（不按版式推算坐标）→ Shift 切中文 → 打 nihao → 空格提交；用 UIA 读输入框值，不靠 OCR |
+| 10k 性能（G3） | 座席内 `tools/envboard-p3-check/g3.ps1 -Exe <release exe>` | `NG_STRESS=10000` + `NG_PLAIN=1`，量首窗 / 峰值内存 / 滚动；量测进程自己 `SetProcessDPIAware()`，否则 125% 下窗口报 1294×848；滚动看 `scroll_throughput_ms`（处理成本，门槛 18ms），`scroll_frame_ms` 是座席 vsync 节拍，绝对值只能回真实显示会话复核 |
 | 数据面 | `cargo test -p envboard-nsh --test data_path --offline` | 真组合根 + 真门面：建→起→停→删一条链，错误信封是 `code·message` 不是 panic；状态目录固定在 `%TEMP%\eb-m3-gui` |
 | 前端 | `mise run verify-frontend` | tsc 零错 + Vite 产出 dist |
 | 实机 | `mise run verify-live` | 引擎直驱（需要 openssl 与 curl） |
 
 - 测：输入→状态、纯逻辑（解析 / 格式化 / 边界）、刚修的回归（注释写清当时怎么坏）。
+- 长列表一律 `nsh_core::element::virtual_list`（只造视口附近的行），格内容用读
+  `at.index()` 的位置闭包；`each` 只给几十条的小集合。全量铺开 10k 行 = 1.1 GB。
 - 不测：标签文案、框架自身行为、墙钟相位（注入时钟，不 sleep 后断言）。
 - 网络 / 时钟 / 环境用替身注入（`engine-fake` 是范例）；需要真宿主的标 `#[ignore]`，
   由 `verify-live` 触发。

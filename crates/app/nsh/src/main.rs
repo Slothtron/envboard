@@ -11,11 +11,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(target_os = "windows")]
-use nsh_core::desktop::{Backdrop, MainWindowOptions, TitleBarOptions, TitleBarStyle, WindowAttributes};
-#[cfg(target_os = "windows")]
-use nsh_core::prelude::{px, Points, Size};
+use nsh_core::desktop::{
+    Backdrop, MainWindowOptions, TitleBarOptions, TitleBarStyle, WindowAttributes,
+};
 #[cfg(target_os = "windows")]
 use nsh_core::platform::Appearance;
+#[cfg(target_os = "windows")]
+use nsh_core::prelude::{Points, Size, px};
 #[cfg(target_os = "windows")]
 use nsh_platform_windows as platform;
 
@@ -33,9 +35,10 @@ fn main() -> impl std::process::Termination {
         .expect("the traditional-colour theme parses");
 
     // 数据面先起：组合根装配、崩溃自愈、日志照看都在建窗之前完成，窗口第一帧
-    // 就能拿到真快照。golden 不启宿主（它只守像素），失败也不拦着开窗 ——
-    // 错误会落在界面错误槽里，用户仍能看到界面并读到原因。
-    if !flag("NG_GOLDEN") {
+    // 就能拿到真快照。golden 与压力口径（`NG_STRESS`）不启宿主 —— 它们只守像素与
+    // 列表渲染。失败也不拦着开窗，错误会落在界面错误槽里。
+    let synthetic = flag("NG_GOLDEN") || std::env::var("NG_STRESS").is_ok();
+    if !synthetic {
         match envboard_nsh::boot_host() {
             Ok(()) => log::info!("宿主已就绪"),
             Err(error) => {

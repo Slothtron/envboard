@@ -80,6 +80,19 @@ pub fn status_cell_for(health: Health, width: f32) -> impl IntoElement {
     ui::status_cell(tone, shape, health.label(), width)
 }
 
+/// 虚拟列表用的随行版：状态由闭包现取，同一个格挪给另一行时重跑绑定即可。
+pub fn status_cell_live_for<H>(health: H, width: f32) -> impl IntoElement
+where
+    H: Fn() -> Health + Copy + 'static,
+{
+    ui::status_cell_live(
+        move || health().tone_shape().0,
+        move || health().tone_shape().1,
+        move || health().label().to_owned(),
+        width,
+    )
+}
+
 // ---- 环境 ------------------------------------------------------------------
 
 /// 界面上的一行。字符串是**拥有**的：真数据每秒都可能换一批，不能靠 `'static`。
@@ -196,31 +209,44 @@ pub fn filtered(envs: &[Env], filter: usize, needle: &str) -> Vec<Env> {
         .collect()
 }
 
-// ---- fixture（只在 golden） -------------------------------------------------
+// ---- fixture（golden 与压力口径） -----------------------------------------
+
+fn env(name: &str, health: Health, port: u16, rules: &str, rules_missing: bool) -> Env {
+    Env {
+        name: name.to_owned(),
+        health,
+        reason: match health {
+            Health::Unhealthy => Some("新配置尚未装配成功".to_owned()),
+            Health::PortConflict => Some("端口被其它进程占用".to_owned()),
+            Health::Failed => Some("实例线程已退出".to_owned()),
+            _ => None,
+        },
+        port,
+        listen: format!("127.0.0.1:{port}"),
+        rules: rules.to_owned(),
+        rules_missing,
+        upstream: None,
+        description: String::new(),
+        proxy_command: format!("http://127.0.0.1:{port}"),
+    }
+}
 
 /// 八个环境：允许的状态全部在场，外加一个“在跑但规则集缺失”的环境 ——
 /// 状态条要报的两件事（不健康 / 规则缺失）因此可以同屏看。
+/// 8 条的固定账本（golden 与单测的口径）；界面走 [`fixture_n`]。
+#[allow(dead_code)]
 pub fn fixture() -> Vec<Env> {
-    fn env(name: &str, health: Health, port: u16, rules: &str, rules_missing: bool) -> Env {
-        Env {
-            name: name.to_owned(),
-            health,
-            reason: match health {
-                Health::Unhealthy => Some("新配置尚未装配成功".to_owned()),
-                Health::PortConflict => Some("端口被其它进程占用".to_owned()),
-                Health::Failed => Some("实例线程已退出".to_owned()),
-                _ => None,
-            },
-            port,
-            listen: format!("127.0.0.1:{port}"),
-            rules: rules.to_owned(),
-            rules_missing,
-            upstream: None,
-            description: String::new(),
-            proxy_command: format!("http://127.0.0.1:{port}"),
-        }
-    }
-    vec![
+    fixture_n(8)
+}
+
+/// 压力口径（G3）：前 8 条就是 `fixture()` 那八条（golden 因此不动），
+/// 之后按 `bulk-00000…` 顺序补到 `n` 条，四种状态轮转。
+///
+/// 为什么用 fixture 而不是往真账本灌 10k：G3 量的是**列表渲染**（`each` 建行、
+/// 行高、滚动），与账本无关；灌 10k 真环境要上万次 create + 落库，测出来的
+/// 是管理器的写吞吐，不是界面。真数据的读写正确性已由 `tests/data_path.rs` 覆盖。
+pub fn fixture_n(n: usize) -> Vec<Env> {
+    let mut envs = vec![
         env("proxy-a", Health::Running, 16301, "3 条", false),
         env("proxy-b", Health::Running, 16302, "2 条", false),
         env("proxy-c", Health::Unhealthy, 16303, "2 条", false),
@@ -229,7 +255,19 @@ pub fn fixture() -> Vec<Env> {
         env("api-mock", Health::PortConflict, 16309, "1 条", false),
         env("legacy-x", Health::Failed, 16311, "1 条", false),
         env("scratch", Health::Stopped, 16313, "—", false),
-    ]
+    ];
+    while envs.len() < n {
+        let i = envs.len() - 8;
+        let port = 17000u16 + (i % 4000) as u16;
+        let health = match i % 4 {
+            0 => Health::Running,
+            1 => Health::Unhealthy,
+            2 => Health::Stopped,
+            _ => Health::PortConflict,
+        };
+        envs.push(env(&format!("bulk-{i:05}"), health, port, "2 条", false));
+    }
+    envs
 }
 
 #[cfg(test)]
@@ -252,7 +290,10 @@ mod tests {
     fn attention_line_says_none_when_clean() {
         let clean = vec![Env::from_view(EnvView {
             name: "a".into(),
-            listen: envboard_protocol::Endpoint { host: "127.0.0.1".into(), port: 1 },
+            listen: envboard_protocol::Endpoint {
+                host: "127.0.0.1".into(),
+                port: 1,
+            },
             rules: None,
             upstream: None,
             insecure_hosts: vec![],
@@ -282,6 +323,10 @@ mod tests {
         let by_port = filtered(&envs, 0, "16309");
         assert_eq!(by_port.len(), 1);
         assert_eq!(by_port[0].name, "api-mock");
-        assert!(filtered(&envs, 1, "").iter().all(|e| e.health == Health::Running));
+        assert!(
+            filtered(&envs, 1, "")
+                .iter()
+                .all(|e| e.health == Health::Running)
+        );
     }
 }

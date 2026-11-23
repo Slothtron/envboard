@@ -122,7 +122,9 @@ fn toolbar(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl Into
         .child(view().flex_1())
         .child(ui::btn_subtle("刷新", move || actions::refresh_now(ctx)))
         .child(ui::spacer(6.0))
-        .child(ui::btn_primary("新建环境", move || actions::create(ctx)))
+        .child(ui::btn_primary("新建环境", move || {
+            actions::create(ctx)
+        }))
 }
 
 fn sub_tabs(section: Signal<usize>) -> impl IntoElement {
@@ -135,8 +137,16 @@ fn sub_tabs(section: Signal<usize>) -> impl IntoElement {
         .border_b_1()
         .border_color(|| t::divider())
         .bg(|| t::layer())
-        .child(ui::nav_tab("实例", move || section.get() == 0, move || section.set(0)))
-        .child(ui::nav_tab("规则", move || section.get() == 1, move || section.set(1)))
+        .child(ui::nav_tab(
+            "实例",
+            move || section.get() == 0,
+            move || section.set(0),
+        ))
+        .child(ui::nav_tab(
+            "规则",
+            move || section.get() == 1,
+            move || section.set(1),
+        ))
         .child(view().flex_1())
         .child(
             text("按名称排序 · 端口自动分配 · 单实例")
@@ -166,26 +176,30 @@ fn table_head() -> impl IntoElement {
 }
 
 fn instance_table(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl IntoElement {
+    // 10k 行不能一次全造（G3 量过：全量铺开 1126 MB、首帧 2.2 s）。NSH 的
+    // `virtual_list` 只造视口附近的行、滚动时把一个格挪给另一行，是旧 P2
+    // 探针 71 MB 的同一套机制。
+    //
+    // 过滤结果先算一次（`computed`）：否则每一格每次取值都要把 10k 条过滤、
+    // 克隆一遍，比不虚拟化还慢。
+    let rows: Memo<Vec<Env>> =
+        computed(move || model::filtered(&ctx.envs.get(), filter.get(), &search.get()));
     view()
         .flex_col()
+        .flex_1()
+        .w_full()
+        .h_full()
         .child(table_head())
         .child(
-            view()
-                .flex_col()
-                // 行随数据来去：key 里带上状态与规则缺失，状态一变就换一行
-                // （状态格是静态文案 + 形状，不做逐帧重排）。
-                .child(each(
-                    move || model::filtered(&ctx.envs.get(), filter.get(), &search.get()),
-                    |e: &Env| format!("{}#{:?}#{}", e.name, e.health, e.rules_missing),
-                    move |item, _index| env_row(item.get(), ctx),
-                ))
-                .child(when(
-                    move || {
-                        let envs = ctx.envs.get();
-                        model::filtered(&envs, filter.get(), &search.get()).is_empty()
-                    },
-                    move || empty_state(ctx, filter, search),
-                )),
+            nsh_core::element::virtual_list(
+                move || rows.with(|r| r.len()),
+                move |at| env_row_at(at, rows, ctx),
+            )
+            .scrollbar(false)
+            .estimated_item_size(px(m::ROW_H))
+            .empty(empty_state(ctx, filter, search))
+            .flex_1()
+            .w_full(),
         )
 }
 
@@ -237,47 +251,125 @@ fn filter_name(filter: usize) -> &'static str {
     }
 }
 
-fn env_row(e: Env, ctx: Ctx) -> impl IntoElement {
-    // 行里每个闭包都只拿 `Signal`（`Copy`）—— 名字与状态装进信号，
-    // 这样点击回调和选中判断都还能是 `Copy`，不必给原语加 `Rc` 层。
-    let name = signal(e.name.clone());
-    let health = signal(e.health);
+/// 虚拟列表的一行：格子的**结构**造一次，行换了只重跑读 `at` 的绑定。
+fn env_row_at(at: Position, rows: Memo<Vec<Env>>, ctx: Ctx) -> impl IntoElement {
+    let health = move || {
+        rows.with(|r| {
+            r.get(at.index())
+                .map(|e| e.health)
+                .unwrap_or(Health::Failed)
+        })
+    };
+    let name = move || {
+        rows.with(|r| {
+            r.get(at.index())
+                .map(|e| e.name.clone())
+                .unwrap_or_default()
+        })
+    };
     let cells = vec![
-        ui::cell_grow(e.name).into_element(),
-        model::status_cell_for(e.health, COL_STATUS).into_element(),
-        ui::mono_cell(e.listen, COL_LISTEN).into_element(),
-        ui::quiet_cell(e.rules, COL_RULES).into_element(),
+        ui::cell_grow(name).into_element(),
+        model::status_cell_live_for(health, COL_STATUS).into_element(),
+        ui::mono_cell(
+            move || {
+                rows.with(|r| {
+                    r.get(at.index())
+                        .map(|e| e.listen.clone())
+                        .unwrap_or_default()
+                })
+            },
+            COL_LISTEN,
+        )
+        .into_element(),
+        ui::quiet_cell(
+            move || {
+                rows.with(|r| {
+                    r.get(at.index())
+                        .map(|e| e.rules.clone())
+                        .unwrap_or_default()
+                })
+            },
+            COL_RULES,
+        )
+        .into_element(),
         // `EnvView` 没有“最近活动”字段：不编时间，代之以健康原因（有就写，没有写 —）。
-        ui::quiet_cell(e.reason.unwrap_or_else(|| "—".to_owned()), COL_LAST).into_element(),
-        action_cell(name, health, ctx).into_element(),
+        ui::quiet_cell(
+            move || {
+                rows.with(|r| {
+                    r.get(at.index())
+                        .map(|e| e.reason.clone().unwrap_or_else(|| "—".to_owned()))
+                        .unwrap_or_else(|| "—".to_owned())
+                })
+            },
+            COL_LAST,
+        )
+        .into_element(),
+        action_cell(at, rows, ctx).into_element(),
     ];
     let selected = ctx.selected;
     ui::row_shell(
         move || {
-            let n = name.get();
+            let n = rows.with(|r| {
+                r.get(at.index())
+                    .map(|e| e.name.clone())
+                    .unwrap_or_default()
+            });
             selected.get().as_deref() == Some(n.as_str())
         },
-        move || actions::open_drawer(ctx, name.get()),
+        move || {
+            actions::open_drawer(
+                ctx,
+                rows.with(|r| {
+                    r.get(at.index())
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default()
+                }),
+            )
+        },
     )(cells)
 }
 
-fn action_cell(name: Signal<String>, health: Signal<Health>, ctx: Ctx) -> impl IntoElement {
-    let label = health.get().action();
-    let tone: fn() -> nsh_core::element::AdaptiveColor = match health.get() {
-        Health::Running => t::ink_secondary,
-        _ => t::accent_ink,
+fn action_cell(at: Position, rows: Memo<Vec<Env>>, ctx: Ctx) -> impl IntoElement {
+    let health = move || {
+        rows.with(|r| {
+            r.get(at.index())
+                .map(|e| e.health)
+                .unwrap_or(Health::Failed)
+        })
     };
     view()
         .w(px(COL_ACTION))
         .flex_row()
         .items_center()
         .pl(px(6.0))
-        .child(ui::btn_text(label, tone, move || {
-            actions::act(ctx, name.get(), health.get())
-        }))
+        .child(ui::btn_text_live(
+            move || health().action().to_owned(),
+            move || match health() {
+                Health::Running => (t::ink_secondary)(),
+                _ => (t::accent_ink)(),
+            },
+            move || {
+                actions::act(
+                    ctx,
+                    rows.with(|r| {
+                        r.get(at.index())
+                            .map(|e| e.name.clone())
+                            .unwrap_or_default()
+                    }),
+                    health(),
+                )
+            },
+        ))
         .child(ui::spacer(2.0))
         .child(ui::btn_text("⋯", t::ink_tertiary, move || {
-            actions::open_drawer(ctx, name.get())
+            actions::open_drawer(
+                ctx,
+                rows.with(|r| {
+                    r.get(at.index())
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default()
+                }),
+            )
         }))
         .child(ui::spacer(4.0))
 }
@@ -294,12 +386,42 @@ struct Rule {
 }
 
 static RULES: [Rule; 6] = [
-    Rule { name: "api-rewrite", matcher: "host api.local", action: "rewrite → 127.0.0.1:8080", live: true },
-    Rule { name: "mock-json", matcher: "path /v1/user", action: "respond 200 · fixture", live: true },
-    Rule { name: "slow-3g", matcher: "all", action: "delay 300ms", live: true },
-    Rule { name: "block-tracker", matcher: "host *.tracker", action: "abort", live: true },
-    Rule { name: "staging-cors", matcher: "host staging.local", action: "header + allow-origin", live: false },
-    Rule { name: "legacy-tls", matcher: "port 8443", action: "rewrite → http", live: false },
+    Rule {
+        name: "api-rewrite",
+        matcher: "host api.local",
+        action: "rewrite → 127.0.0.1:8080",
+        live: true,
+    },
+    Rule {
+        name: "mock-json",
+        matcher: "path /v1/user",
+        action: "respond 200 · fixture",
+        live: true,
+    },
+    Rule {
+        name: "slow-3g",
+        matcher: "all",
+        action: "delay 300ms",
+        live: true,
+    },
+    Rule {
+        name: "block-tracker",
+        matcher: "host *.tracker",
+        action: "abort",
+        live: true,
+    },
+    Rule {
+        name: "staging-cors",
+        matcher: "host staging.local",
+        action: "header + allow-origin",
+        live: false,
+    },
+    Rule {
+        name: "legacy-tls",
+        matcher: "port 8443",
+        action: "rewrite → http",
+        live: false,
+    },
 ];
 
 fn rules_table() -> impl IntoElement {
@@ -334,30 +456,29 @@ fn rules_table() -> impl IntoElement {
                     view()
                         .w(px(m::BAR_W))
                         .h(px(m::ROW_H))
-                        .bg(move || {
-                            if r.live {
-                                t::layer()
-                            } else {
-                                t::caution()
-                            }
-                        }),
+                        .bg(move || if r.live { t::layer() } else { t::caution() }),
                 )
                 .child(ui::cell_grow(r.name))
                 .child(ui::mono_cell(r.matcher, 300.0))
                 .child(ui::mono_cell(r.action, 300.0))
                 .child(
-                    view().w(px(120.0)).flex_row().items_center().pl(px(12.0)).child(
-                        text(if r.live { "已生效" } else { "未生效" })
-                            .text_size(px(f::CAPTION))
-                            .font_family(f::FONT_TEXT)
-                            .text_color(move || {
-                                if r.live {
-                                    t::ink_secondary()
-                                } else {
-                                    t::caution_ink()
-                                }
-                            }),
-                    ),
+                    view()
+                        .w(px(120.0))
+                        .flex_row()
+                        .items_center()
+                        .pl(px(12.0))
+                        .child(
+                            text(if r.live { "已生效" } else { "未生效" })
+                                .text_size(px(f::CAPTION))
+                                .font_family(f::FONT_TEXT)
+                                .text_color(move || {
+                                    if r.live {
+                                        t::ink_secondary()
+                                    } else {
+                                        t::caution_ink()
+                                    }
+                                }),
+                        ),
                 )
         })))
 }
@@ -420,7 +541,9 @@ fn drawer_head(name: String, health: Health, open: Signal<bool>) -> impl IntoEle
         .child(ui::spacer(8.0))
         .child(model::status_cell_for(health, COL_STATUS))
         .child(view().flex_1())
-        .child(ui::btn_text("✕", t::ink_secondary, move || open.set(false)))
+        .child(ui::btn_text("✕", t::ink_secondary, move || {
+            open.set(false)
+        }))
 }
 
 fn drawer_body(e: &Env) -> impl IntoElement {

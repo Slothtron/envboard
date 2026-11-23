@@ -17,7 +17,7 @@ use nsh_core::prelude::*;
 use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
-use crate::actions::{Ctx};
+use crate::actions::Ctx;
 use crate::brand;
 use crate::model::{self, Env};
 use crate::pages;
@@ -34,6 +34,15 @@ fn dark() -> bool {
 /// golden 走 fixture：不启宿主、不碰真状态目录，基线只反映像素。
 fn fixture_mode() -> bool {
     flag("NG_GOLDEN")
+}
+
+/// 压力口径（G3）：`NG_STRESS=10000` 让首帧直接铺 10k 行（同 `fixture` 的前八条）。
+/// 与 golden 一样不启宿主 —— 量的是列表渲染，不是账本写入。
+fn stress_rows() -> usize {
+    std::env::var("NG_STRESS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
 }
 
 /// `NG_PAGE=env|rules|cert`；`rules` 是环境页的「规则」子页签。
@@ -114,8 +123,10 @@ fn apply_snapshot(
 #[component]
 pub fn App() -> impl IntoElement {
     let fixture = fixture_mode();
-    let initial: Vec<Env> = if fixture {
-        model::fixture()
+    let stress = stress_rows();
+    let synthetic = fixture || stress > 0;
+    let initial: Vec<Env> = if synthetic {
+        model::fixture_n(if stress > 0 { stress } else { 8 })
     } else {
         Vec::new()
     };
@@ -124,7 +135,7 @@ pub fn App() -> impl IntoElement {
     let section = signal(section_from_env());
     let filter = signal(0usize);
     let search = signal(String::new());
-    let selected = signal(if fixture {
+    let selected = signal(if synthetic {
         selected_from_env(&envs.get())
     } else {
         None
@@ -143,7 +154,7 @@ pub fn App() -> impl IntoElement {
         drawer,
     };
 
-    if !fixture {
+    if !synthetic {
         // 没有宿主时界面不许假装“已连接”：把启动失败的那句话直接放进错误槽。
         if service::service().is_none() {
             error_title.set("宿主启动失败");
@@ -152,7 +163,7 @@ pub fn App() -> impl IntoElement {
         }
     }
 
-    if !fixture && service::service().is_some() {
+    if !synthetic && service::service().is_some() {
         // 第一拍同步读，窗口第一帧就有内容；之后在引擎线程上按定时器轮询。
         let generation = std::cell::Cell::new(0u64);
         poll_once(cx, &generation, true);
@@ -188,7 +199,10 @@ pub fn App() -> impl IntoElement {
                     move || page.get() == 0,
                     move || pages::env_page(cx, filter, section, search),
                 ))
-                .child(when(move || page.get() == 1, move || pages::cert_page(dark())))
+                .child(when(
+                    move || page.get() == 1,
+                    move || pages::cert_page(dark()),
+                ))
                 .child(when(
                     move || page.get() == 0 && cx.drawer.get(),
                     move || pages::drawer(cx),
@@ -239,10 +253,7 @@ fn toast_pill(message: String) -> impl IntoElement {
 fn brand_mark() -> impl IntoElement {
     let src = ImageSrc::rgba(brand::MARK_PX, brand::MARK_PX, brand::MARK_RGBA)
         .size(Size::new(px(20.0), px(20.0)));
-    image(src)
-        .w(px(20.0))
-        .h(px(20.0))
-        .rounded(px(4.0))
+    image(src).w(px(20.0)).h(px(20.0)).rounded(px(4.0))
 }
 
 fn title_bar(cx: Ctx) -> impl IntoElement {
@@ -287,19 +298,13 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
                 .rounded(px(10.0))
                 .border_1()
                 .border_color(|| t::control_stroke())
-                .child(
-                    view()
-                        .w(px(5.0))
-                        .h(px(5.0))
-                        .rounded(px(2.5))
-                        .bg(move || {
-                            if cx.error.get().is_some() {
-                                t::caution()
-                            } else {
-                                t::success()
-                            }
-                        }),
-                )
+                .child(view().w(px(5.0)).h(px(5.0)).rounded(px(2.5)).bg(move || {
+                    if cx.error.get().is_some() {
+                        t::caution()
+                    } else {
+                        t::success()
+                    }
+                }))
                 .child(ui::spacer(5.0))
                 .child(
                     text(move || {
@@ -347,9 +352,17 @@ fn app_header(page: Signal<usize>) -> impl IntoElement {
         .border_b_1()
         .border_color(|| t::divider())
         .bg(|| t::layer())
-        .child(ui::nav_tab("环境", move || page.get() == 0, move || page.set(0)))
+        .child(ui::nav_tab(
+            "环境",
+            move || page.get() == 0,
+            move || page.set(0),
+        ))
         .child(ui::spacer(2.0))
-        .child(ui::nav_tab("证书", move || page.get() == 1, move || page.set(1)))
+        .child(ui::nav_tab(
+            "证书",
+            move || page.get() == 1,
+            move || page.set(1),
+        ))
         .child(view().flex_1())
         .child(
             text("数据面 IPC 直调 AdminService · 不起监听端口")
