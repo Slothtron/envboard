@@ -246,7 +246,15 @@ pub fn refresh_ca(cx: Ctx) {
 }
 
 /// 安装根证书（当前用户 ROOT 存储，免管理员、幂等）。
+///
+/// 写根存储会弹 Windows 的「安全警告」（框里带指纹，要求人点「是」）：
+/// 那个框开着的时候这一次调用是**阻塞**的，页面上必须先把话说清楚，
+/// 否则看上去就是“点了没反应”——M4 验收时正是这样被误判成按钮没接上。
 pub fn install_ca(cx: Ctx) {
+    note(
+        cx,
+        "正在写入当前用户信任库；若弹出系统「安全警告」，请核对指纹后点「是」".to_owned(),
+    );
     spawn(async move {
         match service::ca_install().await {
             Ok(Ok(())) => {
@@ -270,28 +278,38 @@ pub fn ask_uninstall_ca(cx: Ctx) {
 }
 
 fn uninstall_ca(cx: Ctx) {
-    spawn(async move {
-        match service::ca_uninstall().await {
-            Ok(Ok(result)) => {
-                refresh_ca(cx);
-                let head = if result.removed {
-                    "已从当前用户信任库卸载根证书；被代理的 HTTPS 流量将报不受信任"
-                } else {
-                    "当前用户信任库里没有这张证书，无需卸载"
-                };
-                let line = match result.warning {
-                    Some(warning) => format!("{head}（{warning}）"),
-                    None => head.to_owned(),
-                };
-                succeed(cx, line);
+    note(
+        cx,
+        "正在从信任库移除；若弹出系统确认，请点「是」".to_owned(),
+    );
+    // 卸载是从**确认框**里发起的，而 `run_confirm` 会先把 `confirm` 清空——确认框这个
+    // owner 同一帧就被拆掉。`spawn` 的任务归“当前 owner”所有，于是它在被首次轮询之前
+    // 就跟着框一起没了：现象是提示一直挂着、存储一动不动、连报错都不会有。
+    // 所以这里把任务挂到**无主** owner 上，让它独立跑完（只写信号，不建元素）。
+    Owner::detached().run(|| {
+        spawn(async move {
+            match service::ca_uninstall().await {
+                Ok(Ok(result)) => {
+                    refresh_ca(cx);
+                    let head = if result.removed {
+                        "已从当前用户信任库卸载根证书；被代理的 HTTPS 流量将报不受信任"
+                    } else {
+                        "当前用户信任库里没有这张证书，无需卸载"
+                    };
+                    let line = match result.warning {
+                        Some(warning) => format!("{head}（{warning}）"),
+                        None => head.to_owned(),
+                    };
+                    succeed(cx, line);
+                }
+                Ok(Err(error)) => {
+                    fail(cx, error);
+                }
+                Err(_) => {
+                    cx.error.set(Some("卸载失败：回传通道已断开".to_owned()));
+                }
             }
-            Ok(Err(error)) => {
-                fail(cx, error);
-            }
-            Err(_) => {
-                cx.error.set(Some("卸载失败：回传通道已断开".to_owned()));
-            }
-        }
+        })
     });
 }
 

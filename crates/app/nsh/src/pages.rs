@@ -680,7 +680,7 @@ pub fn cert_page(ctx: Ctx) -> impl IntoElement {
         ))
         .child(when(
             move || !ctx.ca_missing.get() && ctx.ca.get().is_some(),
-            move || cert_detail(ctx, ctx.ca.get().unwrap_or_else(model::fixture_ca)),
+            move || cert_detail(ctx),
         ));
 
     view()
@@ -725,36 +725,75 @@ fn cert_unavailable(ctx: Ctx) -> AnyElement {
         ).into_element()
 }
 
-fn cert_detail(ctx: Ctx, ca: model::Ca) -> AnyElement {
-    let (title, body) = ca.headline();
-    let can_install = ca.can_install();
-    let can_uninstall = ca.can_uninstall();
-    let machine = ca.machine;
-    let warning = ca.detail.clone();
+/// 证书详情。**只接 `ctx`，不接 `Ca` 值**：装完 / 卸完 `refresh_ca` 会把 `ctx.ca`
+/// 换成新的，页面里每一处文案、每一条按钮都得跟着它走；把 `Ca` 当参数传进来的话，
+/// 渲染出来的就是“动手之前”那一帧（M4 验收时踩过：装完仍写着未安装，
+/// 连「卸载证书」都不出现）。所以这里的取字段一律是闭包，交给平台每帧求值。
+fn cert_detail(ctx: Ctx) -> AnyElement {
+    let head = move || {
+        ctx.ca
+            .get()
+            .map(|c| c.headline())
+            .unwrap_or(("证书信息暂不可用", ""))
+    };
+    let warning = move || ctx.ca.get().and_then(|c| c.detail.clone());
+    let machine_installed = move || {
+        ctx.ca
+            .get()
+            .map(|c| c.machine == model::Trust::Installed)
+            .unwrap_or(false)
+    };
+
     let mut body_col = view()
         .flex_col()
         .p(px(20.0))
-        .child(ui::alert(ca.tone(), title, body))
+        // 信任 / 不信任是两种语气，语气由 tone 决定（Tone 本身是值，所以挂两支）
+        .child(when(
+            move || {
+                ctx.ca
+                    .get()
+                    .map(|c| c.tone() == ui::Tone::Success)
+                    .unwrap_or(false)
+            },
+            move || ui::alert(ui::Tone::Success, move || head().0, move || head().1),
+        ))
+        .child(when(
+            move || {
+                !ctx
+                    .ca
+                    .get()
+                    .map(|c| c.tone() == ui::Tone::Success)
+                    .unwrap_or(false)
+            },
+            move || ui::alert(ui::Tone::Caution, move || head().0, move || head().1),
+        ))
         .child(ui::vspacer(14.0))
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .child(when(move || can_install, move || {
-                    ui::btn_primary("安装证书", move || actions::install_ca(ctx))
-                }))
-                .child(when(move || !can_install, move || {
-                    text("已信任：不需要重复安装")
-                        .text_size(px(f::CAPTION))
-                        .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink_secondary())
-                }))
+                .child(when(
+                    move || ctx.ca.get().map(|c| c.can_install()).unwrap_or(false),
+                    move || ui::btn_primary("安装证书", move || actions::install_ca(ctx)),
+                ))
+                .child(when(
+                    move || !ctx.ca.get().map(|c| c.can_install()).unwrap_or(false),
+                    move || {
+                        text("已信任：不需要重复安装")
+                            .text_size(px(f::CAPTION))
+                            .font_family(f::FONT_TEXT)
+                            .text_color(|| t::ink_secondary())
+                    },
+                ))
                 .child(ui::spacer(8.0))
-                .child(when(move || can_uninstall, move || {
-                    ui::btn_text("卸载证书", t::critical, move || {
-                        actions::ask_uninstall_ca(ctx)
-                    })
-                }))
+                .child(when(
+                    move || ctx.ca.get().map(|c| c.can_uninstall()).unwrap_or(false),
+                    move || {
+                        ui::btn_text("卸载证书", t::critical, move || {
+                            actions::ask_uninstall_ca(ctx)
+                        })
+                    },
+                ))
                 .child(ui::spacer(10.0))
                 .child(
                     text("安装与卸载都只作用于当前用户 ROOT 存储（免管理员、可逆）。")
@@ -765,23 +804,24 @@ fn cert_detail(ctx: Ctx, ca: model::Ca) -> AnyElement {
         );
 
     // 探测给出的解释（例如“证书文件缺失”）就摆在按钮下面：有就写，没有不编。
-    if let Some(detail) = warning {
-        body_col = body_col.child(ui::vspacer(10.0)).child(
-            text(detail)
+    body_col = body_col.child(when(
+        move || warning().is_some(),
+        move || {
+            text(move || warning().unwrap_or_default())
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
-        );
-    }
+                .text_color(|| t::ink_tertiary())
+        },
+    ));
 
     // 计算机存储里还有一份：说清“本版本只管理当前用户”，别让人以为没删干净。
-    if machine == model::Trust::Installed {
-        body_col = body_col.child(ui::vspacer(10.0)).child(ui::alert(
+    body_col = body_col.child(when(move || machine_installed(), move || {
+        ui::alert(
             ui::Tone::Caution,
             "计算机存储里也有一份",
             "本版本只管理当前用户存储，不代删计算机存储里的旧证书；需要时请在系统证书管理器里移除。",
-        ));
-    }
+        )
+    }));
 
     body_col
         .child(ui::vspacer(18.0))
@@ -791,46 +831,63 @@ fn cert_detail(ctx: Ctx, ca: model::Ca) -> AnyElement {
         .child(
             view()
                 .flex_row()
-                .child(view().flex_1().child(ui::kv("主体", ca.subject(), false)))
-                .child(
-                    view()
-                        .flex_1()
-                        .child(ui::kv("签名算法", ca.sig_alg.clone().unwrap_or_else(dash), false)),
-                ),
+                .child(view().flex_1().child(ui::kv(
+                    "主体",
+                    move || ctx.ca.get().map(|c| c.subject()).unwrap_or_else(dash),
+                    false,
+                )))
+                .child(view().flex_1().child(ui::kv(
+                    "签名算法",
+                    move || field(ctx, |c| c.sig_alg.clone()),
+                    false,
+                ))),
         )
         .child(
             view()
                 .flex_row()
-                .child(
-                    view()
-                        .flex_1()
-                        .child(ui::kv("序列号", ca.serial_hex.clone().unwrap_or_else(dash), true)),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .child(ui::kv("有效期至", ca.not_after.clone().unwrap_or_else(dash), false)),
-                ),
+                .child(view().flex_1().child(ui::kv(
+                    "序列号",
+                    move || field(ctx, |c| c.serial_hex.clone()),
+                    true,
+                )))
+                .child(view().flex_1().child(ui::kv(
+                    "有效期至",
+                    move || field(ctx, |c| c.not_after.clone()),
+                    false,
+                ))),
         )
         .child(
             view()
                 .flex_row()
-                .child(
-                    view()
-                        .flex_1()
-                        .child(ui::kv("有效期起", ca.not_before.clone().unwrap_or_else(dash), false)),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .child(ui::kv("公钥", ca.pubkey.clone().unwrap_or_else(dash), false)),
-                ),
+                .child(view().flex_1().child(ui::kv(
+                    "有效期起",
+                    move || field(ctx, |c| c.not_before.clone()),
+                    false,
+                )))
+                .child(view().flex_1().child(ui::kv(
+                    "公钥",
+                    move || field(ctx, |c| c.pubkey.clone()),
+                    false,
+                ))),
         )
-        .child(ui::kv("SHA-256 指纹", ca.fingerprint.clone(), true))
-        .child(ui::kv("文件路径", ca.cert_path.clone(), true))
+        .child(ui::kv(
+            "SHA-256 指纹",
+            move || ctx.ca.get().map(|c| c.fingerprint.clone()).unwrap_or_else(dash),
+            true,
+        ))
+        .child(ui::kv(
+            "文件路径",
+            move || ctx.ca.get().map(|c| c.cert_path.clone()).unwrap_or_else(dash),
+            true,
+        ))
         .child(ui::kv(
             "计算机存储",
-            ca.machine.label().to_owned(),
+            move || {
+                ctx.ca
+                    .get()
+                    .map(|c| c.machine.label().to_owned())
+                    .unwrap_or_else(dash)
+            },
             false,
         ))
         .child(ui::vspacer(12.0))
@@ -840,6 +897,14 @@ fn cert_detail(ctx: Ctx, ca: model::Ca) -> AnyElement {
                 .font_family(f::FONT_TEXT)
                 .text_color(|| t::ink_tertiary()),
         ).into_element()
+}
+
+/// 取一条可选字段，缺就写 `—`。闭包版：每次重解都读当前 `ctx.ca`。
+fn field(ctx: Ctx, pick: impl Fn(&model::Ca) -> Option<String> + Copy + 'static) -> String {
+    ctx.ca
+        .get()
+        .and_then(|c| pick(&c))
+        .unwrap_or_else(dash)
 }
 
 fn dash() -> String {
