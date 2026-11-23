@@ -385,10 +385,23 @@ fn golden_pages_match_baselines() {
         }
         // 窗口必须是**活动窗口**：caption 三个按钮与标题栏文字在非活动态会换一档灰，
         // 那一换就是 253~1853 像素的差（踩过）。拉起后它一般已经是前台，
-        // 但连拍三个用例时会被上一个子进程的退出抢走，所以要显式拉回并校验。
-        focus(&found);
-        sleep(Duration::from_millis(600)); // 首帧绘制完 + 悬停态与活动态稳定
-        let (w, h, bgra) = capture(&found);
+        // 但连拍三个用例时会被上一个子进程的退出、或宿主窗口抢走，
+        // 所以拉回、等稳定、抓图前各校验一次——状态在中途变了就整条重来。
+        let mut shot = None;
+        for attempt in 0..3 {
+            focus(&found);
+            sleep(Duration::from_millis(if attempt == 0 { 600 } else { 300 }));
+            if unsafe { GetForegroundWindow() } != found.hwnd {
+                continue; // 等待期间被抢走：重新拉一次
+            }
+            let captured = capture(&found);
+            // 抓图期间若被抢到前台，画面已经是“非活动态”，这张不能进基线。
+            if unsafe { GetForegroundWindow() } == found.hwnd {
+                shot = Some(captured);
+                break;
+            }
+        }
+        let (w, h, bgra) = shot.expect("三次都没能在活动态下抓稳一帧：先关掉抢焦点的程序再跑");
         let rgba = to_rgba(&bgra);
 
         let path = dir.join(format!("{name}.png"));

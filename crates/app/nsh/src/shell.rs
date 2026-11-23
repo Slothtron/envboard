@@ -5,6 +5,7 @@
 //! `tokens.rs`（→ `crates/ui/themes/default.json`），页面里没有 hex；
 //! 状态条的计数一律经 `model`，不手写“8 环境 · 3 运行”这种会漂的字符串。
 
+use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 
 use envboard_ui::primitives as ui;
@@ -91,20 +92,15 @@ pub fn App() -> impl IntoElement {
 // 平台接管窗框（`title_bar: Hidden`, `height: 40`），三个 caption 按钮由
 // Windows 画在这条的右端，所以这里只留 138 pt 的位并让其余可拖。
 
-/// 品牌记号：与 `assets/envboard.ico` 同一图形 —— 靛青圆角方 + 两条白流（上右下左）。
-/// 16 pt 画不出真正的箭头三角，用两条长杠示意；任务栏上是完整图标。
+/// 品牌记号：直接用应用图标本身（32×32 RGBA 上采样到 16 pt），不是另画的替形。
+/// 与任务栏、Alt-Tab 看到的是同一枚图，换图标只换 `brand`。
 fn brand_mark() -> impl IntoElement {
-    view()
-        .w(px(16.0))
-        .h(px(16.0))
-        .rounded(px(3.0))
-        .bg(|| t::accent())
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .child(view().w(px(9.0)).h(px(1.5)).bg(|| t::on_accent()))
-        .child(view().h(px(2.0)))
-        .child(view().w(px(9.0)).h(px(1.5)).bg(|| t::on_accent()))
+    let src = ImageSrc::rgba(brand::MARK_PX, brand::MARK_PX, brand::MARK_RGBA)
+        .size(Size::new(px(20.0), px(20.0)));
+    image(src)
+        .w(px(20.0))
+        .h(px(20.0))
+        .rounded(px(4.0))
 }
 
 fn title_bar() -> impl IntoElement {

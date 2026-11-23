@@ -50,9 +50,10 @@
    不认识“环境/规则/端口”。守门测试在 `crates/ui/tests/`（令牌对账、零 hex、依赖面）。
 7. 界面颜色只在 `crates/ui/themes/default.json` 定义，代码里经 `tokens` 的具名角色取；
    页面与组件不许写 hex，也不许新增第二份主题文件。
-8. 品牌名、窗口标题、`app_id`、图标路径只在 `crates/app/nsh/src/brand.rs` 定义；
-   shell 与 `main` 取值不写字面量。图标资产是 `crates/app/nsh/assets/envboard.ico`，
-   由 `tools/envboard-brand/make-icon.ps1` 生成，生成脚本不进发布物。
+8. 品牌名、窗口标题、`app_id`、图标与标题栏记号只在 `crates/app/nsh/src/brand.rs` 定义；
+   shell 与 `main` 取值不写字面量。资产是 `assets/envboard.ico`（窗口图标）与
+   `assets/brand-mark-32.rgba`（标题栏记号），两者都从 Tauri 侧 `crates/app/desktop/icons/icon.png`
+   由 `tools/envboard-brand/pack-icon.ps1` 重出；生成脚本不进发布物，换图标时两个文件一起换。
 
 ## 契约
 
