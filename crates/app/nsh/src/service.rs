@@ -12,11 +12,12 @@
 //!    tokio 上下文里，`Handle::block_on` 会 panic。所以 `start`/`stop` 交给一条
 //!    **普通 std 线程**跑 `Handle::block_on`，结果经 oneshot 回到引擎线程。
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use envboard_admin::AdminService;
 use envboard_engine::Error;
-use envboard_host::{HostOptions, Prepared};
+use envboard_host::{CaControl, HostOptions, Prepared, StorePresence};
 use envboard_protocol::EnvView;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
@@ -34,6 +35,12 @@ pub struct Service {
     /// 让 runtime 活到进程结束（放进单例，drop 就不会发生）。
     runtime: tokio::runtime::Runtime,
     admin: Arc<AdminService>,
+    /// 共享 CA 的操作面（证书页唯一的数据来源）。`None` = 本宿主没有物化 CA。
+    ca: Option<CaControl>,
+    /// 界面偏好文件（主题）。组合根交付路径，nsh 不自己拼 `state_dir/ui.json`。
+    ui_prefs: PathBuf,
+    /// CA 材料目录（证书页「文件路径」指向它）。
+    ca_dir: PathBuf,
 }
 
 /// 组合根跑完（含一次 reconcile）才算启动成功；失败就把人话错误带回去，
@@ -59,6 +66,9 @@ pub fn boot() -> Result<(), Error> {
 
     let service = Service {
         admin: Arc::clone(&prepared.admin),
+        ca: prepared.ca.clone(),
+        ui_prefs: prepared.ui_prefs_file.clone(),
+        ca_dir: prepared.ca_dir.clone(),
         runtime,
     };
     let _ = SERVICE.set(service);
@@ -156,4 +166,126 @@ pub fn stop(name: String) -> oneshot::Receiver<Result<EnvView, Error>> {
             None => Err(Error::internal_error("宿主尚未启动")),
         }
     })
+}
+
+// ---- 界面偏好（主题） ------------------------------------------------------
+
+/// `ui.json` 的路径（组合根交付的那一份）。没有宿主时 `None`。
+pub fn ui_prefs_file() -> Option<&'static Path> {
+    service().map(|s| s.ui_prefs.as_path())
+}
+
+/// 引擎核的版本（设置框「关于」里那一行）。
+pub fn core_version() -> Option<(String, String)> {
+    service().map(|s| {
+        let core = s.admin.core_info();
+        (core.name, core.version)
+    })
+}
+
+/// CA 材料目录（设置框「关于」里指出证书文件在哪一层）。
+pub fn ca_dir() -> Option<&'static std::path::Path> {
+    service().map(|s| s.ca_dir.as_path())
+}
+
+// ---- 共享 CA（证书页） -----------------------------------------------------
+
+/// 本宿主有没有物化 CA。没有（测试注入的假引擎）时证书页显示「不可用」，
+/// 而不是把四个空值排成一张表。
+pub fn ca_available() -> bool {
+    service().is_some_and(|s| s.ca.is_some())
+}
+
+fn presence(p: StorePresence) -> crate::model::Trust {
+    match p {
+        StorePresence::Installed => crate::model::Trust::Installed,
+        StorePresence::Missing => crate::model::Trust::Missing,
+        StorePresence::Unknown => crate::model::Trust::Unknown,
+    }
+}
+
+/// 读一屏证书页的数据。**会碰系统证书存储**（`trust()` 是 Win32 探测），
+/// 所以调用方要用 `background(...)` 放到工作线程上，别占渲染线程。
+pub fn ca_snapshot() -> Result<crate::model::Ca, Error> {
+    let s = service().ok_or_else(|| Error::internal_error("宿主尚未启动"))?;
+    let control = s
+        .ca
+        .as_ref()
+        .ok_or_else(|| Error::internal_error("本宿主没有共享 CA（假引擎装配）"))?;
+    let trust = control.trust();
+    // `info()` 是证书 DER 的结构摘要（`CertInfo` 的 JSON 形态）：字段读不全就留空，
+    // 页面显示「—」，不猜。
+    let info = control.info().unwrap_or(serde_json::Value::Null);
+    let text = |key: &str| {
+        info.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    let pubkey = match (text("pubkey_alg"), text("pubkey_curve"), info.get("pubkey_bits")) {
+        (Some(alg), Some(curve), _) => Some(format!("{alg} · {curve}")),
+        (Some(alg), None, Some(bits)) => bits
+            .as_u64()
+            .map(|bits| format!("{alg} {bits}")),
+        (Some(alg), None, None) => Some(alg),
+        _ => None,
+    };
+    Ok(crate::model::Ca {
+        user: presence(trust.current_user),
+        machine: presence(trust.machine),
+        detail: trust.detail,
+        common_name: text("common_name"),
+        organization: text("organization"),
+        serial_hex: text("serial_hex"),
+        not_before: text("not_before"),
+        not_after: text("not_after"),
+        sig_alg: text("sig_alg"),
+        pubkey,
+        fingerprint: control.fingerprint(),
+        cert_path: control.cert_path().display().to_string(),
+    })
+}
+
+/// 把当前 CA 装进**当前用户** ROOT 存储（免管理员、幂等）。
+///
+/// 走普通线程：系统证书库的写入是 Win32 调用，几百毫秒级，不能压在渲染线程上。
+pub fn ca_install() -> oneshot::Receiver<Result<(), Error>> {
+    let ca = service().and_then(|s| s.ca.clone());
+    off_thread(move || match ca {
+        Some(control) => control.install_trust(),
+        None => Err(Error::internal_error("本宿主没有共享 CA（假引擎装配）")),
+    })
+}
+
+/// 从**当前用户** ROOT 存储卸载当前 CA。与桌面形态同一语义：只处理当前用户，
+/// 计算机存储里若还有一份只**报告**、不代删（提权助手不在本版本范围内）。
+pub fn ca_uninstall() -> oneshot::Receiver<Result<crate::model::Uninstall, Error>> {
+    let ca = service().and_then(|s| s.ca.clone());
+    off_thread(move || {
+        let control = ca.ok_or_else(|| Error::internal_error("本宿主没有共享 CA（假引擎装配）"))?;
+        let trust = control.trust();
+        let removed = if trust.current_user == StorePresence::Installed {
+            control.uninstall_trust()?
+        } else {
+            false
+        };
+        let warning = (trust.machine == StorePresence::Installed).then(|| {
+            "计算机存储里仍有一份旧证书；本版本只管理当前用户存储，需要时请在系统证书管理器里手动移除"
+                .to_owned()
+        });
+        Ok(crate::model::Uninstall { removed, warning })
+    })
+}
+
+/// 阻塞动作的落点：**普通线程**跑，结果经 oneshot 回到引擎线程。
+///
+/// 与 [`off_engine`] 同一形状，只是这里跑的是同步的 Win32 读写（证书库、
+/// 系统偏好），不需要 tokio 上下文。
+fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> oneshot::Receiver<Result<T, Error>> {
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx
 }

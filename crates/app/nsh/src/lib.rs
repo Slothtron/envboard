@@ -8,6 +8,7 @@ mod actions;
 mod brand;
 mod model;
 mod pages;
+mod prefs;
 mod service;
 mod shell;
 

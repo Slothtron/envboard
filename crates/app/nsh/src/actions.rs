@@ -15,7 +15,8 @@ use std::time::Duration;
 use envboard_engine::Error;
 use nsh_core::prelude::*;
 
-use crate::model::{Env, Health};
+use crate::model::{self, Env, Health};
+use crate::prefs::{self, ThemeChoice};
 use crate::service;
 
 /// 界面共享的那几个信号。字段全是 `Copy` 的信号句柄，所以 `Ctx` 本身是 `Copy`，
@@ -30,6 +31,16 @@ pub struct Ctx {
     pub toast: Signal<Option<String>>,
     pub selected: Signal<Option<String>>,
     pub drawer: Signal<bool>,
+    /// 证书页的数据（`None` = 还没读到）。
+    pub ca: Signal<Option<model::Ca>>,
+    /// CA 读不到（没物化 / 探测失败）：页面显示「不可用」与「重试」，不排一张空表。
+    pub ca_missing: Signal<bool>,
+    /// 设置框开着没有。
+    pub settings: Signal<bool>,
+    /// 待确认的破坏性动作（`None` = 没有确认框）。
+    pub confirm: Signal<Option<Confirm>>,
+    /// 当前主题三档：标题栏的标签与设置框的三档共用这一个值（V-1）。
+    pub theme: Signal<ThemeChoice>,
 }
 
 /// 轻提示自动消失：每次显示都起一个定时器，到点只清掉**自己那次**写进去的值
@@ -183,5 +194,177 @@ pub fn refresh_now(cx: Ctx) {
     refresh(cx);
     if cx.error.get().is_none() {
         succeed(cx, "已刷新");
+    }
+}
+
+/// 只说一下、不碰错误槽的提示（例如“主题切了但没写盘”这种不影响结果的边角）。
+fn note(cx: Ctx, text: String) {
+    cx.toast.set(Some(text.clone()));
+    auto_dismiss(cx, text);
+}
+
+// ---- 主题 ------------------------------------------------------------------
+
+/// 切主题：**先改外观再落盘**。外观是即时的（`set_color_scheme` 让整窗重解令牌），
+/// 落盘失败只提示不回滚 —— 看着对了比记着对了重要，下次启动再按文件走。
+pub fn set_theme(cx: Ctx, choice: ThemeChoice) {
+    cx.theme.set(choice);
+    set_color_scheme(choice.appearance());
+    if let Some(path) = service::ui_prefs_file() {
+        if let Err(error) = prefs::set_theme(path, choice) {
+            note(cx, format!("主题已切换，但没写进 ui.json：{error}"));
+        }
+    }
+}
+
+// ---- 证书页 ----------------------------------------------------------------
+
+/// 读一屏证书数据。**放到工作线程**：`trust()` 是 Win32 证书存储探测，
+/// 压在渲染线程上会让切到证书页的那一帧掉速。
+///
+/// 读失败与“没有 CA”都只置 `ca_missing`，**不写错误槽** —— 证书页自己有一条
+/// 「不可用 + 重试」的提示位，比在表格上方弹一条红条更贴切（那里说的事是
+/// “这一页没数据”，不是“你刚才点的操作失败了”）。
+pub fn refresh_ca(cx: Ctx) {
+    if !service::ca_available() {
+        cx.ca.set(None);
+        cx.ca_missing.set(true);
+        return;
+    }
+    spawn(async move {
+        match background(async { service::ca_snapshot() }).await {
+            Ok(Ok(ca)) => {
+                cx.ca_missing.set(false);
+                cx.ca.set(Some(ca));
+            }
+            _ => {
+                cx.ca.set(None);
+                cx.ca_missing.set(true);
+            }
+        }
+    });
+}
+
+/// 安装根证书（当前用户 ROOT 存储，免管理员、幂等）。
+pub fn install_ca(cx: Ctx) {
+    spawn(async move {
+        match service::ca_install().await {
+            Ok(Ok(())) => {
+                refresh_ca(cx);
+                succeed(cx, "根证书已安装到当前用户信任库");
+            }
+            Ok(Err(error)) => {
+                fail(cx, error);
+            }
+            Err(_) => {
+                cx.error.set(Some("安装失败：回传通道已断开".to_owned()));
+            }
+        }
+    });
+}
+
+/// 卸载根证书：**不直接做**，先弹确认（可逆，所以确认框不印“不可撤销”、
+/// 确认键也不是胭脂）。
+pub fn ask_uninstall_ca(cx: Ctx) {
+    cx.confirm.set(Some(Confirm::uninstall_ca()));
+}
+
+fn uninstall_ca(cx: Ctx) {
+    spawn(async move {
+        match service::ca_uninstall().await {
+            Ok(Ok(result)) => {
+                refresh_ca(cx);
+                let head = if result.removed {
+                    "已从当前用户信任库卸载根证书；被代理的 HTTPS 流量将报不受信任"
+                } else {
+                    "当前用户信任库里没有这张证书，无需卸载"
+                };
+                let line = match result.warning {
+                    Some(warning) => format!("{head}（{warning}）"),
+                    None => head.to_owned(),
+                };
+                succeed(cx, line);
+            }
+            Ok(Err(error)) => {
+                fail(cx, error);
+            }
+            Err(_) => {
+                cx.error.set(Some("卸载失败：回传通道已断开".to_owned()));
+            }
+        }
+    });
+}
+
+// ---- 确认框 ----------------------------------------------------------------
+//
+// 破坏性动作**只有一处需要确认**：删除环境（不可逆）。其余“看着危险”的动作
+// （停止、换个端口、卸载证书）都可逆，直接做、给一句轻提示就够了 —— 确认框一多，
+// 人就闭眼点“确定”，真正该拦的那次也拦不住。
+
+/// 要确认的动作。
+#[derive(Clone, PartialEq, Debug)]
+pub enum Ask {
+    DeleteEnv(String),
+    UninstallCa,
+}
+
+/// 一屏确认框的内容。文案定在这里而不是页面里：同一件事只写一遍。
+#[derive(Clone, PartialEq, Debug)]
+pub struct Confirm {
+    pub ask: Ask,
+    pub title: String,
+    pub note: String,
+    pub body: String,
+    /// 不可逆才印“此操作不可撤销”，并用胭脂确认键。
+    pub irreversible: bool,
+    pub confirm_label: String,
+}
+
+impl Confirm {
+    pub fn delete_env(name: &str) -> Self {
+        Self {
+            ask: Ask::DeleteEnv(name.to_owned()),
+            title: format!("删除环境 {name}？"),
+            note: "不可撤销".to_owned(),
+            body: format!(
+                "环境 {name} 的配置与规则绑定会一并从账本里移除；正在运行的实例会先停掉。"
+            ),
+            irreversible: true,
+            confirm_label: "删除".to_owned(),
+        }
+    }
+
+    pub fn uninstall_ca() -> Self {
+        Self {
+            ask: Ask::UninstallCa,
+            title: "从当前用户信任库卸载根证书？".to_owned(),
+            note: "可逆".to_owned(),
+            body: "卸载后，本机经 envboard 代理的 HTTPS 流量会报证书不受信任；\
+                   随时可以再点「安装证书」装回来。"
+                .to_owned(),
+            irreversible: false,
+            confirm_label: "卸载".to_owned(),
+        }
+    }
+}
+
+/// 弹确认框（删除环境走这里，不直接调 `remove`）。
+pub fn ask(cx: Ctx, confirm: Confirm) {
+    cx.confirm.set(Some(confirm));
+}
+
+pub fn cancel_confirm(cx: Ctx) {
+    cx.confirm.set(None);
+}
+
+/// 确认键：先关框再执行 —— 动作里可能又失败，错误条要落在干净的一屏上。
+pub fn run_confirm(cx: Ctx) {
+    let Some(confirm) = cx.confirm.get() else {
+        return;
+    };
+    cx.confirm.set(None);
+    match confirm.ask {
+        Ask::DeleteEnv(name) => remove(cx, name),
+        Ask::UninstallCa => uninstall_ca(cx),
     }
 }

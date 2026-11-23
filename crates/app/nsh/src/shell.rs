@@ -17,10 +17,11 @@ use nsh_core::prelude::*;
 use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
-use crate::actions::Ctx;
+use crate::actions::{self, Ctx};
 use crate::brand;
 use crate::model::{self, Env};
 use crate::pages;
+use crate::prefs::{self, ThemeChoice};
 use crate::service;
 
 fn flag(name: &str) -> bool {
@@ -72,6 +73,29 @@ fn selected_from_env(envs: &[Env]) -> Option<String> {
 
 fn drawer_from_env() -> bool {
     flag("NG_DRAWER")
+}
+
+/// 主题初值：`NG_DARK=1`（golden 深色用例）→ 夜黛；没有宿主（golden/压力）→ 跟随系统；
+/// 有宿主就读用户的 `ui.json`。
+fn initial_theme(synthetic: bool) -> ThemeChoice {
+    if dark() {
+        return ThemeChoice::Dark;
+    }
+    if synthetic {
+        return ThemeChoice::System;
+    }
+    service::ui_prefs_file()
+        .and_then(prefs::theme)
+        .unwrap_or(ThemeChoice::System)
+}
+
+/// 标题栏右侧那行内核版本：有宿主报真的，没有就留 M1 起的那个占位字面
+/// （golden 是按它拍的，换它等于重拍基线）。
+fn core_line() -> String {
+    match service::core_version() {
+        Some((_, version)) => format!("core {version}"),
+        None => "core 0.1.0".to_owned(),
+    }
 }
 
 /// 一次轮询：快照（账本代次 + 全量）。代次没变就不动信号 —— 800ms 一拍的
@@ -144,6 +168,13 @@ pub fn App() -> impl IntoElement {
     let error = signal(None::<String>);
     let error_title = signal("操作未生效");
     let toast = signal(None::<String>);
+    let ca = signal(None::<model::Ca>);
+    let ca_missing = signal(false);
+    let settings = signal(flag("NG_SETTINGS"));
+    let confirm = signal(None::<actions::Confirm>);
+    // 主题的初值：`NG_DARK` 优先（golden 的深色用例），否则读用户偏好，
+    // 都没有就跟随系统 —— 与桌面形态同一份 `ui.json`、同一套回退。
+    let theme = signal(initial_theme(synthetic));
 
     let cx = Ctx {
         envs,
@@ -152,7 +183,25 @@ pub fn App() -> impl IntoElement {
         toast,
         selected,
         drawer,
+        ca,
+        ca_missing,
+        settings,
+        confirm,
+        theme,
     };
+
+    // 落地的外观：偏好是“跟随系统”时交给平台自己判，别在这里猜系统是深是浅。
+    set_color_scheme(theme.get().appearance());
+
+    if flag("NG_GOLDEN") || flag("NG_PLAIN") {
+        // 没有宿主也要有证书页：样本值 + 直接置位，截图与 golden 才稳定。
+        ca.set(Some(model::fixture_ca()));
+    }
+
+    if flag("NG_CONFIRM") {
+        // 截图/基线用：直接把删除确认框摆出来（删的是样本里那个不健康的环境）。
+        confirm.set(Some(actions::Confirm::delete_env("proxy-c")));
+    }
 
     if !synthetic {
         // 没有宿主时界面不许假装“已连接”：把启动失败的那句话直接放进错误槽。
@@ -188,7 +237,7 @@ pub fn App() -> impl IntoElement {
         .bg(|| t::page())
         .overflow_hidden()
         .child(title_bar(cx))
-        .child(app_header(page))
+        .child(app_header(page, cx))
         .child(
             view()
                 .flex_1()
@@ -201,7 +250,7 @@ pub fn App() -> impl IntoElement {
                 ))
                 .child(when(
                     move || page.get() == 1,
-                    move || pages::cert_page(dark()),
+                    move || pages::cert_page(cx),
                 ))
                 .child(when(
                     move || page.get() == 0 && cx.drawer.get(),
@@ -214,6 +263,14 @@ pub fn App() -> impl IntoElement {
                 )),
         )
         .child(status_bar(cx, page))
+        // 两个模态：平台原生的模态层（焦点隔离、Esc 走 `on_cancel`），
+        // 遮罩与卡片由 `ui::dialog_shell` 画。挂在最外层，遮罩才盖得住状态条。
+        .child(when(move || cx.settings.get(), move || {
+            pages::settings_dialog(cx)
+        }))
+        .child(when(move || cx.confirm.get().is_some(), move || {
+            pages::confirm_dialog(cx)
+        }))
 }
 
 fn toast_pill(message: String) -> impl IntoElement {
@@ -282,7 +339,7 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
         )
         .child(view().flex_1())
         .child(
-            text("core 0.1.0")
+            text(core_line())
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
                 .text_color(|| t::ink_tertiary()),
@@ -329,7 +386,9 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
                 .rounded(px(10.0))
                 .bg(|| t::hover_fill())
                 .child(
-                    text(move || if dark() { "夜黛" } else { "宣纸" }.to_owned())
+                    // 主题名随切随变（V-1）：标题栏报的是“现在是什么外观”，
+                    // 不是启动时是什么外观。入口在顶栏的「设置」上，这条只是回显。
+                    text(move || cx.theme.get().label())
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
                         .text_color(|| t::ink_tertiary()),
@@ -342,7 +401,7 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
 
 // ---- 顶栏（主导航） ------------------------------------------------------
 
-fn app_header(page: Signal<usize>) -> impl IntoElement {
+fn app_header(page: Signal<usize>, cx: Ctx) -> impl IntoElement {
     view()
         .h(px(52.0))
         .w_full()
@@ -370,6 +429,11 @@ fn app_header(page: Signal<usize>) -> impl IntoElement {
                 .font_family(f::FONT_TEXT)
                 .text_color(|| t::ink_tertiary()),
         )
+        .child(ui::spacer(10.0))
+        // 设置入口放顶栏而不是标题栏：标题栏整条是拖动区，放在那里的按钮会被拖拽吃掉。
+        .child(ui::btn_text("设置", t::ink_secondary, move || {
+            cx.settings.set(true)
+        }))
 }
 
 // ---- 状态栏 --------------------------------------------------------------
@@ -396,7 +460,11 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
                     let c = model::counts(&cx.envs.get());
                     format!("{} 环境 · {} 运行 · {} 停止", c.total, c.running, c.stopped)
                 } else {
-                    "CA 就绪 · 未信任".to_owned()
+                    match cx.ca.get() {
+                        Some(ca) if ca.trusted() => "CA 就绪 · 已信任".to_owned(),
+                        Some(_) => "CA 就绪 · 未信任".to_owned(),
+                        None => "CA 不可用".to_owned(),
+                    }
                 }
             })
             .text_size(px(f::CAPTION))
@@ -407,7 +475,18 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
         .child(
             text(move || {
                 if page.get() != 0 {
-                    return "证书 1 张 · 当前用户 ROOT".to_owned();
+                    return match cx.error.get() {
+                        Some(line) => line,
+                        None => {
+                            let trusted = cx.ca.get().is_some_and(|ca| ca.trusted());
+                            if trusted {
+                                "证书已导入当前用户 ROOT 存储"
+                            } else {
+                                "证书未导入：本机 HTTPS 会报不受信任"
+                            }
+                            .to_owned()
+                        }
+                    };
                 }
                 match cx.error.get() {
                     Some(line) => line,
@@ -417,12 +496,14 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
             .text_color(move || {
-                if page.get() == 0 && cx.error.get().is_some() {
+                if cx.error.get().is_some() {
                     t::critical()
                 } else if page.get() == 0 {
                     t::caution_ink()
+                } else if cx.ca.get().is_some_and(|ca| ca.trusted()) {
+                    t::ink_secondary()
                 } else {
-                    t::ink_tertiary()
+                    t::caution_ink()
                 }
             }),
         )
@@ -432,11 +513,28 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
                 if page.get() == 0 {
                     "宿主 IPC · 无监听端口".to_owned()
                 } else {
-                    "SHA-256 · ECDSA P-256".to_owned()
+                    cx.ca
+                        .get()
+                        .map(|ca| fingerprint_short(&ca.fingerprint))
+                        .unwrap_or_else(|| "—".to_owned())
                 }
             })
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_MONO)
             .text_color(|| t::ink_tertiary()),
         )
+}
+
+/// 指纹只显示前 8 个十六进制字符（`9A671086…`）：完整 64 字符塞进 28 高的状态条，
+/// 谁也读不出来，页里那行才是完整值。引擎给的是**无分隔**的大写十六进制。
+fn fingerprint_short(fingerprint: &str) -> String {
+    let hex: String = fingerprint
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(8)
+        .collect();
+    if hex.len() < 8 {
+        return fingerprint.to_owned();
+    }
+    format!("{hex}…")
 }

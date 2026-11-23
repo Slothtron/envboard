@@ -40,7 +40,8 @@
       "critical": "#9d2933",
       "critical-hover": "#cb3a56",
       "selection": "#d6ecf0",
-      "accent-ink": "#065279"
+      "accent-ink": "#065279",
+      "scrim": "#3d3b4f66"
     },
     "dark": {
       "background": "#392f41",
@@ -81,7 +82,8 @@
       "critical": "#ffb3a7",
       "critical-hover": "#f47983",
       "selection": "#2e4e7e",
-      "accent-ink": "#44cef6"
+      "accent-ink": "#44cef6",
+      "scrim": "#211d28cc"
     }
   }
 }

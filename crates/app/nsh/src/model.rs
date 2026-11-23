@@ -209,6 +209,136 @@ pub fn filtered(envs: &[Env], filter: usize, needle: &str) -> Vec<Env> {
         .collect()
 }
 
+// ---- 证书（共享 CA）------------------------------------------------------
+//
+// 证书页要说的只有两件事：**系统信不信它**，以及**这张证书是什么**。
+// 前者是三值探测（装了 / 没装 / 探不到），后者是只读摘要；两者都不含私钥，
+// 界面也没有任何“重新签发”的入口（轮换是命令行的事，M4 不做）。
+
+/// 系统信任库里这张 CA 的所在（引擎 `StorePresence` 的界面映射）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Trust {
+    Installed,
+    Missing,
+    /// 探测本身失败（读不到系统存储）：既不敢说装了，也不敢说没装。
+    Unknown,
+}
+
+impl Trust {
+    /// 展示用的一行字（证书页「计算机存储」那一行）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Trust::Installed => "已安装",
+            Trust::Missing => "未安装",
+            Trust::Unknown => "无法确认",
+        }
+    }
+}
+
+/// 证书页的一屏数据。字段全是**可选**：摘要解析不出来就显示「—」，不编内容。
+#[derive(Clone, PartialEq, Debug)]
+pub struct Ca {
+    /// 当前用户 ROOT 存储。
+    pub user: Trust,
+    /// 计算机（LocalMachine）存储：本版本只探测、不代删。
+    pub machine: Trust,
+    /// 探测给出的解释（例如“证书文件缺失”），没有就不写。
+    pub detail: Option<String>,
+    pub common_name: Option<String>,
+    pub organization: Option<String>,
+    pub serial_hex: Option<String>,
+    pub not_before: Option<String>,
+    pub not_after: Option<String>,
+    pub sig_alg: Option<String>,
+    /// 「EC · prime256v1」这类一行话。
+    pub pubkey: Option<String>,
+    pub fingerprint: String,
+    pub cert_path: String,
+}
+
+impl Ca {
+    /// 当前用户在信任库里 = 界面不再提醒。
+    pub fn trusted(&self) -> bool {
+        self.user == Trust::Installed
+    }
+
+    /// 顶部那条提示的语气：信了是绿的，其余一律警。
+    pub fn tone(&self) -> Tone {
+        if self.trusted() {
+            Tone::Success
+        } else {
+            Tone::Caution
+        }
+    }
+
+    /// 顶部提示的（标题, 说明）。四句话覆盖四种真实情况，不写“一切正常”式占位。
+    pub fn headline(&self) -> (&'static str, &'static str) {
+        match (self.user, self.machine) {
+            (Trust::Installed, _) => (
+                "根证书已就绪且已受信任",
+                "被代理的 HTTPS 流量可以正常解密与改写。",
+            ),
+            (Trust::Missing, Trust::Installed) => (
+                "计算机存储里有这张证书，当前用户还没有",
+                "当前用户启动的程序仍会报不受信任：点「安装证书」写入当前用户存储（免管理员）。",
+            ),
+            (Trust::Missing, _) => (
+                "根证书尚未导入系统信任库",
+                "本机客户端会报证书不受信任：点「安装证书」直接写入当前用户信任库（免管理员）。",
+            ),
+            (Trust::Unknown, _) => (
+                "无法确认系统信任库状态",
+                "探测失败：点「重新读取」再试一次；「安装证书」是幂等的，也可以直接点。",
+            ),
+        }
+    }
+
+    /// 「主体」一行：证书里有什么就说什么，都没有给组织名，再没有给「—」。
+    pub fn subject(&self) -> String {
+        self.common_name
+            .clone()
+            .or_else(|| self.organization.clone())
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    /// 按钮可用性：已安装就别再“安装”，没装就别“卸载”（判断只有这一处）。
+    pub fn can_install(&self) -> bool {
+        self.user != Trust::Installed
+    }
+
+    pub fn can_uninstall(&self) -> bool {
+        self.user == Trust::Installed
+    }
+}
+
+/// 卸载证书的结果。界面文案的分支依据只有一个：**到底删掉了没有**，
+/// 以及有没有“计算机存储里还剩一份”这句必须说出来的实话。
+#[derive(Clone, PartialEq, Debug)]
+pub struct Uninstall {
+    pub removed: bool,
+    /// 计算机存储里仍有这张证书时的说明（本版本不代删，只报告）。
+    pub warning: Option<String>,
+}
+
+/// golden 与截图口径用的固定样本（`NG_GOLDEN=1` / `NG_PLAIN=1` 没有宿主）。
+/// 值全是**样张**，不是任何一台机器上的真证书；与 `fixture()` 同一用途。
+pub fn fixture_ca() -> Ca {
+    Ca {
+        user: Trust::Missing,
+        machine: Trust::Missing,
+        detail: None,
+        common_name: Some("envboard local CA".to_owned()),
+        organization: Some("envboard".to_owned()),
+        serial_hex: Some("7A1F440C9E2233B8".to_owned()),
+        not_before: Some("2026-11-23 08:00:00Z".to_owned()),
+        not_after: Some("2036-11-23 08:00:00Z".to_owned()),
+        sig_alg: Some("ECDSA with SHA-256".to_owned()),
+        pubkey: Some("EC · P-256".to_owned()),
+        fingerprint: "3F:9C:71:2D:88:04:BE:57:C1:6A:0D:9F:33:10:5E:A2".to_owned(),
+        cert_path: r"C:\Users\<user>\AppData\Local\envboard\ca\envboard-ca-cert.pem".to_owned(),
+    }
+}
+
 // ---- fixture（golden 与压力口径） -----------------------------------------
 
 fn env(name: &str, health: Health, port: u16, rules: &str, rules_missing: bool) -> Env {

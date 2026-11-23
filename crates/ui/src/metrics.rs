@@ -40,5 +40,11 @@ pub const OVERLAY_RADIUS: f32 = 8.0;
 /// 详情抽屉宽。可拖 420–640，默认 480。
 pub const DRAWER_W: f32 = 480.0;
 
+/// 确认框宽（一句话 + 两个按钮，再宽就是空白的行）。
+pub const DIALOG_W: f32 = 420.0;
+
+/// 设置框宽（放得下三档外观与版本行）。
+pub const DIALOG_W_LG: f32 = 480.0;
+
 /// 状态形编码的条宽（选中 3 pt 竖条、告警 3 pt 横条都用它）。
 pub const BAR_W: f32 = 3.0;

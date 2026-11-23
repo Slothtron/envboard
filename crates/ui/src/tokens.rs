@@ -1,4 +1,4 @@
-//! 设计系统的颜色层：24 个具名角色，全部在绘制时从 `themes/zhongguose.json`
+//! 设计系统的颜色层：25 个具名角色，全部在绘制时从 `themes/zhongguose.json`
 //! 解析（`theme().color(name)`），所以切换浅/深只是重解名字，没有一处重绘代码。
 //!
 //! 本文件里**没有** hex：值是数据，名字是代码。名字与 JSON 键的对账由
@@ -37,10 +37,12 @@ pub mod role {
     pub const CAUTION_DOT: &str = "caution-dot";
     pub const CRITICAL: &str = "critical";
     pub const CRITICAL_HOVER: &str = "critical-hover";
+    /// 模态遮罩：只有对话框用它，页面与抽屉不许拿它当底色。
+    pub const SCRIM: &str = "scrim";
 }
 
-/// 全部语义角色（24）。测试用它核对 JSON 的 light/dark 两套键。
-pub const ROLES: [&str; 24] = [
+/// 全部语义角色（25）。测试用它核对 JSON 的 light/dark 两套键。
+pub const ROLES: [&str; 25] = [
     role::PAGE,
     role::LAYER,
     role::CARD_LAYER,
@@ -65,6 +67,7 @@ pub const ROLES: [&str; 24] = [
     role::CAUTION_DOT,
     role::CRITICAL,
     role::CRITICAL_HOVER,
+    role::SCRIM,
 ];
 
 fn tok(name: &'static str) -> AdaptiveColor {
@@ -183,4 +186,10 @@ pub fn critical() -> AdaptiveColor {
 
 pub fn critical_hover() -> AdaptiveColor {
     tok(role::CRITICAL_HOVER)
+}
+
+/// 模态遮罩（玄青 40% / 近黑 80%）。它只出现在对话框背后一层 ——
+/// 抽屉按 R-5 明确**不加遮罩**，所以这个角色不许被拿去当页面底色。
+pub fn scrim() -> AdaptiveColor {
+    tok(role::SCRIM)
 }

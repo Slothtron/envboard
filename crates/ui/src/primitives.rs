@@ -296,7 +296,11 @@ pub fn toned_divider() -> impl IntoElement {
     view().w_full().h(px(1.0)).bg(|| t::control_stroke())
 }
 
-pub fn btn_primary<O: Fn() + Copy + 'static>(label: &'static str, on: O) -> impl IntoElement {
+pub fn btn_primary<L, O>(label: L, on: O) -> impl IntoElement
+where
+    L: IntoReactive<SharedString> + 'static,
+    O: Fn() + Copy + 'static,
+{
     view()
         .h(px(m::CONTROL_H))
         .px(px(14.0))
@@ -314,7 +318,11 @@ pub fn btn_primary<O: Fn() + Copy + 'static>(label: &'static str, on: O) -> impl
         )
 }
 
-pub fn btn_subtle<O: Fn() + Copy + 'static>(label: &'static str, on: O) -> impl IntoElement {
+pub fn btn_subtle<L, O>(label: L, on: O) -> impl IntoElement
+where
+    L: IntoReactive<SharedString> + 'static,
+    O: Fn() + Copy + 'static,
+{
     view()
         .h(px(m::CONTROL_H))
         .px(px(14.0))
@@ -335,11 +343,11 @@ pub fn btn_subtle<O: Fn() + Copy + 'static>(label: &'static str, on: O) -> impl 
 }
 
 /// 只当文字看的按钮：操作列、抽屉的 ✕、删除环境。24 高，四周 6 pt 留白刚好能点中。
-pub fn btn_text<O: Fn() + Copy + 'static>(
-    label: &'static str,
-    ink: fn() -> AdaptiveColor,
-    on: O,
-) -> impl IntoElement {
+pub fn btn_text<L, O>(label: L, ink: fn() -> AdaptiveColor, on: O) -> impl IntoElement
+where
+    L: IntoReactive<SharedString> + 'static,
+    O: Fn() + Copy + 'static,
+{
     btn_text_live(label, ink, on)
 }
 
@@ -436,6 +444,57 @@ where
                         t::accent_ink()
                     } else {
                         t::ink_tertiary()
+                    }
+                }),
+        )
+}
+
+/// 单选档位（设置里的外观三档）。与筛选片同一套皮，但**不带计数**：
+/// 档位回答“选哪个”，筛选片回答“还剩几条”，混成一排会让人以为档位也有数量。
+pub fn choice_live<L, S, O>(label: L, is_sel: S, on: O) -> impl IntoElement
+where
+    L: IntoReactive<SharedString> + 'static,
+    S: Fn() -> bool + Copy + 'static,
+    O: Fn() + Copy + 'static,
+{
+    view()
+        .h(px(26.0))
+        .px(px(12.0))
+        .flex_row()
+        .items_center()
+        .rounded(px(m::RADIUS))
+        .border_1()
+        .border_color(move || {
+            if is_sel() {
+                t::accent()
+            } else {
+                t::control_stroke()
+            }
+        })
+        .bg(move || {
+            if is_sel() {
+                t::selection()
+            } else {
+                t::control_fill()
+            }
+        })
+        .hover(move |s| {
+            if is_sel() {
+                s
+            } else {
+                s.bg(move || t::hover_fill())
+            }
+        })
+        .on_press(move || on())
+        .child(
+            text(label)
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(move || {
+                    if is_sel() {
+                        t::accent_ink()
+                    } else {
+                        t::ink_secondary()
                     }
                 }),
         )
@@ -556,8 +615,7 @@ pub fn alert(
         )
 }
 
-/// 行内错误条：一次写操作失败后停在表格上方，右侧带「关闭」。
-///
+/// 行内错误条：一次写操作失败后停在表格上方，右侧带「关闭」。///
 /// 与 `alert` 的差别不是颜色而是**位置与寿命**：它在内容流里（不是浮层），
 /// 有明确的关闭入口，且不属于任何一张卡片——用户还没点之前它是空的。
 pub fn error_bar<O>(
@@ -604,5 +662,126 @@ where
                         ),
                 )
                 .child(btn_text("关闭", t::ink_tertiary, on_close)),
+        )
+}
+
+// ---- 模态（对话框）-------------------------------------------------------
+//
+// 抽屉**不是**模态（R-5：无遮罩、点外不关）；对话框是，两者的分界只有一条。
+// 平台负责**行为**：`nsh_base::dialog()` 是原生模态层（焦点隔离、Esc → `on_cancel`、
+// 读屏按 dialog 播报）；这层负责**长**相：原生模态自己没有底色，遮罩与卡片留在
+// 设计系统里，页面只往里塞内容。
+
+/// 铺满整窗的一层遮罩。它**不接管点击**：对话框只有显式按钮与 Esc 两个关闭入口
+/// （确认框被误点窗外等于丢操作，那叫不防误触）。
+pub fn scrim() -> impl IntoElement {
+    view()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
+        .bg(|| t::scrim())
+}
+
+/// 对话框的壳：`width` 宽的卡片，头（标题 + 一句说明）· 体 · 脚三段。
+///
+/// 用闭包而不是参数列表，与 [`row_shell`] 同一写法：体与脚的内容由页面给，
+/// 壳只决定它们的**位置与背板**（居中的卡片、遮罩在它背后一层）。
+pub fn dialog_shell<T, S>(
+    width: f32,
+    title: T,
+    note: S,
+) -> impl FnOnce(Vec<AnyElement>, Vec<AnyElement>) -> AnyElement
+where
+    T: IntoReactive<SharedString> + 'static,
+    S: IntoReactive<SharedString> + 'static,
+{
+    move |body: Vec<AnyElement>, footer: Vec<AnyElement>| {
+        view()
+            .w_full()
+            .h_full()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            // 遮罩是 `absolute` 的：没有 `relative` 的父级，它就没有可测量的盒子，
+            // 一层本该盖满整窗的暗面会整块不见（踩过）。
+            .relative()
+            .child(scrim())
+            .child(
+                view()
+                    .w(px(width))
+                    .flex_col()
+                    // 对话框的卡片必须是**实色**：`card()` 是 0.8 的半透明面（页面上的
+                    // 卡片压在 `page()` 上正好透一点底色），压在遮罩上就会把底下的表格
+                    // 透出来 —— 模态里没有“半透”这回事。
+                    .bg(|| t::layer())
+                    .rounded(px(m::OVERLAY_RADIUS))
+                    .border_1()
+                    .border_color(|| t::card_stroke())
+                    .overflow_hidden()
+                    .child(
+                        view()
+                            .h(px(m::BAR_H))
+                            .w_full()
+                            .px(px(16.0))
+                            .flex_row()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(|| t::divider())
+                            .child(
+                                text(title)
+                                    .text_size(px(f::BODY))
+                                    .font_family(f::FONT_TEXT)
+                                    .text_color(|| t::ink()),
+                            )
+                            .child(spacer(10.0))
+                            .child(
+                                text(note)
+                                    .text_size(px(f::CAPTION))
+                                    .font_family(f::FONT_TEXT)
+                                    .text_color(|| t::ink_tertiary()),
+                            ),
+                    )
+                    .child(view().w_full().p(px(16.0)).flex_col().children(body))
+                    .child(
+                        view()
+                            .h(px(m::BAR_H))
+                            .w_full()
+                            .px(px(16.0))
+                            .flex_row()
+                            .items_center()
+                            .justify_end()
+                            .border_t_1()
+                            .border_color(|| t::divider())
+                            .children(footer),
+                    )
+                    .into_element(),
+            )
+            .into_element()
+    }
+}
+
+/// 破坏性动作的实心按钮：**全仓唯一一处胭脂填充**（删除环境）。
+/// 其余“危险”只用文字/描边（`btn_text` + `t::critical`）—— 面积律见设计语言 §3。
+pub fn btn_destructive<L, O>(label: L, on: O) -> impl IntoElement
+where
+    L: IntoReactive<SharedString> + 'static,
+    O: Fn() + Copy + 'static,
+{
+    view()
+        .h(px(m::CONTROL_H))
+        .px(px(14.0))
+        .flex_row()
+        .items_center()
+        .rounded(px(m::RADIUS))
+        .bg(|| t::critical())
+        .hover(|s| s.bg(|| t::critical_hover()))
+        .on_press(move || on())
+        .child(
+            text(label)
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(|| t::on_accent()),
         )
 }

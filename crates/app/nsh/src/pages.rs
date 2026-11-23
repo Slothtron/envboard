@@ -12,6 +12,8 @@ use envboard_ui::{font as f, metrics as m, tokens as t};
 
 use crate::actions::{self, Ctx};
 use crate::model::{self, Env, Health};
+use crate::prefs::ThemeChoice;
+use crate::service;
 
 // ---- 列宽 ----------------------------------------------------------------
 //
@@ -616,16 +618,71 @@ fn drawer_footer(ctx: Ctx, name: Signal<String>) -> impl IntoElement {
             actions::reallocate_port(ctx, name.get())
         }))
         .child(view().flex_1())
+        // 删除不直接做：先弹确认（全仓唯一不可逆的动作，也是唯一用胭脂填充的按钮）。
         .child(ui::btn_text("删除环境", t::critical, move || {
-            actions::remove(ctx, name.get())
+            actions::ask(ctx, actions::Confirm::delete_env(&name.get()))
         }))
 }
 
 // ---- 证书页 --------------------------------------------------------------
 //
-// 证书是真数据（CA 在状态目录里），读它是 M4 的事；这里保留样张。
+// M4：数据来自 `service::ca_snapshot()`（共享 CA 的信任探测 + 只读摘要）。
+// 这一页只有两件事要说清：**系统信不信它**、**这张证书是什么**；没有“重新签发”
+// 入口（轮换是命令行的事），也没有下载向导 —— 只把 PEM 在哪说清楚。
+//
+// 读证书是 Win32 探测，进页时放工作线程（`actions::refresh_ca`），不占渲染线程。
 
-pub fn cert_page(dark: bool) -> impl IntoElement {
+pub fn cert_page(ctx: Ctx) -> impl IntoElement {
+    // 进页读一次。用 `get_untracked` 做守卫：这一句里写信号会触发重跑，
+    // 不能同时又订阅（否则“读到 → 重跑 → 再读”会来回抖）。
+    if ctx.ca.get_untracked().is_none() && !ctx.ca_missing.get_untracked() {
+        actions::refresh_ca(ctx);
+    }
+    // 两个状态各自挂在一个 `when` 上：组件体里的 `.get()` 是**一次性读**，
+    // 数据晚到（这里必然晚到 —— 证书存储探测在工作线程上）时必须靠闭包订阅，
+    // 否则会停在“读到之前”的那一帧（踩过：状态条已显示指纹，页面还写着不可用）。
+    let card = view()
+        .w(px(880.0))
+        .flex_col()
+        .bg(|| t::card())
+        .rounded(px(m::OVERLAY_RADIUS))
+        .border_1()
+        .border_color(|| t::card_stroke())
+        .overflow_hidden()
+        .child(
+            view()
+                .h(px(m::BAR_H))
+                .w_full()
+                .px(px(16.0))
+                .flex_row()
+                .items_center()
+                .border_b_1()
+                .border_color(|| t::divider())
+                .child(
+                    text("证书")
+                        .text_size(px(f::SUBTITLE))
+                        .font_family(f::FONT_DISPLAY)
+                        .text_color(|| t::ink()),
+                )
+                .child(ui::spacer(10.0))
+                .child(
+                    text("共享 CA · 当前用户信任库 · 免管理员")
+                        .text_size(px(f::CAPTION))
+                        .font_family(f::FONT_TEXT)
+                        .text_color(|| t::ink_tertiary()),
+                )
+                .child(view().flex_1())
+                .child(ui::btn_subtle("重新读取", move || actions::refresh_ca(ctx))),
+        )
+        .child(when(
+            move || ctx.ca_missing.get() || ctx.ca.get().is_none(),
+            move || cert_unavailable(ctx),
+        ))
+        .child(when(
+            move || !ctx.ca_missing.get() && ctx.ca.get().is_some(),
+            move || cert_detail(ctx, ctx.ca.get().unwrap_or_else(model::fixture_ca)),
+        ));
+
     view()
         .flex_1()
         .w_full()
@@ -634,111 +691,289 @@ pub fn cert_page(dark: bool) -> impl IntoElement {
         .items_center()
         .pt(px(24.0))
         .bg(|| t::page())
+        // 证书页也要有自己的错误条：安装/卸载失败是**这一页**的操作失败，
+        // 不能只飘在环境页上方（那里用户根本看不见）。
+        .child(when(move || ctx.error.get().is_some(), move || {
+            ui::error_bar(
+                move || ctx.error_title.get(),
+                ctx.error.get().unwrap_or_default(),
+                move || ctx.error.set(None),
+            )
+        }))
+        .child(view().pt(px(10.0)).child(card))
+}
+
+/// 读不到 CA：一句实话 + 一个重试，不排一张空表。
+fn cert_unavailable(ctx: Ctx) -> AnyElement {
+    view()
+        .flex_col()
+        .p(px(20.0))
+        .child(ui::alert(
+            ui::Tone::Caution,
+            "证书信息暂不可用",
+            "读不到共享 CA：要么本宿主没有物化 CA（测试装配），要么系统证书存储探测失败。",
+        ))
+        .child(ui::vspacer(14.0))
         .child(
             view()
-                .w(px(880.0))
-                .flex_col()
-                .bg(|| t::card())
-                .rounded(px(m::OVERLAY_RADIUS))
-                .border_1()
-                .border_color(|| t::card_stroke())
-                .overflow_hidden()
+                .flex_row()
+                .items_center()
+                .child(ui::btn_subtle("重新读取", move || {
+                    ctx.ca_missing.set(false);
+                    actions::refresh_ca(ctx);
+                })),
+        ).into_element()
+}
+
+fn cert_detail(ctx: Ctx, ca: model::Ca) -> AnyElement {
+    let (title, body) = ca.headline();
+    let can_install = ca.can_install();
+    let can_uninstall = ca.can_uninstall();
+    let machine = ca.machine;
+    let warning = ca.detail.clone();
+    let mut body_col = view()
+        .flex_col()
+        .p(px(20.0))
+        .child(ui::alert(ca.tone(), title, body))
+        .child(ui::vspacer(14.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .child(when(move || can_install, move || {
+                    ui::btn_primary("安装证书", move || actions::install_ca(ctx))
+                }))
+                .child(when(move || !can_install, move || {
+                    text("已信任：不需要重复安装")
+                        .text_size(px(f::CAPTION))
+                        .font_family(f::FONT_TEXT)
+                        .text_color(|| t::ink_secondary())
+                }))
+                .child(ui::spacer(8.0))
+                .child(when(move || can_uninstall, move || {
+                    ui::btn_text("卸载证书", t::critical, move || {
+                        actions::ask_uninstall_ca(ctx)
+                    })
+                }))
+                .child(ui::spacer(10.0))
+                .child(
+                    text("安装与卸载都只作用于当前用户 ROOT 存储（免管理员、可逆）。")
+                        .text_size(px(f::CAPTION))
+                        .font_family(f::FONT_TEXT)
+                        .text_color(|| t::ink_tertiary()),
+                ),
+        );
+
+    // 探测给出的解释（例如“证书文件缺失”）就摆在按钮下面：有就写，没有不编。
+    if let Some(detail) = warning {
+        body_col = body_col.child(ui::vspacer(10.0)).child(
+            text(detail)
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(|| t::ink_tertiary()),
+        );
+    }
+
+    // 计算机存储里还有一份：说清“本版本只管理当前用户”，别让人以为没删干净。
+    if machine == model::Trust::Installed {
+        body_col = body_col.child(ui::vspacer(10.0)).child(ui::alert(
+            ui::Tone::Caution,
+            "计算机存储里也有一份",
+            "本版本只管理当前用户存储，不代删计算机存储里的旧证书；需要时请在系统证书管理器里移除。",
+        ));
+    }
+
+    body_col
+        .child(ui::vspacer(18.0))
+        .child(ui::divider())
+        .child(ui::vspacer(14.0))
+        .child(ui::section_label("证书信息"))
+        .child(
+            view()
+                .flex_row()
+                .child(view().flex_1().child(ui::kv("主体", ca.subject(), false)))
                 .child(
                     view()
-                        .h(px(48.0))
-                        .w_full()
-                        .px(px(16.0))
-                        .flex_row()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(|| t::divider())
-                        .child(
-                            text("证书")
-                                .text_size(px(f::SUBTITLE))
-                                .font_family(f::FONT_DISPLAY)
-                                .text_color(|| t::ink()),
-                        )
-                        .child(ui::spacer(10.0))
-                        .child(
-                            text("共享 CA · 当前用户信任库 · 免管理员")
-                                .text_size(px(f::CAPTION))
-                                .font_family(f::FONT_TEXT)
-                                .text_color(|| t::ink_tertiary()),
-                        )
-                        .child(view().flex_1())
-                        .child(ui::btn_subtle("重新读取", || {})),
+                        .flex_1()
+                        .child(ui::kv("签名算法", ca.sig_alg.clone().unwrap_or_else(dash), false)),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .child(
+                    view()
+                        .flex_1()
+                        .child(ui::kv("序列号", ca.serial_hex.clone().unwrap_or_else(dash), true)),
                 )
                 .child(
                     view()
-                        .flex_col()
-                        .p(px(20.0))
-                        .child(ui::alert(
-                            ui::Tone::Caution,
-                            "根证书尚未导入系统信任库",
-                            "本机客户端会报证书不受信任：安装证书直接写入当前用户 ROOT 存储，可逆。",
-                        ))
-                        .child(ui::vspacer(14.0))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .child(ui::btn_primary("安装证书", || {}))
-                                .child(ui::spacer(8.0))
-                                .child(ui::btn_subtle("卸载证书", || {}))
-                                .child(ui::spacer(10.0))
-                                .child(
-                                    text("未安装，按钮为可用态；已安装时这里换成「已信任」提示条。")
-                                        .text_size(px(f::CAPTION))
-                                        .font_family(f::FONT_TEXT)
-                                        .text_color(|| t::ink_tertiary()),
-                                ),
-                        )
-                        .child(ui::vspacer(18.0))
-                        .child(ui::divider())
-                        .child(ui::vspacer(14.0))
-                        .child(ui::section_label("证书信息"))
-                        .child(
-                            view()
-                                .flex_row()
-                                .child(view().flex_1().child(ui::kv("主体", "envboard local CA", false)))
-                                .child(view().flex_1().child(ui::kv("签名算法", "ECDSA P-256", false))),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .child(view().flex_1().child(ui::kv("序列号", "7A:1F:44:0C:9E:22", true)))
-                                .child(view().flex_1().child(ui::kv("有效期至", "2036-11-23", false))),
-                        )
-                        .child(ui::kv(
-                            "SHA-256 指纹",
-                            "3F:9C:71:2D:88:04:BE:57:C1:6A:0D:9F:33:10:5E:A2",
-                            true,
-                        ))
-                        .child(ui::kv(
-                            "文件路径",
-                            r"C:\Users\WPS\AppData\Local\envboard\ca\envboard-ca-cert.pem",
-                            true,
-                        ))
-                        .child(ui::vspacer(12.0))
-                        .child(
-                            text("其他设备：把这份 PEM 拷到目标机按系统提示安装并信任；本版本不提供下载与向导。")
-                                .text_size(px(f::CAPTION))
-                                .font_family(f::FONT_TEXT)
-                                .text_color(|| t::ink_tertiary()),
-                        )
-                        .child(ui::vspacer(6.0))
-                        .child(
-                            text(move || {
-                                if dark {
-                                    "当前外观：夜黛（深色令牌全套生效）".to_owned()
-                                } else {
-                                    "当前外观：宣纸（浅色令牌全套生效）".to_owned()
-                                }
-                            })
-                            .text_size(px(f::CAPTION))
-                            .font_family(f::FONT_TEXT)
-                            .text_color(|| t::ink_tertiary()),
-                        ),
+                        .flex_1()
+                        .child(ui::kv("有效期至", ca.not_after.clone().unwrap_or_else(dash), false)),
                 ),
         )
+        .child(
+            view()
+                .flex_row()
+                .child(
+                    view()
+                        .flex_1()
+                        .child(ui::kv("有效期起", ca.not_before.clone().unwrap_or_else(dash), false)),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .child(ui::kv("公钥", ca.pubkey.clone().unwrap_or_else(dash), false)),
+                ),
+        )
+        .child(ui::kv("SHA-256 指纹", ca.fingerprint.clone(), true))
+        .child(ui::kv("文件路径", ca.cert_path.clone(), true))
+        .child(ui::kv(
+            "计算机存储",
+            ca.machine.label().to_owned(),
+            false,
+        ))
+        .child(ui::vspacer(12.0))
+        .child(
+            text("其他设备：把这份 PEM 拷到目标机按系统提示安装并信任；本版本不提供下载与向导。")
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(|| t::ink_tertiary()),
+        ).into_element()
+}
+
+fn dash() -> String {
+    "—".to_owned()
+}
+
+// ---- 设置框（模态）-------------------------------------------------------
+//
+// 模态与抽屉的分界只有一条：抽屉是浮层（无遮罩、点外不关），模态是平台级
+// 对话框（焦点隔离、Esc 关、遮罩由设计系统画）。平台那层没有长相，所以这里
+// 只负责**内容**，壳在 `ui::dialog_shell`。
+
+/// 设置：**只放用户真会改的东西**——外观三档 + 关于。
+/// 主题一改就落盘（`ui.json`），与桌面形态共用同一份偏好文件，换框架不换偏好。
+pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
+    let shell = ui::dialog_shell(m::DIALOG_W_LG, "设置", "改动立即生效");
+    let close = move || ctx.settings.set(false);
+    let core = service::core_version()
+        .map(|(name, version)| format!("{name} {version}"))
+        .unwrap_or_else(dash);
+
+    let body: Vec<AnyElement> = vec![
+        ui::section_label("外观").into_element(),
+        view()
+            .flex_row()
+            .items_center()
+            .child(ui::choice_live(
+                "宣纸",
+                move || ctx.theme.get() == ThemeChoice::Light,
+                move || actions::set_theme(ctx, ThemeChoice::Light),
+            ))
+            .child(ui::spacer(6.0))
+            .child(ui::choice_live(
+                "夜黛",
+                move || ctx.theme.get() == ThemeChoice::Dark,
+                move || actions::set_theme(ctx, ThemeChoice::Dark),
+            ))
+            .child(ui::spacer(6.0))
+            .child(ui::choice_live(
+                "跟随系统",
+                move || ctx.theme.get() == ThemeChoice::System,
+                move || actions::set_theme(ctx, ThemeChoice::System),
+            ))
+            .into_element(),
+        ui::vspacer(8.0).into_element(),
+        text("跟随系统 = 用 Windows 的浅/深设置；三档换的都是同一套令牌，只有色值在换。")
+            .text_size(px(f::CAPTION))
+            .font_family(f::FONT_TEXT)
+            .text_color(|| t::ink_tertiary())
+            .into_element(),
+        ui::vspacer(16.0).into_element(),
+        ui::divider().into_element(),
+        ui::vspacer(14.0).into_element(),
+        ui::section_label("关于").into_element(),
+        ui::kv("版本", format!("{} · NSH 0.6.1", env!("CARGO_PKG_VERSION")), false)
+            .into_element(),
+        ui::kv("内核", core, false).into_element(),
+        ui::kv(
+            "CA 目录",
+            service::ca_dir()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(dash),
+            true,
+        )
+        .into_element(),
+        ui::kv("界面偏好", "状态目录\\ui.json（与桌面形态共用）".to_owned(), false).into_element(),
+    ];
+
+    let footer: Vec<AnyElement> =
+        vec![ui::btn_primary("完成", close).into_element()];
+
+    nsh_base::dialog()
+        .label("设置")
+        // 进场不做动画：`Slide` 的淡入会让抓图（golden）拍在半透明的中间帧上；
+        // 桌面上的对话框也不该像手机 sheet 那样从底下滑上来。
+        .animation(ModalAnimation::None)
+        .on_cancel(close)
+        .child(shell(body, footer))
+}
+
+// ---- 确认框（模态）-------------------------------------------------------
+
+/// 确认框：**只有删除环境走这里**（不可逆）。
+///
+/// 可逆动作（卸载证书）也有确认，但确认键不是胭脂、也不印“不可撤销”——
+/// 胭脂的面积全仓只留给那一次真正的删除（设计语言 §3）。
+pub fn confirm_dialog(ctx: Ctx) -> AnyElement {
+    let Some(confirm) = ctx.confirm.get() else {
+        return view().into_element();
+    };
+    let shell = ui::dialog_shell(
+        m::DIALOG_W,
+        confirm.title.clone(),
+        confirm.note.clone(),
+    );
+    let cancel = move || actions::cancel_confirm(ctx);
+    let go = move || actions::run_confirm(ctx);
+
+    let mut body: Vec<AnyElement> = vec![
+        text(confirm.body.clone())
+            .text_size(px(f::BODY))
+            .font_family(f::FONT_TEXT)
+            .text_color(|| t::ink_secondary())
+            .into_element(),
+    ];
+    if confirm.irreversible {
+        body.push(ui::vspacer(8.0).into_element());
+        body.push(
+            text("此操作不可撤销：删掉的环境不会自己回来。")
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(|| t::critical())
+                .into_element(),
+        );
+    }
+
+    let footer: Vec<AnyElement> = if confirm.irreversible {
+        vec![
+            ui::btn_subtle("取消", cancel).into_element(),
+            ui::spacer(8.0).into_element(),
+            ui::btn_destructive(confirm.confirm_label.clone(), go).into_element(),
+        ]
+    } else {
+        vec![
+            ui::btn_subtle("取消", cancel).into_element(),
+            ui::spacer(8.0).into_element(),
+            ui::btn_primary(confirm.confirm_label.clone(), go).into_element(),
+        ]
+    };
+
+    nsh_base::dialog()
+        .label(confirm.title.clone())
+        .animation(ModalAnimation::None)
+        .on_cancel(cancel)
+        .child(shell(body, footer))
+        .into_element()
 }

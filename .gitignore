@@ -25,6 +25,9 @@ envboard.json
 !crates/core/engine/tests/fixtures/
 !crates/core/engine/tests/fixtures/**
 
+# golden 差分失败时落下的实拍图（只供人看差异，不入库）
+*.actual.png
+
 # 编辑器 / 系统
 .DS_Store
 .idea/

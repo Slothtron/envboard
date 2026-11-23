@@ -1,4 +1,4 @@
-//! 令牌对账：`tokens.rs` 里那 24 个角色名，主题 JSON 的浅/深两套都必须有。
+//! 令牌对账：`tokens.rs` 里那 25 个角色名，主题 JSON 的浅/深两套都必须有。
 //!
 //! 这条测试守的是**最贵的错**：`tokens.rs` 里名字拼错一个字母，`theme().color()`
 //! 解不出来、回退成透明 —— 界面上表现为一个洞，不表现为一个错误颜色，肉眼很难抓。
@@ -71,8 +71,8 @@ fn role_list_is_the_whole_set_and_has_no_duplicates() {
     for role in ROLES {
         assert!(seen.insert(role), "角色 `{role}` 出现了两次");
     }
-    assert_eq!(seen.len(), 24, "语义角色是 24 个，改数量前先改设计系统 §2");
-    assert_eq!(seen.len() + CONTROL_KEYS.len(), 38, "一套令牌是 38 键");
+    assert_eq!(seen.len(), 25, "语义角色是 25 个，改数量前先改设计系统 §2");
+    assert_eq!(seen.len() + CONTROL_KEYS.len(), 39, "一套令牌是 39 键");
 }
 
 #[test]
