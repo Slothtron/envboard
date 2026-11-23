@@ -46,6 +46,14 @@ fn main() -> impl std::process::Termination {
         height: Points(720.0),
     }));
 
+    // golden 模式（`NG_GOLDEN=1`，只由 `tests/golden.rs` 拉起）：不启用 Mica、
+    // 不带系统投影 —— 抓图要逐像素稳定，而 Mica 会把桌面壁纸混进来。
+    // 这条只改「合成」，不改布局与令牌，所以 golden 仍然守得住版式回归。
+    if flag("NG_GOLDEN") {
+        attributes.backdrop = Some(Backdrop::None);
+        attributes.shadow = Some(false);
+    }
+
     let mut window = MainWindowOptions::default();
     window.default_size = Some(Size {
         width: Points(1280.0),

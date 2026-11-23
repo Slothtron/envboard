@@ -23,3 +23,7 @@ env_logger = "0.11"
 # 注意：这条**不能**提升到 workspace.dependencies —— 那里不支持 target 条件表。
 [target.'cfg(target_os = "windows")'.dependencies]
 nsh-platform-windows = { version = "=0.6.1", default-features = false }
+
+[dev-dependencies]
+# golden 基线存 PNG（4.4 MB/张的裸 BGRA 不进库）。纯 Rust，离线缓存已暖。
+png = "0.17"

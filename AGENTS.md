@@ -7,12 +7,16 @@
 
 ## 仓库形态
 
-- `crates/` 按依赖方向分三层，层内平铺；依赖单向：
-  `protocol/events ← engine ← manager ← admin ← host ← desktop`。
-- **只有一个交付形态**：`crates/app/desktop`（`[[bin]] envboard`）。不要新增第二个
-  宿主二进制；界面在 `frontend/`，数据面走 IPC 直调 `AdminService` 门面，不起监听端口。
+- `crates/` 按依赖方向分四层，层内平铺；依赖单向：
+  `protocol/events ← engine ← manager ← admin ← host ← desktop`，
+  `ui` 是叶子（`app/nsh ← ui`，ui 不依赖任何 `envboard-*` 业务 crate）。
+- **只发布一个交付形态**：`crates/app/desktop`（`[[bin]] envboard`）。界面在
+  `frontend/`，数据面走 IPC 直调 `AdminService` 门面，不起监听端口。
+  `crates/app/nsh`（NSH 0.6.1 壳）是**迁移中的候选形态**，`publish = false`、
+  不进安装包；迁移完成当天删除 `desktop`，中间不并存两个发布物。
 - `crates/app/desktop` **自成 workspace**（tauri-build 的静态 CRT 会毒化根工作区
   doctest），根 `Cargo.toml` 显式 `exclude` 它；tauri 系依赖只登记在它自己的清单。
+- `crates/ui` 不在任何 glob 内，根 `Cargo.toml` 的 `members` 显式列出它。
 - 全部 crate `publish = false`：发布物是二进制，不是 crate。
 
 ## 分层规则
@@ -26,7 +30,9 @@
 | `service/manager` | 环境 CRUD、端口分配、账本、锁、健康判定、reconcile、热装配 |
 | `service/admin` | `AdminService` 门面：入口校验 + 用例编排，传输无关 |
 | `service/host` | 唯一组合根：引擎装配、共享 CA 物化、管理器构造（含单实例锁） |
-| `app/desktop` | Tauri 壳、IPC 命令、推送流、CSP、WebView2 加固 |
+| `app/desktop` | Tauri 壳、IPC 命令、推送流、CSP、WebView2 加固（**冻结**，只修 bug） |
+| `app/nsh` | NSH 0.6.1 壳：`model`（业务语义）/ `pages`（布局）/ `shell`（标题栏与状态条） |
+| `ui` | 设计系统：24 个颜色角色、度量、字阶、八原语、`themes/default.json` |
 | `tests/contract-tests` | golden fixture 的形状与语义消费 |
 
 1. **引擎装配符号只许出现在 `crates/service/host`。** admin 与 desktop 只认
@@ -37,7 +43,13 @@
    `reconcile_health` / `ledger` / `observability` / `debug_capture` / `projection`
    …），跨域共享私有项留在 `manager.rs` 并收窄可见性；一个文件不为别的域定义方法。
 4. `domain` / `rules` 是纯逻辑：不引 tokio / rustls 等运行时库。
-5. GUI 框架只用 Tauri 2；不引入第二套界面栈。
+5. GUI 框架：**发布物只用 Tauri 2**。NSH 0.6.1 迁移按
+   `docs` 的 EB-DESIGN-002 并行推进，只允许出现在 `crates/ui` 与 `crates/app/nsh`；
+   两套界面栈不得混进同一个交付物（`desktop` 冻结、迁移完成当天删除）。
+6. `crates/ui/Cargo.toml` 不出现任何 `envboard-*` 业务依赖；`ui` 不读实例、不调门面、
+   不认识“环境/规则/端口”。守门测试在 `crates/ui/tests/`（令牌对账、零 hex、依赖面）。
+7. 界面颜色只在 `crates/ui/themes/default.json` 定义，代码里经 `tokens` 的具名角色取；
+   页面与组件不许写 hex，也不许新增第二份主题文件。
 
 ## 契约
 
@@ -97,6 +109,7 @@
 | Rust | `mise run verify-rust` | fmt / clippy `-D warnings` / check / build / test / doc |
 | 契约 | `mise run verify-contract` | 84 个 fixture 的形状与语义 |
 | 桌面 | `mise run verify-desktop` | smoke / artifact / 命令面契约 |
+| 界面 golden | `cargo test -p envboard-nsh --test golden -- --ignored` | 三张基线（`crates/app/nsh/tests/golden/`）逐像素；`UPDATE_GOLDEN=1` 重拍 |
 | 前端 | `mise run verify-frontend` | tsc 零错 + Vite 产出 dist |
 | 实机 | `mise run verify-live` | 引擎直驱（需要 openssl 与 curl） |
 
