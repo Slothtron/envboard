@@ -7,8 +7,9 @@
 //! 它也不知道“环境”“规则”“端口”是什么：`primitives` 只接内容与回调，
 //! 业务词汇（`Health`、`Env`、列宽）在 `crates/app/nsh` 的 `model` 与 `pages` 里。
 //!
-//! 主题是数据：`themes/zhongguose.json`（中国传统色，38 键 × 浅/深两套）。
+//! 主题是数据：`themes/default.json`（中国传统色，38 键 × 浅/深两套）。
 //! 唯一源在这一个文件里，宿主用 `include_str!` 编进二进制，改色不必改代码。
+//! 文件名按约定的 `default` 命名；具体是哪套色写在 JSON 的 `name` 字段里。
 
 pub mod font;
 pub mod metrics;
@@ -19,4 +20,4 @@ pub use primitives::{Shape, Tone};
 
 /// 主题的唯一源：中国传统色（宣纸 / 夜黛），38 键 × 浅/深两套。
 /// 宿主用 `Theme::from_json(envboard_ui::THEME_JSON)` 取用，改色不改代码。
-pub const THEME_JSON: &str = include_str!("../themes/zhongguose.json");
+pub const THEME_JSON: &str = include_str!("../themes/default.json");

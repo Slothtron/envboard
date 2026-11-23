@@ -2,7 +2,7 @@
 //!
 //! 空间与度量的分工照 `docs/envboard-设计系统.md`：标题栏 40、导航 52、
 //! 页签 40、行 33、表头 28、控件 32、抽屉 480、状态条 28。颜色一律经
-//! `tokens.rs`（→ `crates/ui/themes/zhongguose.json`），页面里没有 hex；
+//! `tokens.rs`（→ `crates/ui/themes/default.json`），页面里没有 hex；
 //! 状态条的计数一律经 `model`，不手写“8 环境 · 3 运行”这种会漂的字符串。
 
 use nsh_core::prelude::*;
