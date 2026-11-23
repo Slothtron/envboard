@@ -32,6 +32,20 @@ fn main() -> impl std::process::Termination {
     let theme = nsh_base::Theme::from_json(envboard_ui::THEME_JSON)
         .expect("the traditional-colour theme parses");
 
+    // 数据面先起：组合根装配、崩溃自愈、日志照看都在建窗之前完成，窗口第一帧
+    // 就能拿到真快照。golden 不启宿主（它只守像素），失败也不拦着开窗 ——
+    // 错误会落在界面错误槽里，用户仍能看到界面并读到原因。
+    if !flag("NG_GOLDEN") {
+        match envboard_nsh::boot_host() {
+            Ok(()) => log::info!("宿主已就绪"),
+            Err(error) => {
+                let line = format!("{} · {}", error.code.as_str(), error.message);
+                log::error!("宿主启动失败：{line}");
+                envboard_nsh::record_boot_error(line);
+            }
+        }
+    }
+
     let mut title_bar = TitleBarOptions::default();
     title_bar.style = TitleBarStyle::Hidden;
     title_bar.height = Some(px(40.0));
@@ -49,7 +63,9 @@ fn main() -> impl std::process::Termination {
     // golden 模式（`NG_GOLDEN=1`，只由 `tests/golden.rs` 拉起）：不启用 Mica、
     // 不带系统投影 —— 抓图要逐像素稳定，而 Mica 会把桌面壁纸混进来。
     // 这条只改「合成」，不改布局与令牌，所以 golden 仍然守得住版式回归。
-    if flag("NG_GOLDEN") {
+    // 合成关掉（不吃壁纸、不带投影）：`NG_GOLDEN` 给 golden 用，`NG_PLAIN` 给
+    // 人工抓真数据帧用 —— 两者都不改布局与令牌，差别只在宿主启不启。
+    if flag("NG_GOLDEN") || flag("NG_PLAIN") {
         attributes.backdrop = Some(Backdrop::None);
         attributes.shadow = Some(false);
     }

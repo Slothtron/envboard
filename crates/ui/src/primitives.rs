@@ -134,7 +134,7 @@ pub fn vspacer(h: f32) -> impl IntoElement {
 }
 
 fn cell_base(
-    label: &'static str,
+    label: impl IntoReactive<SharedString> + 'static,
     width: f32,
     font: &'static str,
     ink: fn() -> AdaptiveColor,
@@ -181,11 +181,11 @@ pub fn head_cell_grow(label: &'static str) -> impl IntoElement {
         )
 }
 
-pub fn cell(label: &'static str, width: f32) -> impl IntoElement {
+pub fn cell(label: impl IntoReactive<SharedString> + 'static, width: f32) -> impl IntoElement {
     cell_base(label, width, f::FONT_TEXT, t::ink)
 }
 
-pub fn cell_grow(label: &'static str) -> impl IntoElement {
+pub fn cell_grow(label: impl IntoReactive<SharedString> + 'static) -> impl IntoElement {
     view()
         .flex_1()
         .flex_row()
@@ -199,12 +199,12 @@ pub fn cell_grow(label: &'static str) -> impl IntoElement {
         )
 }
 
-pub fn mono_cell(label: &'static str, width: f32) -> impl IntoElement {
+pub fn mono_cell(label: impl IntoReactive<SharedString> + 'static, width: f32) -> impl IntoElement {
     cell_base(label, width, f::FONT_MONO, t::ink_secondary)
 }
 
 /// 静默的次要列（规则名、最近活动）：三级墨，不和名字抢。
-pub fn quiet_cell(label: &'static str, width: f32) -> impl IntoElement {
+pub fn quiet_cell(label: impl IntoReactive<SharedString> + 'static, width: f32) -> impl IntoElement {
     cell_base(label, width, f::FONT_TEXT, t::ink_tertiary)
 }
 
@@ -329,10 +329,22 @@ pub fn btn_text<O: Fn() + Copy + 'static>(
 }
 
 /// 筛选片：标签 + 计数，选中态由它自己的闭包决定颜色。
+///
+/// 计数可以是闭包（`pill_live`）：M3 起它是从真数据现算的，切换环境、启停之后
+/// 同屏的四个计数必须一起动，不能等下次重开窗口。
 pub fn pill<S, O>(label: &'static str, count: usize, is_sel: S, on: O) -> impl IntoElement
 where
     S: Fn() -> bool + Copy + 'static,
     O: Fn() + Copy + 'static,
+{
+    pill_live(label, move || count, is_sel, on)
+}
+
+pub fn pill_live<S, O, C>(label: &'static str, count: C, is_sel: S, on: O) -> impl IntoElement
+where
+    S: Fn() -> bool + Copy + 'static,
+    O: Fn() + Copy + 'static,
+    C: Fn() -> usize + Copy + 'static,
 {
     view()
         .h(px(26.0))
@@ -377,7 +389,7 @@ where
         )
         .child(view().w(px(6.0)))
         .child(
-            text(move || count.to_string())
+            text(move || count().to_string())
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
                 .text_color(move || {
@@ -439,7 +451,11 @@ pub fn section_label(label: &'static str) -> impl IntoElement {
 }
 
 /// 键（84 pt，二级墨）+ 值，行高 28。
-pub fn kv(k: &'static str, v: &'static str, mono: bool) -> impl IntoElement {
+pub fn kv(
+    k: impl IntoReactive<SharedString> + 'static,
+    v: impl IntoReactive<SharedString> + 'static,
+    mono: bool,
+) -> impl IntoElement {
     view()
         .h(px(28.0))
         .flex_row()
@@ -461,7 +477,11 @@ pub fn kv(k: &'static str, v: &'static str, mono: bool) -> impl IntoElement {
 }
 
 /// 3 pt 语气条 + 标题 + 说明，卡里唯一的一块颜色。
-pub fn alert(tone: Tone, title: &'static str, desc: &'static str) -> impl IntoElement {
+pub fn alert(
+    tone: Tone,
+    title: impl IntoReactive<SharedString> + 'static,
+    desc: impl IntoReactive<SharedString> + 'static,
+) -> impl IntoElement {
     let bar: fn() -> AdaptiveColor = match tone {
         Tone::Neutral => t::control_stroke,
         Tone::Success => t::success,
@@ -496,5 +516,56 @@ pub fn alert(tone: Tone, title: &'static str, desc: &'static str) -> impl IntoEl
                         .font_family(f::FONT_TEXT)
                         .text_color(|| t::ink_tertiary()),
                 ),
+        )
+}
+
+/// 行内错误条：一次写操作失败后停在表格上方，右侧带「关闭」。
+///
+/// 与 `alert` 的差别不是颜色而是**位置与寿命**：它在内容流里（不是浮层），
+/// 有明确的关闭入口，且不属于任何一张卡片——用户还没点之前它是空的。
+pub fn error_bar<O>(
+    title: impl IntoReactive<SharedString> + 'static,
+    detail: impl IntoReactive<SharedString> + 'static,
+    on_close: O,
+) -> impl IntoElement
+where
+    O: Fn() + Copy + 'static,
+{
+    view()
+        .w_full()
+        .mx(px(16.0))
+        .my(px(8.0))
+        .flex_row()
+        .rounded(px(m::RADIUS))
+        .border_1()
+        .border_color(|| t::control_stroke())
+        .bg(|| t::control_fill())
+        .overflow_hidden()
+        .child(view().w(px(m::BAR_W)).h_full().bg(|| t::critical()))
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .p(px(10.0))
+                .child(
+                    view()
+                        .flex_1()
+                        .flex_col()
+                        .child(
+                            text(title)
+                                .text_size(px(f::CAPTION))
+                                .font_family(f::FONT_TEXT)
+                                .text_color(|| t::critical()),
+                        )
+                        .child(vspacer(2.0))
+                        .child(
+                            text(detail)
+                                .text_size(px(f::CAPTION))
+                                .font_family(f::FONT_MONO)
+                                .text_color(|| t::ink_secondary()),
+                        ),
+                )
+                .child(btn_text("关闭", t::ink_tertiary, on_close)),
         )
 }

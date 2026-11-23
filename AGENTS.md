@@ -51,9 +51,18 @@
 7. 界面颜色只在 `crates/ui/themes/default.json` 定义，代码里经 `tokens` 的具名角色取；
    页面与组件不许写 hex，也不许新增第二份主题文件。
 8. 品牌名、窗口标题、`app_id`、图标与标题栏记号只在 `crates/app/nsh/src/brand.rs` 定义；
-   shell 与 `main` 取值不写字面量。资产是 `assets/envboard.ico`（窗口图标）与
-   `assets/brand-mark-32.rgba`（标题栏记号），两者都从 Tauri 侧 `crates/app/desktop/icons/icon.png`
-   由 `tools/envboard-brand/pack-icon.ps1` 重出；生成脚本不进发布物，换图标时两个文件一起换。
+   shell 与 `main` 取值不写字面量。资产是 `assets/envboard.ico`（窗口图标）、
+   `assets/brand-mark-32.rgba`（标题栏记号）与 `assets/app.rc`（`1 ICON "envboard.ico"`），
+   都从 Tauri 侧 `crates/app/desktop/icons/icon.png` 由 `tools/envboard-brand/pack-icon.ps1` 重出；
+   生成脚本不进发布物，换图标时三个文件一起换。
+   **exe 内嵌资源是正式做法**：`build.rs` 用 `embed-resource` 把 `app.rc` 编进 exe，
+   NSH 的 `set_icon()` 先 `filter(|_| !has_own_icon())` —— exe 自带 1 号图标资源时
+   它直接返回、不再读 `AppOptions.icon` 的路径。所以 `brand::icon_path()` 只是兜底
+   （开发宿主 / 没有图标资源的 runner），标题栏 / 任务栏 / Alt+Tab / 资源管理器同源。
+9. 数据面只许出现在 `crates/app/nsh/src/service.rs`：`envboard-host` / `envboard-admin` /
+   `envboard-protocol` / `envboard-engine` 的依赖只能被它用，`pages` / `shell` 认的是
+   `model::Env` 与 `actions::Ctx`。写操作一律经 `actions`（同步门面直接调、异步门面
+   交普通线程 `Handle::block_on` 回传），不在引擎线程里 `block_on`。
 
 ## 契约
 
@@ -113,7 +122,8 @@
 | Rust | `mise run verify-rust` | fmt / clippy `-D warnings` / check / build / test / doc |
 | 契约 | `mise run verify-contract` | 84 个 fixture 的形状与语义 |
 | 桌面 | `mise run verify-desktop` | smoke / artifact / 命令面契约 |
-| 界面 golden | `cargo test -p envboard-nsh --test golden -- --ignored` | 三张基线（`crates/app/nsh/tests/golden/`）逐像素；`UPDATE_GOLDEN=1` 重拍 |
+| 界面 golden | `cargo test -p envboard-nsh --test golden -- --ignored` | 三张基线（`crates/app/nsh/tests/golden/`）逐像素；`UPDATE_GOLDEN=1` 重拍；`NG_GOLDEN=1` 自动走 `model::fixture()`，不碰真状态目录 |
+| 数据面 | `cargo test -p envboard-nsh --test data_path --offline` | 真组合根 + 真门面：建→起→停→删一条链，错误信封是 `code·message` 不是 panic；状态目录固定在 `%TEMP%\eb-m3-gui` |
 | 前端 | `mise run verify-frontend` | tsc 零错 + Vite 产出 dist |
 | 实机 | `mise run verify-live` | 引擎直驱（需要 openssl 与 curl） |
 

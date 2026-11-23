@@ -1,9 +1,15 @@
-//! envboard 的壳：标题栏、顶部导航、三个页面、一条全局状态条。
+//! envboard 的壳：标题栏、顶部导航、三个页面、一条全局状态条、一条轻提示。
 //!
 //! 空间与度量的分工照 `docs/envboard-设计系统.md`：标题栏 40、导航 52、
 //! 页签 40、行 33、表头 28、控件 32、抽屉 480、状态条 28。颜色一律经
 //! `tokens.rs`（→ `crates/ui/themes/default.json`），页面里没有 hex；
 //! 状态条的计数一律经 `model`，不手写“8 环境 · 3 运行”这种会漂的字符串。
+//!
+//! M3：`envs` 是一个信号，初值来自 `AdminService::snapshot()`，之后每 800ms 轮询一次；
+//! 写操作自己刷一次（`actions`），所以点完立刻变，不靠下一拍。`NG_GOLDEN=1` 时
+//! 不启宿主、用 `model::fixture()`——golden 要的是**像素**，不是账本内容。
+
+use std::time::Duration;
 
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -11,9 +17,11 @@ use nsh_core::prelude::*;
 use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
+use crate::actions::{Ctx};
 use crate::brand;
-use crate::model::{self, ENVS};
+use crate::model::{self, Env};
 use crate::pages;
+use crate::service;
 
 fn flag(name: &str) -> bool {
     std::env::var(name).map(|v| v == "1").unwrap_or(false)
@@ -21,6 +29,11 @@ fn flag(name: &str) -> bool {
 
 fn dark() -> bool {
     flag("NG_DARK")
+}
+
+/// golden 走 fixture：不启宿主、不碰真状态目录，基线只反映像素。
+fn fixture_mode() -> bool {
+    flag("NG_GOLDEN")
 }
 
 /// `NG_PAGE=env|rules|cert`；`rules` 是环境页的「规则」子页签。
@@ -38,24 +51,121 @@ fn section_from_env() -> usize {
     }
 }
 
-fn selected_from_env() -> usize {
-    std::env::var("NG_SELECTED")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2)
+fn selected_from_env(envs: &[Env]) -> Option<String> {
+    match std::env::var("NG_SELECTED") {
+        Ok(v) if !v.is_empty() => return Some(v),
+        _ => {}
+    }
+    // 旧口径是“选中第 3 行”，现在行随数据变，改成按名字选：proxy-c 是 fixture 里
+    // 那个不健康的环境，抽屉基线就是它。
+    envs.iter().nth(2).map(|e| e.name.clone())
 }
 
 fn drawer_from_env() -> bool {
     flag("NG_DRAWER")
 }
 
+/// 一次轮询：快照（账本代次 + 全量）。代次没变就不动信号 —— 800ms 一拍的
+/// `Signal::set` 会白跑一轮 diff，列表虽然一样也会闪一下。
+/// 失败写进错误槽（状态条会跟着变）；第一次成功清掉它。
+fn poll_once(cx: Ctx, generation: &std::cell::Cell<u64>, first: bool) {
+    apply_snapshot(cx, generation, service::snapshot(), first);
+}
+
+fn poll_snapshot(
+    cx: Ctx,
+    generation: &std::cell::Cell<u64>,
+    snapshot: Result<(u64, Vec<envboard_protocol::EnvView>), envboard_engine::Error>,
+) {
+    apply_snapshot(cx, generation, snapshot, false);
+}
+
+fn apply_snapshot(
+    cx: Ctx,
+    generation: &std::cell::Cell<u64>,
+    snapshot: Result<(u64, Vec<envboard_protocol::EnvView>), envboard_engine::Error>,
+    first: bool,
+) {
+    match snapshot {
+        Ok((cursor, views)) => {
+            if !first && cursor == generation.get() {
+                return;
+            }
+            generation.set(cursor);
+            let envs: Vec<Env> = views.into_iter().map(Env::from_view).collect();
+            // 抽屉选中的环境被删了：顺手关掉，不留一个空抽屉。
+            if let Some(sel) = cx.selected.get() {
+                if !envs.iter().any(|e| e.name == sel) {
+                    cx.drawer.set(false);
+                    cx.selected.set(None);
+                }
+            }
+            cx.envs.set(envs);
+            cx.error.set(None);
+        }
+        Err(error) => {
+            cx.error_title.set("数据面读取失败");
+            cx.error
+                .set(Some(format!("{} · {}", error.code.as_str(), error.message)));
+        }
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoElement {
+    let fixture = fixture_mode();
+    let initial: Vec<Env> = if fixture {
+        model::fixture()
+    } else {
+        Vec::new()
+    };
+    let envs = signal(initial);
     let page = signal(page_from_env());
     let section = signal(section_from_env());
     let filter = signal(0usize);
-    let selected = signal(selected_from_env());
+    let search = signal(String::new());
+    let selected = signal(if fixture {
+        selected_from_env(&envs.get())
+    } else {
+        None
+    });
     let drawer = signal(drawer_from_env());
+    let error = signal(None::<String>);
+    let error_title = signal("操作未生效");
+    let toast = signal(None::<String>);
+
+    let cx = Ctx {
+        envs,
+        error,
+        error_title,
+        toast,
+        selected,
+        drawer,
+    };
+
+    if !fixture {
+        // 没有宿主时界面不许假装“已连接”：把启动失败的那句话直接放进错误槽。
+        if service::service().is_none() {
+            error_title.set("宿主启动失败");
+            let line = service::boot_error().unwrap_or("宿主未启动");
+            error.set(Some(line.to_owned()));
+        }
+    }
+
+    if !fixture && service::service().is_some() {
+        // 第一拍同步读，窗口第一帧就有内容；之后在引擎线程上按定时器轮询。
+        let generation = std::cell::Cell::new(0u64);
+        poll_once(cx, &generation, true);
+        spawn(async move {
+            loop {
+                timer(Duration::from_millis(800)).await;
+                match background(async { service::snapshot() }).await {
+                    Ok(snap) => poll_snapshot(cx, &generation, snap),
+                    Err(error) => cx.error.set(Some(format!("轮询任务失败：{error}"))),
+                }
+            }
+        });
+    }
 
     view()
         .flex_1()
@@ -66,7 +176,7 @@ pub fn App() -> impl IntoElement {
         // translucent: 缟 at 0.80, 乌黑 at 0.80.
         .bg(|| t::page())
         .overflow_hidden()
-        .child(title_bar())
+        .child(title_bar(cx))
         .child(app_header(page))
         .child(
             view()
@@ -76,15 +186,47 @@ pub fn App() -> impl IntoElement {
                 .overflow_hidden()
                 .child(when(
                     move || page.get() == 0,
-                    move || pages::env_page(selected, drawer, filter, section),
+                    move || pages::env_page(cx, filter, section, search),
                 ))
                 .child(when(move || page.get() == 1, move || pages::cert_page(dark())))
                 .child(when(
-                    move || page.get() == 0 && drawer.get(),
-                    move || pages::drawer(selected, drawer),
+                    move || page.get() == 0 && cx.drawer.get(),
+                    move || pages::drawer(cx),
+                ))
+                // 轻提示：成功路径的一句话，浮在内容之上、状态条之上，3.2 秒自己走。
+                .child(when(
+                    move || cx.toast.get().is_some(),
+                    move || toast_pill(cx.toast.get().unwrap_or_default()),
                 )),
         )
-        .child(status_bar(page))
+        .child(status_bar(cx, page))
+}
+
+fn toast_pill(message: String) -> impl IntoElement {
+    view()
+        .absolute()
+        .bottom(px(14.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .flex_row()
+        .justify_center()
+        .child(
+            view()
+                .h(px(30.0))
+                .px(px(14.0))
+                .flex_row()
+                .items_center()
+                .rounded(px(m::OVERLAY_RADIUS))
+                .border_1()
+                .border_color(|| t::card_stroke())
+                .bg(|| t::card())
+                .child(
+                    text(message)
+                        .text_size(px(f::CAPTION))
+                        .font_family(f::FONT_TEXT)
+                        .text_color(|| t::ink()),
+                ),
+        )
 }
 
 // ---- 标题栏 --------------------------------------------------------------
@@ -103,7 +245,7 @@ fn brand_mark() -> impl IntoElement {
         .rounded(px(4.0))
 }
 
-fn title_bar() -> impl IntoElement {
+fn title_bar(cx: Ctx) -> impl IntoElement {
     view()
         .h(px(m::TITLE_BAR_H))
         .w_full()
@@ -135,6 +277,7 @@ fn title_bar() -> impl IntoElement {
                 .text_color(|| t::ink_tertiary()),
         )
         .child(ui::spacer(12.0))
+        // 连接状态：轮询失败时这里立刻变橙并换字，不用等状态条被看见。
         .child(
             view()
                 .h(px(20.0))
@@ -144,13 +287,31 @@ fn title_bar() -> impl IntoElement {
                 .rounded(px(10.0))
                 .border_1()
                 .border_color(|| t::control_stroke())
-                .child(view().w(px(5.0)).h(px(5.0)).rounded(px(2.5)).bg(|| t::success()))
+                .child(
+                    view()
+                        .w(px(5.0))
+                        .h(px(5.0))
+                        .rounded(px(2.5))
+                        .bg(move || {
+                            if cx.error.get().is_some() {
+                                t::caution()
+                            } else {
+                                t::success()
+                            }
+                        }),
+                )
                 .child(ui::spacer(5.0))
                 .child(
-                    text("已连接")
-                        .text_size(px(f::CAPTION))
-                        .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink_secondary()),
+                    text(move || {
+                        if cx.error.get().is_some() {
+                            "连接异常"
+                        } else {
+                            "已连接"
+                        }
+                    })
+                    .text_size(px(f::CAPTION))
+                    .font_family(f::FONT_TEXT)
+                    .text_color(|| t::ink_secondary()),
                 ),
         )
         .child(ui::spacer(8.0))
@@ -202,8 +363,11 @@ fn app_header(page: Signal<usize>) -> impl IntoElement {
 //
 // 只留「需要人处理的信息」：装配告警（没有就一句正常）与事件丢弃。
 // 中段告警用赭石/缃色（`caution_ink`），琥珀只做点与条。
+//
+// 错误三层里的第二层就在中段：轮询/写操作失败时它写的是 `code · message`，
+// 常驻、跨页可见，不会因为抽屉打开或滚动被藏起来。
 
-fn status_bar(page: Signal<usize>) -> impl IntoElement {
+fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
     view()
         .h(px(m::STATUS_H))
         .w_full()
@@ -216,7 +380,7 @@ fn status_bar(page: Signal<usize>) -> impl IntoElement {
         .child(
             text(move || {
                 if page.get() == 0 {
-                    let c = model::counts(&ENVS);
+                    let c = model::counts(&cx.envs.get());
                     format!("{} 环境 · {} 运行 · {} 停止", c.total, c.running, c.stopped)
                 } else {
                     "CA 就绪 · 未信任".to_owned()
@@ -229,16 +393,20 @@ fn status_bar(page: Signal<usize>) -> impl IntoElement {
         .child(view().flex_1())
         .child(
             text(move || {
-                if page.get() == 0 {
-                    model::attention_line(&ENVS)
-                } else {
-                    "证书 1 张 · 当前用户 ROOT".to_owned()
+                if page.get() != 0 {
+                    return "证书 1 张 · 当前用户 ROOT".to_owned();
+                }
+                match cx.error.get() {
+                    Some(line) => line,
+                    None => model::attention_line(&cx.envs.get()),
                 }
             })
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
             .text_color(move || {
-                if page.get() == 0 {
+                if page.get() == 0 && cx.error.get().is_some() {
+                    t::critical()
+                } else if page.get() == 0 {
                     t::caution_ink()
                 } else {
                     t::ink_tertiary()
@@ -249,7 +417,7 @@ fn status_bar(page: Signal<usize>) -> impl IntoElement {
         .child(
             text(move || {
                 if page.get() == 0 {
-                    "丢弃 0 · 12 req/s".to_owned()
+                    "宿主 IPC · 无监听端口".to_owned()
                 } else {
                     "SHA-256 · ECDSA P-256".to_owned()
                 }

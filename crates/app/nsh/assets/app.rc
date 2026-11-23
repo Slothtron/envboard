@@ -1,0 +1,12 @@
+// envboard 的 Windows 资源：只放图标。
+//
+// 为什么这一步必须做：NSH 的窗口图标是「exe 自带图标优先」——
+// `nsh-platform-windows` 里 `set_icon` 会先 `has_own_icon()`（`LoadIconW(instance, 1)`），
+// 命中就直接返回，不再读 `AppOptions.icon` 那个 `.ico` 路径。也就是说：
+// 有内嵌资源时，标题栏 / 任务栏 / Alt+Tab / 资源管理器看到的是同一个 exe 资源图标；
+// 没有时只能靠 exe 旁放一个 `envboard.ico` 兜底（开发期走这条）。
+//
+// 资源编号用 1：`LoadIconW` 探的就是 1 号，NSH 与 Windows 默认行为都按它取。
+// 只嵌图标、不写 manifest：这个 crate 没有 elevation/兼容层需求，DPI 由 NSH 运行期设置。
+
+1 ICON "envboard.ico"

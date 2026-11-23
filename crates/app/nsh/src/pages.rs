@@ -1,18 +1,21 @@
 //! 三个页面：环境列表（含实例/规则两个子页签与详情抽屉）与证书页。
 //! 只组合 `envboard_ui` 的原语；颜色一律经 `tokens.rs` 的具名角色，
-//! 业务语义（状态、文案）一律经 `model`。
+//! 业务语义（状态、文案、计数、过滤）一律经 `model`，写操作一律经 `actions`。
+//!
+//! M3 起列表**不再抬高到编译期**：组件函数只跑一次，行由 `each` 按数据现建，
+//! 所以 `filter` / 搜索词 / 快照变化都只是重算一次 items，不重建整页。
 
 use nsh_core::prelude::*;
 
 use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
-use crate::model::{self, Env, Health, ENVS};
+use crate::actions::{self, Ctx};
+use crate::model::{self, Env, Health};
 
 // ---- 列宽 ----------------------------------------------------------------
 //
 // 归页面而不是设计系统：列宽是这张表的排版决定，换个页面就该换一组数。
-// 之前它们躺在 `tokens.rs` 里，是样板阶段的权宜。
 
 const COL_STATUS: f32 = 150.0;
 const COL_LISTEN: f32 = 190.0;
@@ -23,48 +26,46 @@ const COL_ACTION: f32 = 124.0;
 // ---- 环境页 --------------------------------------------------------------
 
 pub fn env_page(
-    selected: Signal<usize>,
-    drawer: Signal<bool>,
+    ctx: Ctx,
     filter: Signal<usize>,
     section: Signal<usize>,
+    search: Signal<String>,
 ) -> impl IntoElement {
     view()
         .flex_1()
         .w_full()
         .h_full()
         .flex_col()
-        .child(toolbar(filter))
+        .child(toolbar(ctx, filter, search))
         .child(sub_tabs(section))
+        // 行内错误条：写操作失败后停在这里，位置在内容流里，不是浮层。
+        .child(when(
+            move || ctx.error.get().is_some(),
+            move || {
+                ui::error_bar(
+                    move || ctx.error_title.get(),
+                    ctx.error.get().unwrap_or_default(),
+                    move || ctx.error.set(None),
+                )
+            },
+        ))
         .child(
             view()
                 .flex_1()
                 .w_full()
                 .overflow_hidden()
                 .bg(|| t::layer())
-                // 一个分支一个 `If`：条件翻转时才建/撤那一组行。
                 .child(when(
-                    move || section.get() == 0 && filter.get() == 0,
-                    move || instance_table(0, selected, drawer),
-                ))
-                .child(when(
-                    move || section.get() == 0 && filter.get() == 1,
-                    move || instance_table(1, selected, drawer),
-                ))
-                .child(when(
-                    move || section.get() == 0 && filter.get() == 2,
-                    move || instance_table(2, selected, drawer),
-                ))
-                .child(when(
-                    move || section.get() == 0 && filter.get() == 3,
-                    move || instance_table(3, selected, drawer),
+                    move || section.get() == 0,
+                    move || instance_table(ctx, filter, search),
                 ))
                 .child(when(move || section.get() == 1, move || rules_table())),
         )
 }
 
-fn toolbar(filter: Signal<usize>) -> impl IntoElement {
-    // 四个数从同一份数据算，筛选片与状态条不会互相漂。
-    let c = model::counts(&ENVS);
+fn toolbar(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl IntoElement {
+    // 四个数从同一份数据现算，筛选片与状态条不会互相漂。
+    let c = move || model::counts(&ctx.envs.get());
     view()
         .h(px(m::BAR_H))
         .w_full()
@@ -77,7 +78,8 @@ fn toolbar(filter: Signal<usize>) -> impl IntoElement {
         .child(
             nsh_base::input()
                 .placeholder("搜索环境、端口或规则")
-                .value("")
+                .value(search)
+                .on_change(move |text: &str| search.set(text.to_owned()))
                 .w(px(300.0))
                 .h(px(m::CONTROL_H))
                 .px(px(10.0))
@@ -90,17 +92,37 @@ fn toolbar(filter: Signal<usize>) -> impl IntoElement {
                 .text_color(|| t::ink()),
         )
         .child(ui::spacer(12.0))
-        .child(ui::pill("全部", c.total, move || filter.get() == 0, move || filter.set(0)))
+        .child(ui::pill_live(
+            "全部",
+            move || c().total,
+            move || filter.get() == 0,
+            move || filter.set(0),
+        ))
         .child(ui::spacer(4.0))
-        .child(ui::pill("运行中", c.running, move || filter.get() == 1, move || filter.set(1)))
+        .child(ui::pill_live(
+            "运行中",
+            move || c().running,
+            move || filter.get() == 1,
+            move || filter.set(1),
+        ))
         .child(ui::spacer(4.0))
-        .child(ui::pill("已停止", c.stopped, move || filter.get() == 2, move || filter.set(2)))
+        .child(ui::pill_live(
+            "已停止",
+            move || c().stopped,
+            move || filter.get() == 2,
+            move || filter.set(2),
+        ))
         .child(ui::spacer(4.0))
-        .child(ui::pill("需处理", c.attention, move || filter.get() == 3, move || filter.set(3)))
+        .child(ui::pill_live(
+            "需处理",
+            move || c().attention,
+            move || filter.get() == 3,
+            move || filter.set(3),
+        ))
         .child(view().flex_1())
-        .child(ui::btn_subtle("刷新", || {}))
+        .child(ui::btn_subtle("刷新", move || actions::refresh_now(ctx)))
         .child(ui::spacer(6.0))
-        .child(ui::btn_primary("新建环境", || {}))
+        .child(ui::btn_primary("新建环境", move || actions::create(ctx)))
 }
 
 fn sub_tabs(section: Signal<usize>) -> impl IntoElement {
@@ -143,53 +165,105 @@ fn table_head() -> impl IntoElement {
         .child(ui::head_cell("操作", COL_ACTION))
 }
 
-fn instance_table(
-    filter: usize,
-    selected: Signal<usize>,
-    drawer: Signal<bool>,
-) -> impl IntoElement {
+fn instance_table(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl IntoElement {
     view()
         .flex_col()
         .child(table_head())
         .child(
             view()
                 .flex_col()
-                .children(ENVS.iter().filter(move |e| match filter {
-                    1 => e.health == Health::Running,
-                    2 => e.health == Health::Stopped,
-                    // 判据只在 model 里定义一次，筛选片与状态条共用。
-                    3 => model::needs_attention(e),
-                    _ => true,
-                }).map(move |e| env_row(e, selected, drawer))),
+                // 行随数据来去：key 里带上状态与规则缺失，状态一变就换一行
+                // （状态格是静态文案 + 形状，不做逐帧重排）。
+                .child(each(
+                    move || model::filtered(&ctx.envs.get(), filter.get(), &search.get()),
+                    |e: &Env| format!("{}#{:?}#{}", e.name, e.health, e.rules_missing),
+                    move |item, _index| env_row(item.get(), ctx),
+                ))
+                .child(when(
+                    move || {
+                        let envs = ctx.envs.get();
+                        model::filtered(&envs, filter.get(), &search.get()).is_empty()
+                    },
+                    move || empty_state(ctx, filter, search),
+                )),
         )
 }
 
-fn env_row(e: &'static Env, selected: Signal<usize>, drawer: Signal<bool>) -> impl IntoElement {
-    let id = e.id;
+/// 列表为空时不留一片空白：分清“一个环境都没有”和“这条筛选/搜索没有命中”。
+fn empty_state(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl IntoElement {
+    view()
+        .w_full()
+        .h(px(120.0))
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(
+            text(move || {
+                if ctx.envs.get().is_empty() {
+                    if ctx.error.get().is_some() {
+                        // 宿主没起来时“空”是假的：别让一句“还没有环境”把人带偏。
+                        "宿主尚未就绪，列表为空不是没有环境 —— 原因在上方错误条里。".to_owned()
+                    } else {
+                        "还没有环境：点右上角「新建环境」建第一个。".to_owned()
+                    }
+                } else if !search.get().trim().is_empty() {
+                    format!("没有匹配「{}」的环境", search.get().trim())
+                } else {
+                    format!("「{}」筛选下没有环境", filter_name(filter.get()))
+                }
+            })
+            .text_size(px(f::CAPTION))
+            .font_family(f::FONT_TEXT)
+            .text_color(|| t::ink_tertiary()),
+        )
+        .child(ui::vspacer(8.0))
+        .child(when(
+            move || !ctx.envs.get().is_empty(),
+            move || {
+                ui::btn_subtle("清除筛选", move || {
+                    filter.set(0);
+                    search.set(String::new());
+                })
+            },
+        ))
+}
+
+fn filter_name(filter: usize) -> &'static str {
+    match filter {
+        1 => "运行中",
+        2 => "已停止",
+        3 => "需处理",
+        _ => "全部",
+    }
+}
+
+fn env_row(e: Env, ctx: Ctx) -> impl IntoElement {
+    // 行里每个闭包都只拿 `Signal`（`Copy`）—— 名字与状态装进信号，
+    // 这样点击回调和选中判断都还能是 `Copy`，不必给原语加 `Rc` 层。
+    let name = signal(e.name.clone());
+    let health = signal(e.health);
     let cells = vec![
         ui::cell_grow(e.name).into_element(),
         model::status_cell_for(e.health, COL_STATUS).into_element(),
         ui::mono_cell(e.listen, COL_LISTEN).into_element(),
         ui::quiet_cell(e.rules, COL_RULES).into_element(),
-        ui::quiet_cell(e.last, COL_LAST).into_element(),
-        action_cell(e).into_element(),
+        // `EnvView` 没有“最近活动”字段：不编时间，代之以健康原因（有就写，没有写 —）。
+        ui::quiet_cell(e.reason.unwrap_or_else(|| "—".to_owned()), COL_LAST).into_element(),
+        action_cell(name, health, ctx).into_element(),
     ];
+    let selected = ctx.selected;
     ui::row_shell(
-        move || selected.get() == id,
         move || {
-            selected.set(id);
-            drawer.set(true);
+            let n = name.get();
+            selected.get().as_deref() == Some(n.as_str())
         },
+        move || actions::open_drawer(ctx, name.get()),
     )(cells)
 }
 
-fn action_cell(e: &'static Env) -> impl IntoElement {
-    let label = match e.health {
-        Health::Running => "停止",
-        Health::Stopped => "启动",
-        _ => "查看",
-    };
-    let tone: fn() -> nsh_core::element::AdaptiveColor = match e.health {
+fn action_cell(name: Signal<String>, health: Signal<Health>, ctx: Ctx) -> impl IntoElement {
+    let label = health.get().action();
+    let tone: fn() -> nsh_core::element::AdaptiveColor = match health.get() {
         Health::Running => t::ink_secondary,
         _ => t::accent_ink,
     };
@@ -198,13 +272,19 @@ fn action_cell(e: &'static Env) -> impl IntoElement {
         .flex_row()
         .items_center()
         .pl(px(6.0))
-        .child(ui::btn_text(label, tone, || {}))
+        .child(ui::btn_text(label, tone, move || {
+            actions::act(ctx, name.get(), health.get())
+        }))
         .child(ui::spacer(2.0))
-        .child(ui::btn_text("⋯", t::ink_tertiary, || {}))
+        .child(ui::btn_text("⋯", t::ink_tertiary, move || {
+            actions::open_drawer(ctx, name.get())
+        }))
         .child(ui::spacer(4.0))
 }
 
 // ---- 规则子页 ------------------------------------------------------------
+//
+// M3 不动规则子页：规则集读写属于 M4，这里仍是静态样张（6 条，覆盖生效/未生效）。
 
 struct Rule {
     name: &'static str,
@@ -284,8 +364,19 @@ fn rules_table() -> impl IntoElement {
 
 // ---- 详情抽屉 ------------------------------------------------------------
 
-pub fn drawer(selected: Signal<usize>, open: Signal<bool>) -> impl IntoElement {
-    let e = model::env(selected.get());
+/// 抽屉由 `shell` 在 `drawer.get()` 为真时才挂上；这里假定选中的环境还在，
+/// 环境被删（或快照里没了）就什么也不画。
+pub fn drawer(ctx: Ctx) -> impl IntoElement {
+    let name = ctx.selected.get().unwrap_or_default();
+    match ctx.envs.get().into_iter().find(|e| e.name == name) {
+        Some(e) => drawer_inner(ctx, e).into_element(),
+        None => view().into_element(),
+    }
+}
+
+fn drawer_inner(ctx: Ctx, e: Env) -> impl IntoElement {
+    let name = signal(e.name.clone());
+    let open = ctx.drawer;
     view()
         .absolute()
         .top(px(0.0))
@@ -299,12 +390,18 @@ pub fn drawer(selected: Signal<usize>, open: Signal<bool>) -> impl IntoElement {
         .border_color(|| t::card_stroke())
         .rounded(px(m::OVERLAY_RADIUS))
         .overflow_hidden()
-        .child(drawer_head(e, open))
-        .child(view().flex_1().flex_col().p(px(16.0)).child(drawer_body(e)))
-        .child(drawer_footer())
+        .child(drawer_head(e.name.clone(), e.health, open))
+        .child(
+            view()
+                .flex_1()
+                .flex_col()
+                .p(px(16.0))
+                .child(drawer_body(&e)),
+        )
+        .child(drawer_footer(ctx, name))
 }
 
-fn drawer_head(e: &'static Env, open: Signal<bool>) -> impl IntoElement {
+fn drawer_head(name: String, health: Health, open: Signal<bool>) -> impl IntoElement {
     view()
         .h(px(m::BAR_H))
         .w_full()
@@ -315,38 +412,44 @@ fn drawer_head(e: &'static Env, open: Signal<bool>) -> impl IntoElement {
         .border_b_1()
         .border_color(|| t::divider())
         .child(
-            text(e.name)
+            text(name)
                 .text_size(px(f::BODY))
                 .font_family(f::FONT_TEXT)
                 .text_color(|| t::ink()),
         )
         .child(ui::spacer(8.0))
-        .child(model::status_cell_for(e.health, COL_STATUS))
+        .child(model::status_cell_for(health, COL_STATUS))
         .child(view().flex_1())
         .child(ui::btn_text("✕", t::ink_secondary, move || open.set(false)))
 }
 
-fn drawer_body(e: &'static Env) -> impl IntoElement {
+fn drawer_body(e: &Env) -> impl IntoElement {
     let mut body = view()
         .flex_col()
         .child(ui::section_label("环境"))
-        .child(ui::kv("名称", e.name, false))
+        .child(ui::kv("名称", e.name.clone(), false))
         .child(ui::kv("状态", e.health.label(), false))
-        .child(ui::kv("监听", e.listen, true))
-        .child(ui::kv("最近活动", e.last, false));
+        .child(ui::kv("监听", e.listen.clone(), true))
+        .child(ui::kv(
+            "上游",
+            e.upstream.clone().unwrap_or_else(|| "直连".to_owned()),
+            false,
+        ));
 
-    if !matches!(e.health, Health::Running | Health::Stopped) {
-        body = body
-            .child(ui::vspacer(10.0))
-            .child(ui::alert(
-                ui::Tone::Caution,
-                "旧快照仍在服务",
-                "新配置尚未装配成功；客户端仍在被上一份快照处理，重启环境可收敛。",
-            ));
+    // 故障原因就是真数据里的 `health_reason`，没有就不编一条。
+    if let Some(reason) = e.reason.clone() {
+        body = body.child(ui::vspacer(10.0)).child(ui::alert(
+            ui::Tone::Caution,
+            e.health.label(),
+            reason,
+        ));
     }
 
     body.child(ui::vspacer(16.0))
         .child(ui::section_label("规则"))
+        .child(ui::kv("规则集", e.rules.clone(), false))
+        .child(ui::vspacer(10.0))
+        .child(ui::section_label("代理地址"))
         .child(
             view()
                 .w_full()
@@ -356,12 +459,7 @@ fn drawer_body(e: &'static Env) -> impl IntoElement {
                 .border_color(|| t::control_stroke())
                 .bg(|| t::card())
                 .child(
-                    text(move || {
-                        format!(
-                            "match host {}\nrewrite /api -> /v1/api\nheader + x-envboard: {}",
-                            e.listen, e.name
-                        )
-                    })
+                    text(e.proxy_command.clone())
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
                         .text_color(|| t::ink_secondary()),
@@ -370,7 +468,15 @@ fn drawer_body(e: &'static Env) -> impl IntoElement {
         .child(view().flex_1())
 }
 
-fn drawer_footer() -> impl IntoElement {
+fn drawer_footer(ctx: Ctx, name: Signal<String>) -> impl IntoElement {
+    let command = ctx
+        .envs
+        .get()
+        .into_iter()
+        .find(|e| Some(&e.name) == ctx.selected.get().as_ref())
+        .map(|e| e.proxy_command)
+        .unwrap_or_default();
+    let command = signal(command);
     view()
         .h(px(m::BAR_H))
         .w_full()
@@ -379,14 +485,22 @@ fn drawer_footer() -> impl IntoElement {
         .items_center()
         .border_t_1()
         .border_color(|| t::divider())
-        .child(ui::btn_primary("编辑", || {}))
+        .child(ui::btn_primary("复制地址", move || {
+            actions::copy_proxy(ctx, command.get())
+        }))
         .child(ui::spacer(8.0))
-        .child(ui::btn_subtle("复制端口", || {}))
+        .child(ui::btn_subtle("换个端口", move || {
+            actions::reallocate_port(ctx, name.get())
+        }))
         .child(view().flex_1())
-        .child(ui::btn_text("删除环境", t::critical, || {}))
+        .child(ui::btn_text("删除环境", t::critical, move || {
+            actions::remove(ctx, name.get())
+        }))
 }
 
 // ---- 证书页 --------------------------------------------------------------
+//
+// 证书是真数据（CA 在状态目录里），读它是 M4 的事；这里保留样张。
 
 pub fn cert_page(dark: bool) -> impl IntoElement {
     view()
