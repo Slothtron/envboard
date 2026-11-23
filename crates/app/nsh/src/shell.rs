@@ -24,8 +24,10 @@ use crate::pages;
 use crate::prefs::{self, ThemeChoice};
 use crate::service;
 
+/// 测试口径一律走 `envboard_nsh::harness_*`：默认构建（发布物）里这些变量无效，
+/// 只连真宿主、只渲染真数据。
 fn flag(name: &str) -> bool {
-    std::env::var(name).map(|v| v == "1").unwrap_or(false)
+    crate::harness_flag(name)
 }
 
 fn dark() -> bool {
@@ -40,30 +42,29 @@ fn fixture_mode() -> bool {
 /// 压力口径（G3）：`NG_STRESS=10000` 让首帧直接铺 10k 行（同 `fixture` 的前八条）。
 /// 与 golden 一样不启宿主 —— 量的是列表渲染，不是账本写入。
 fn stress_rows() -> usize {
-    std::env::var("NG_STRESS")
-        .ok()
+    crate::harness_var("NG_STRESS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }
 
 /// `NG_PAGE=env|rules|cert`；`rules` 是环境页的「规则」子页签。
 fn page_from_env() -> usize {
-    match std::env::var("NG_PAGE").unwrap_or_default().as_str() {
+    match crate::harness_var("NG_PAGE").unwrap_or_default().as_str() {
         "cert" => 1,
         _ => 0,
     }
 }
 
 fn section_from_env() -> usize {
-    match std::env::var("NG_PAGE").unwrap_or_default().as_str() {
+    match crate::harness_var("NG_PAGE").unwrap_or_default().as_str() {
         "rules" => 1,
         _ => 0,
     }
 }
 
 fn selected_from_env(envs: &[Env]) -> Option<String> {
-    match std::env::var("NG_SELECTED") {
-        Ok(v) if !v.is_empty() => return Some(v),
+    match crate::harness_var("NG_SELECTED") {
+        Some(v) if !v.is_empty() => return Some(v),
         _ => {}
     }
     // 旧口径是“选中第 3 行”，现在行随数据变，改成按名字选：proxy-c 是 fixture 里

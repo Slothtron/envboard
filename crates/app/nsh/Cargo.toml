@@ -37,6 +37,13 @@ nsh-platform-windows = { version = "=0.6.1", default-features = false }
 [build-dependencies]
 embed-resource = "3.0.12"
 
+[features]
+# 测试 / 压测口径（golden、G3 压测、指定页面起窗）只在这个特征下读环境变量。
+# 发布物按默认特征构建：`NG_*` / `ENVBOARD_*` 一律无效，正式版只连真宿主、只渲染真数据。
+# 用法：`cargo build -p envboard-nsh --release --features harness`
+#      `cargo test -p envboard-nsh --features harness --test golden -- --ignored`
+harness = []
+
 [dev-dependencies]
 # golden 基线存 PNG（4.4 MB/张的裸 BGRA 不进库）。纯 Rust，离线缓存已暖。
 png = "0.17"

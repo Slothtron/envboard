@@ -173,7 +173,9 @@ fn table_head() -> impl IntoElement {
         .child(ui::head_cell("状态", COL_STATUS))
         .child(ui::head_cell("监听", COL_LISTEN))
         .child(ui::head_cell("规则", COL_RULES))
-        .child(ui::head_cell("最近活动", COL_LAST))
+        // 这一列装的是 `health_reason`（`EnvView` 没有“最近活动”字段）：列头就叫
+        // 「状态原因」，别写「最近活动」——名不副实的表头比缺一列更误导人。
+        .child(ui::head_cell("状态原因", COL_LAST))
         .child(ui::head_cell("操作", COL_ACTION))
 }
 

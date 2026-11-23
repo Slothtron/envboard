@@ -1,8 +1,13 @@
 //! 界面 golden：三张基线逐像素守着“改原语不动页面”。
 //!
 //! 为什么不是 `cargo test` 的常规项：它要真桌面（拉起 exe、等窗口、抓客户区）。
-//! 所以标 `#[ignore]`，由 `cargo test -p envboard-nsh --test golden -- --ignored`
+//! 所以标 `#[ignore]`，由
+//! `cargo test -p envboard-nsh --features harness --test golden -- --ignored`
 //! 或 `UPDATE_GOLDEN=1` 那一轮显式触发；CI 不跑。
+//!
+//! 为什么要 `--features harness`：`NG_*` 这一族测试口径在默认构建里**不读**（发布物
+//! 只连真宿主），这个测试文件也只在 harness 特征下编译，免得没带特征时拉起一个
+//! 连真账本的窗口去比基线。
 //!
 //! 基线口径（写下来免得以后争论）：
 //! - 进程以 `NG_GOLDEN=1` 启动：不启用 Mica、不带系统投影，抓图才逐像素稳定；
@@ -11,7 +16,7 @@
 //! - 抓的是整窗（含 DWM 边框与圆角外黑边），所以边框变化也会被抓到；
 //! - 基线是 `tests/golden/<case>.png`（RGBA8）。裸 BGRA 一张 4.4 MB，三张不进库。
 
-#![cfg(target_os = "windows")]
+#![cfg(all(target_os = "windows", feature = "harness"))]
 
 use std::ffi::c_void;
 use std::fs;

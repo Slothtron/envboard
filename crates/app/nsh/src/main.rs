@@ -7,6 +7,10 @@
 //! 这个二进制不另存一份 JSON。
 //!
 //! `NG_DARK=1` 固定深色外观（不依赖系统主题），用来出「夜黛」这一套的截图。
+//!
+//! **测试口径收在 `harness` 特征后面**：`NG_GOLDEN` / `NG_STRESS` 能让这个二进制不连
+//! 宿主、铺 10k 条假环境。发布物是默认特征构建（`cargo build --release`），此时这些
+//! 变量一律无效；要跑 golden / 压测请显式加 `--features harness`。
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
@@ -23,7 +27,7 @@ use nsh_platform_windows as platform;
 
 #[cfg(target_os = "windows")]
 fn flag(name: &str) -> bool {
-    std::env::var(name).map(|v| v == "1").unwrap_or(false)
+    envboard_nsh::harness_flag(name)
 }
 
 #[cfg(target_os = "windows")]
@@ -37,7 +41,7 @@ fn main() -> impl std::process::Termination {
     // 数据面先起：组合根装配、崩溃自愈、日志照看都在建窗之前完成，窗口第一帧
     // 就能拿到真快照。golden 与压力口径（`NG_STRESS`）不启宿主 —— 它们只守像素与
     // 列表渲染。失败也不拦着开窗，错误会落在界面错误槽里。
-    let synthetic = flag("NG_GOLDEN") || std::env::var("NG_STRESS").is_ok();
+    let synthetic = flag("NG_GOLDEN") || envboard_nsh::harness_var("NG_STRESS").is_some();
     if !synthetic {
         match envboard_nsh::boot_host() {
             Ok(()) => log::info!("宿主已就绪"),

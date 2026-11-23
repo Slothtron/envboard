@@ -21,3 +21,38 @@ pub use shell::App;
 pub fn boot_host() -> Result<(), envboard_engine::Error> {
     service::boot()
 }
+
+// ---- 测试 / 压测口径（只在 `harness` 特征下生效）----------------------------
+//
+// 这几个变量（`NG_GOLDEN` / `NG_STRESS` / `NG_PAGE` / `NG_SELECTED` / `NG_DARK` /
+// `NG_PLAIN` / `NG_DRAWER` / `NG_SETTINGS` / `NG_CONFIRM`）能改**数据来源**：铺 10k 条
+// 假环境、不连宿主、跳到某一页。它们编进发布物的话，一个误设的环境变量就能让正式版
+// 显示假数据，所以整族收在特征后面。
+//
+// 默认构建里这两个函数恒为「没有」：不读环境变量，也不因此报错。
+
+/// `NAME=1` 形式的开关。
+pub fn harness_flag(name: &str) -> bool {
+    #[cfg(feature = "harness")]
+    {
+        std::env::var(name).map(|v| v == "1").unwrap_or(false)
+    }
+    #[cfg(not(feature = "harness"))]
+    {
+        let _ = name;
+        false
+    }
+}
+
+/// 取值型的开关（`NG_STRESS=10000`、`NG_PAGE=cert`）。
+pub fn harness_var(name: &str) -> Option<String> {
+    #[cfg(feature = "harness")]
+    {
+        std::env::var(name).ok()
+    }
+    #[cfg(not(feature = "harness"))]
+    {
+        let _ = name;
+        None
+    }
+}
