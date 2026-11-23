@@ -1,18 +1,22 @@
 # envboard —— Rust workspace 根（界面在 frontend/，node/pnpm 只在那个边界内）。
 #
-# 分层即架构，crates/ 按依赖方向分三层，层内平铺：
+# 分层即架构，crates/ 按依赖方向分四层，层内平铺：
 #   core/     领域内核：protocol、events（叶子词汇）+ engine（规则/领域/代理引擎）
 #             + engine-fake（引擎测试替身）
 #   service/  编排与组合根：manager（环境生命周期）→ admin（传输无关门面）
 #             → host（唯一组合根，引擎装配只住这里）
+#   ui/       设计系统：24 个颜色角色、度量、字号、8 个原语 + 主题 JSON
+#             （**不依赖任何业务 crate**，由 Cargo.toml 保证，见 ADR-1）
 #   app/      交付形态：desktop（Tauri 壳，IPC 直调门面；自成 workspace，见其 Cargo.toml）
-# 依赖方向单向：protocol/events ← engine ← manager ← admin ← host ← desktop。
+#             + nsh（NSH 0.6.1 壳，迁移中的候选形态）
+# 依赖方向单向：protocol/events ← engine ← manager ← admin ← host ← desktop；
+# ui 是叶子，app/nsh ← ui（ui 不许反向依赖，也不许依赖 admin/manager）。
 # tests/ 是纯测试 crate（contract-tests 消费 fixtures 的可执行契约）。
 #
-# 成员用 glob，层内加 crate 不需要改这里。
+# 成员用 glob，层内加 crate 不需要改这里；`crates/ui` 不在任何 glob 内，显式列出。
 [workspace]
 resolver = "3"
-members = ["crates/core/*", "crates/service/*", "crates/app/*", "tests/*"]
+members = ["crates/core/*", "crates/service/*", "crates/app/*", "crates/ui", "tests/*"]
 # desktop 自成 workspace（tauri-build 静态 CRT 隔离，见其 Cargo.toml）——
 # members 的 glob 会扫到它，必须显式排除，否则「multiple workspace roots」。
 exclude = ["crates/app/desktop"]
@@ -32,6 +36,13 @@ envboard-engine-fake = { path = "crates/core/engine-fake" }
 envboard-host = { path = "crates/service/host" }
 envboard-manager = { path = "crates/service/manager" }
 envboard-protocol = { path = "crates/core/protocol" }
+envboard-ui = { path = "crates/ui" }
+
+# NSH 0.6.1：Windows 侧 Mica + windowless RichEdit（IME 组词画在框内）都自带，
+# 不引 webview。版本必须钉死：0.x 的小版本签过破坏性变更（事件枚举、
+# `MainWindowOptions` 的 `#[non_exhaustive]` 字段）。
+nsh-base = "=0.6.1"
+nsh-core = "=0.6.1"
 
 # 外部依赖：版本写在这里，成员一律 `workspace = true`。
 #

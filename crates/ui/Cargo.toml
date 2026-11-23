@@ -1,0 +1,22 @@
+# envboard-ui —— 设计系统。叶 crate：只依赖 NSH 的基座，不依赖任何业务 crate。
+#
+# 这里**故意不写** envboard-protocol / envboard-engine / envboard-manager /
+# envboard-admin。界面想在绘制时读一次实例列表，就必须先在 Cargo.toml 加上那行，
+# 而 code review 会看到它 —— 这就是把 ui 单独成 crate 的唯一硬理由（ADR-1）。
+[package]
+name = "envboard-ui"
+description = "envboard 设计系统：颜色角色、度量、字号与八个原语"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+nsh-base.workspace = true
+nsh-core.workspace = true
+
+[dev-dependencies]
+# 令牌对账测试要自己解析主题 JSON，不借道 nsh-base 的解析器：
+# 测试若用被测代码的解析器，主题解析坏了测试也一起坏，就成了同义反复。
+serde_json.workspace = true

@@ -1,0 +1,25 @@
+# envboard-nsh —— NSH 0.6.1 的壳。lib 给 golden 挂测试，bin 是起窗的那一版。
+#
+# 依赖只有 ui + NSH 基座：这个壳现在是设计样张，还没有接 manager/admin。
+# 接数据面的那一步（M2）才会加 envboard-manager / envboard-admin，
+# 且只允许出现在这一个 crate 里（D-2：ui 与 pages 都不许直接持有门面）。
+[package]
+name = "envboard-nsh"
+description = "envboard 的 NSH 0.6.1 交付形态（迁移中）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+envboard-ui.workspace = true
+nsh-base.workspace = true
+nsh-core.workspace = true
+# 起窗日志（`RUST_LOG=info` 看平台层事件）。0.11 与样板同版本，离线缓存已暖。
+env_logger = "0.11"
+
+# 平台层只在 Windows 上存在；`default-features = false` 是不带 webview 的那套。
+# 注意：这条**不能**提升到 workspace.dependencies —— 那里不支持 target 条件表。
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "=0.6.1", default-features = false }
