@@ -5,8 +5,10 @@
 //! 而且 `model` 的三条纯函数（`label` / `tone_shape` / `counts`）必须能在
 //! 不开窗的情况下被单测钉住。
 
+mod brand;
 mod model;
 mod pages;
 mod shell;
 
+pub use brand::{icon_path, APP_ID, NAME, TAGLINE, WINDOW_TITLE};
 pub use shell::App;

@@ -28,7 +28,7 @@ fn flag(name: &str) -> bool {
 fn main() -> impl std::process::Termination {
     env_logger::init();
 
-    let app_id = "dev.myclaw.envboard";
+    let app_id = envboard_nsh::APP_ID;
     let theme = nsh_base::Theme::from_json(envboard_ui::THEME_JSON)
         .expect("the traditional-colour theme parses");
 
@@ -72,7 +72,9 @@ fn main() -> impl std::process::Termination {
     platform::run_app(
         platform::AppSource::Rust(root),
         platform::AppOptions {
-            title: "envboard · 中国传统色".to_owned(),
+            title: envboard_nsh::WINDOW_TITLE.to_owned(),
+            // 图标是一枚 .ico（16–256 九个尺寸）：任务栏、Alt+Tab、通知都用它。
+            icon: envboard_nsh::icon_path(),
             app_id: app_id.to_owned(),
             size: (1280, 840),
             ..Default::default()

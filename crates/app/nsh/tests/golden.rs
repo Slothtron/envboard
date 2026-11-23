@@ -99,10 +99,23 @@ unsafe extern "system" {
     fn PrintWindow(hwnd: isize, hdc: isize, flags: u32) -> i32;
     fn GetWindowDC(hwnd: isize) -> isize;
     fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+    fn SetForegroundWindow(hwnd: isize) -> i32;
+    fn SetActiveWindow(hwnd: isize) -> isize;
+    fn BringWindowToTop(hwnd: isize) -> i32;
+    fn GetForegroundWindow() -> isize;
+    fn AttachThreadInput(a: u32, b: u32, attach: i32) -> i32;
+    fn SystemParametersInfoW(action: u32, param: u32, pv: *mut c_void, win: u32) -> i32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
     fn SetProcessDpiAwarenessContext(ctx: isize) -> i32;
 }
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentThreadId() -> u32;
+}
+
+const SPI_SETFOREGROUNDLOCKTIMEOUT: u32 = 0x2003;
 
 #[link(name = "gdi32")]
 unsafe extern "system" {
@@ -174,6 +187,41 @@ fn wait_for_window(pid: u32, timeout: Duration) -> Found {
         sleep(Duration::from_millis(150));
     }
     panic!("等了 {timeout:?} 也没等到 envboard 主窗口");
+}
+
+/// 把窗口拉到前台并确认真的在前台；拉不回来就明说，不让基线悄悄录进“非活动灰”。
+///
+/// 前台锁的两道解锁（本机实测，见 tools/envboard-brand/probe-fg3.ps1）：
+/// 先把 `SPI_SETFOREGROUNDLOCKTIMEOUT` 临时归零（只改运行时，不写注册表），
+/// 再把本线程挂到当前前台线程的输入队列上；挂着时 `SetForegroundWindow` 会被忽略，
+/// 但 `SetActiveWindow` + `BringWindowToTop` 有效 —— 所以后者才是真正起作用的那一步。
+fn focus(found: &Found) {
+    unsafe {
+        SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, std::ptr::null_mut(), 0);
+    }
+    for _ in 0..10 {
+        unsafe {
+            let fg = GetForegroundWindow();
+            let fg_tid = if fg != 0 {
+                GetWindowThreadProcessId(fg, std::ptr::null_mut())
+            } else {
+                0
+            };
+            let me = GetCurrentThreadId();
+            let attached = fg_tid != 0 && fg_tid != me && AttachThreadInput(me, fg_tid, 1) != 0;
+            SetActiveWindow(found.hwnd);
+            BringWindowToTop(found.hwnd);
+            SetForegroundWindow(found.hwnd);
+            if attached {
+                AttachThreadInput(me, fg_tid, 0);
+            }
+        }
+        if unsafe { GetForegroundWindow() } == found.hwnd {
+            return;
+        }
+        sleep(Duration::from_millis(120));
+    }
+    panic!("窗口拉不回前台（前台锁）：基线会录到非活动态的标题栏，先关掉抢焦点的程序再跑");
 }
 
 /// 整窗 BGRA（自上而下）。只走 `PrintWindow`：两条路径（PrintWindow / 桌面 BitBlt）
@@ -335,7 +383,11 @@ fn golden_pages_match_baselines() {
         unsafe {
             SetCursorPos(GetSystemMetrics(0) - 4, GetSystemMetrics(1) - 4);
         }
-        sleep(Duration::from_millis(600)); // 首帧绘制完 + 悬停态淡出
+        // 窗口必须是**活动窗口**：caption 三个按钮与标题栏文字在非活动态会换一档灰，
+        // 那一换就是 253~1853 像素的差（踩过）。拉起后它一般已经是前台，
+        // 但连拍三个用例时会被上一个子进程的退出抢走，所以要显式拉回并校验。
+        focus(&found);
+        sleep(Duration::from_millis(600)); // 首帧绘制完 + 悬停态与活动态稳定
         let (w, h, bgra) = capture(&found);
         let rgba = to_rgba(&bgra);
 

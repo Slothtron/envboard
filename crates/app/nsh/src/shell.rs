@@ -10,6 +10,7 @@ use nsh_core::prelude::*;
 use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
+use crate::brand;
 use crate::model::{self, ENVS};
 use crate::pages;
 
@@ -90,6 +91,22 @@ pub fn App() -> impl IntoElement {
 // 平台接管窗框（`title_bar: Hidden`, `height: 40`），三个 caption 按钮由
 // Windows 画在这条的右端，所以这里只留 138 pt 的位并让其余可拖。
 
+/// 品牌记号：与 `assets/envboard.ico` 同一图形 —— 靛青圆角方 + 两条白流（上右下左）。
+/// 16 pt 画不出真正的箭头三角，用两条长杠示意；任务栏上是完整图标。
+fn brand_mark() -> impl IntoElement {
+    view()
+        .w(px(16.0))
+        .h(px(16.0))
+        .rounded(px(3.0))
+        .bg(|| t::accent())
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(view().w(px(9.0)).h(px(1.5)).bg(|| t::on_accent()))
+        .child(view().h(px(2.0)))
+        .child(view().w(px(9.0)).h(px(1.5)).bg(|| t::on_accent()))
+}
+
 fn title_bar() -> impl IntoElement {
     view()
         .h(px(m::TITLE_BAR_H))
@@ -99,24 +116,17 @@ fn title_bar() -> impl IntoElement {
         .window_drag(true)
         .relative()
         .pl(px(14.0))
-        .child(
-            // 品牌记号：靛青 16 pt 方块，代替图标。
-            view()
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded(px(2.0))
-                .bg(|| t::accent()),
-        )
+        .child(brand_mark())
         .child(ui::spacer(10.0))
         .child(
-            text("envboard")
+            text(brand::NAME)
                 .text_size(px(f::BODY))
                 .font_family(f::FONT_DISPLAY)
                 .text_color(|| t::ink()),
         )
         .child(ui::spacer(8.0))
         .child(
-            text("工作台 · 代理")
+            text(brand::TAGLINE)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
                 .text_color(|| t::ink_tertiary()),
