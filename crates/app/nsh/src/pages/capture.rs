@@ -21,7 +21,7 @@ use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
 use crate::actions::{self, Ctx};
-use crate::model::body::{Body, Kind};
+use crate::model::body::{take_prefix, Body, Kind, CHUNK};
 use crate::model::capture::{self as cap, Counts, ResFilter, StatusFilter};
 use crate::model::detail::Detail;
 use crate::service;
@@ -63,11 +63,21 @@ enum Column {
 ///
 /// 文本在**打开详情时算一次**、切视图时重算一次：它要喂给多行只读框，
 /// 每帧现算 64 KiB 的解析 + 重排是白花的。
+///
+/// 还有两个状态位：
+///
+/// * `loading` —— 骨架态。点行后先用行里的头部信息把面板撑起来（方法/状态/时刻/地址），
+///   页签与正文等详情回来再挂；大记录（要 clone headers 与正文）不再堵住点击这一帧；
+/// * `request_rendered` / `response_rendered` —— 已经放进控件的字节数。正文按
+///   [`CHUNK`] 一段一段放，超过的部分等「继续加载」；40–64 KiB 不整块压进一次布局。
 #[derive(Clone, PartialEq, Debug)]
 struct DetailView {
     detail: Detail,
+    loading: bool,
     request_shown: String,
     response_shown: String,
+    request_rendered: usize,
+    response_rendered: usize,
     request_prettyable: bool,
     response_prettyable: bool,
     request_pretty: bool,
@@ -84,8 +94,11 @@ impl DetailView {
             .can_pretty(detail.response_content_type.as_deref());
         let mut view = DetailView {
             detail,
+            loading: false,
             request_shown: String::new(),
             response_shown: String::new(),
+            request_rendered: 0,
+            response_rendered: 0,
             request_prettyable,
             response_prettyable,
             request_pretty: request_prettyable,
@@ -93,6 +106,31 @@ impl DetailView {
         };
         view.refresh_texts();
         view
+    }
+
+    /// 骨架：只用列表那一行能拿到的字段。地址先不带查询串（行里没有 query），
+    /// 详情回来会补上；页签计数与正文都还没有，所以 `loading`。
+    fn skeleton(row: &envboard_protocol::CaptureRow) -> Self {
+        DetailView {
+            detail: Detail {
+                request_id: row.request_id,
+                time_ms: row.time,
+                method: row.method.clone(),
+                authority: row.authority.clone(),
+                path: row.path.clone(),
+                status: row.status,
+                ..Detail::default()
+            },
+            loading: true,
+            request_shown: String::new(),
+            response_shown: String::new(),
+            request_rendered: 0,
+            response_rendered: 0,
+            request_prettyable: false,
+            response_prettyable: false,
+            request_pretty: false,
+            response_pretty: false,
+        }
     }
 
     fn refresh_texts(&mut self) {
@@ -106,6 +144,9 @@ impl DetailView {
             self.detail.response_content_type.as_deref(),
             self.response_pretty,
         );
+        // 换视图就是换了一段文本：分块从头数，别拿旧长度去切新串。
+        self.request_rendered = self.request_shown.len().min(CHUNK);
+        self.response_rendered = self.response_shown.len().min(CHUNK);
     }
 
     fn set_pretty(&mut self, request: bool, pretty: bool) {
@@ -115,6 +156,40 @@ impl DetailView {
             self.response_pretty = pretty && self.response_prettyable;
         }
         self.refresh_texts();
+    }
+
+    /// 现在该放进控件的正文（前 `rendered` 字节，落在字符边界）。
+    fn rendered(&self, request: bool) -> String {
+        let (text, limit) = if request {
+            (&self.request_shown, self.request_rendered)
+        } else {
+            (&self.response_shown, self.response_rendered)
+        };
+        take_prefix(text, limit).to_owned()
+    }
+
+    /// 还没放出去多少字节（0 = 这一侧已经全在控件里了）。
+    fn remaining(&self, request: bool) -> usize {
+        let (text, limit) = if request {
+            (&self.request_shown, self.request_rendered)
+        } else {
+            (&self.response_shown, self.response_rendered)
+        };
+        text.len().saturating_sub(limit)
+    }
+
+    fn load_more(&mut self, request: bool) {
+        let full = if request {
+            self.request_shown.len()
+        } else {
+            self.response_shown.len()
+        };
+        let limit = if request {
+            &mut self.request_rendered
+        } else {
+            &mut self.response_rendered
+        };
+        *limit = (*limit + CHUNK).min(full);
     }
 }
 
@@ -176,9 +251,32 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
             // 都和列表那一行对得上（不启宿主也能拍）。
             fixture[0] = fixture_detail_row();
             selected.set(Some(1));
-            detail.set(Some(DetailView::build(fixture_detail())));
+            // `NG_CAPTURE_SKELETON`：停在骨架态，用来目验/拍「正在读取」那一帧。
+            if crate::harness_flag("NG_CAPTURE_SKELETON") {
+                detail.set(Some(DetailView::skeleton(&fixture_detail_row())));
+            } else {
+                detail.set(Some(DetailView::build(fixture_detail())));
+            }
         }
         rows.set(fixture);
+        // 拍摄口径：`NG_CAPTURE_TAB=response` 起手切到响应页签（大正文样本在响应侧）。
+        if crate::harness_var("NG_CAPTURE_TAB").as_deref() == Some("response") {
+            tab.set(1);
+        }
+        // `NG_CAPTURE_CHUNK=n`：先把「继续加载」按 n 次（与按钮同一条路径），
+        // 好拍出分块之后的帧；按钮的鼠标命中由真机会话那一轮点验。
+        let chunks: usize = crate::harness_var("NG_CAPTURE_CHUNK")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        if chunks > 0 {
+            detail.update(|slot| {
+                if let Some(view) = slot.as_mut() {
+                    for _ in 0..chunks {
+                        view.load_more(false);
+                    }
+                }
+            });
+        }
         // 拍摄口径：`NG_CAPTURE_PANEL=status|type` 起手就把列筛选面板摊开，
         // 免得拍图时还要点一下表头。
         match crate::harness_var("NG_CAPTURE_PANEL").as_deref() {
@@ -804,34 +902,68 @@ fn open_detail(cap: Cap, request_id: u64) {
     cap.tab.set(0);
     let name = cap.name.get_untracked();
     if crate::harness_flag("NG_GOLDEN") || stress_rows() > 0 {
+        // 合成样本走同一套骨架/回填两步，好把中间态单独拍下来。
+        if crate::harness_flag("NG_CAPTURE_SKELETON") {
+            cap.detail
+                .set(Some(DetailView::skeleton(&fixture_detail_row())));
+            return;
+        }
         cap.detail.set(Some(DetailView::build(fixture_detail())));
         return;
     }
-    match service::capture_detail(&name, request_id) {
-        Ok(Some(value)) => {
-            cap.detail
-                .set(Some(DetailView::build(Detail::from_value(&value))));
-        }
-        Ok(None) => {
-            cap.detail.set(None);
-            actions::fail(
-                cap.ctx,
-                envboard_engine::Error::internal_error("这条记录已不在缓冲里（可能已被淘汰）"),
-            );
-        }
-        Err(error) => {
-            cap.detail.set(None);
-            actions::fail(cap.ctx, error);
-        }
+    // 先上骨架：头部四格（方法 / 状态 / 时刻 / 地址）列表那一行就有，
+    // 不必等完整记录（headers + 两侧正文）拷过来才让面板出现。
+    let row = cap
+        .rows
+        .with(|rows| rows.iter().find(|row| row.request_id == request_id).cloned());
+    if let Some(row) = row {
+        cap.detail.set(Some(DetailView::skeleton(&row)));
     }
+    if crate::harness_flag("NG_CAPTURE_SKELETON") {
+        return;
+    }
+    spawn(async move {
+        match service::capture_detail_async(name, request_id).await {
+            Ok(Ok(Some(value))) => {
+                // 用户可能在取详情期间点了别的行或关掉抽屉：只回填还停在这一条上的那次。
+                if cap.selected.get() == Some(request_id) {
+                    cap.detail
+                        .set(Some(DetailView::build(Detail::from_value(&value))));
+                }
+            }
+            Ok(Ok(None)) => {
+                cap.selected.set(None);
+                cap.detail.set(None);
+                actions::fail(
+                    cap.ctx,
+                    envboard_engine::Error::internal_error("这条记录已不在缓冲里（可能已被淘汰）"),
+                );
+            }
+            Ok(Err(error)) => {
+                cap.selected.set(None);
+                cap.detail.set(None);
+                actions::fail(cap.ctx, error);
+            }
+            Err(_) => {
+                cap.selected.set(None);
+                cap.detail.set(None);
+                actions::fail(
+                    cap.ctx,
+                    envboard_engine::Error::internal_error("读取详情失败：回传通道已断开"),
+                );
+            }
+        }
+    });
 }
 
 // ---- 详情面板 ------------------------------------------------------------
+//
+// 面板在**打开那一帧**就建出来，此时手里只有列表行（骨架态）；页签与正文
+// 由 `when(loading)` 在详情回来时补挂。头部四格不走快照，全部经信号现读——
+// 骨架与完整记录共用同一个头，地址里的查询串回来时才补得上，切换美化态时
+// 标题上的「复制美化 / 复制原文」也要跟着变。
 
 fn detail_panel(cap: Cap) -> AnyElement {
-    let Some(screen) = cap.detail.get() else {
-        return view().into_element();
-    };
     view()
         .absolute()
         .top(px(0.0))
@@ -845,19 +977,39 @@ fn detail_panel(cap: Cap) -> AnyElement {
         .border_color(|| t::card_stroke())
         .rounded(px(m::OVERLAY_RADIUS))
         .overflow_hidden()
-        .child(detail_head(cap, screen.clone()))
-        .child(detail_tabs(cap, screen.clone()))
-        .child(detail_body(cap, screen))
+        .child(detail_head(cap))
+        .child(when(move || detail_view(cap, |v| v.loading).unwrap_or(false), {
+            move || skeleton_body()
+        }))
+        .child(when(
+            move || detail_view(cap, |v| !v.loading).unwrap_or(false),
+            move || detail_tabs(cap),
+        ))
+        .child(when(
+            move || detail_view(cap, |v| !v.loading).unwrap_or(false),
+            move || detail_body(cap),
+        ))
         .into_element()
 }
 
-fn detail_head(cap: Cap, screen: DetailView) -> impl IntoElement {
-    let detail = screen.detail;
-    let status_ink: fn() -> AdaptiveColor = match detail.status_tone() {
-        ui::Tone::Critical => t::critical,
-        ui::Tone::Caution => t::caution_ink,
-        _ => t::ink_secondary,
+/// 从详情信号里取一个字段（没有详情时给默认值）。同步求值，不需要 `'static`。
+fn detail_view<T>(cap: Cap, pick: impl Fn(&DetailView) -> T) -> Option<T> {
+    cap.detail.with(|slot| slot.as_ref().map(pick))
+}
+
+fn detail_head(cap: Cap) -> impl IntoElement {
+    let status_ink = move || {
+        let tone = detail_view(cap, |v| v.detail.status_tone()).unwrap_or(ui::Tone::Neutral);
+        match tone {
+            ui::Tone::Critical => t::critical(),
+            ui::Tone::Caution => t::caution_ink(),
+            _ => t::ink_secondary(),
+        }
     };
+    let method = move || detail_view(cap, |v| v.detail.method.clone()).unwrap_or_default();
+    let status = move || detail_view(cap, |v| v.detail.status_text()).unwrap_or_default();
+    let time = move || detail_view(cap, |v| v.detail.time_text()).unwrap_or_default();
+    let url = move || detail_view(cap, |v| v.detail.url()).unwrap_or_default();
     view()
         .w_full()
         .flex_col()
@@ -872,21 +1024,21 @@ fn detail_head(cap: Cap, screen: DetailView) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .child(
-                    text(detail.method.clone())
+                    text(method)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
                         .text_color(|| t::ink()),
                 )
                 .child(ui::spacer(10.0))
                 .child(
-                    text(detail.status_text())
+                    text(status)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
-                        .text_color(move || status_ink()),
+                        .text_color(status_ink),
                 )
                 .child(ui::spacer(10.0))
                 .child(
-                    text(detail.time_text())
+                    text(time)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
                         .text_color(|| t::ink_tertiary()),
@@ -899,7 +1051,7 @@ fn detail_head(cap: Cap, screen: DetailView) -> impl IntoElement {
         )
         .child(
             view().w_full().px(px(16.0)).pb(px(10.0)).child(
-                text(detail.url())
+                text(url)
                     .w_full()
                     .truncate()
                     .text_size(px(f::CAPTION))
@@ -909,9 +1061,45 @@ fn detail_head(cap: Cap, screen: DetailView) -> impl IntoElement {
         )
 }
 
-fn detail_tabs(cap: Cap, screen: DetailView) -> impl IntoElement {
-    let request_count = screen.detail.request_headers.len();
-    let response_count = screen.detail.response_headers.len();
+/// 骨架：三根占位条 + 一句“正在读取”。高度按真实内容估，回来时不跳。
+fn skeleton_body() -> impl IntoElement {
+    let bar = |width: f32, height: f32| {
+        view()
+            .w(px(width))
+            .h(px(height))
+            .rounded(px(m::RADIUS))
+            .bg(|| t::divider())
+    };
+    view()
+        .flex_1()
+        .w_full()
+        .p(px(16.0))
+        .flex_col()
+        .child(
+            text("正在读取这条记录…")
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(|| t::ink_tertiary()),
+        )
+        .child(ui::vspacer(14.0))
+        .child(bar(120.0, 14.0))
+        .child(ui::vspacer(8.0))
+        .child(bar(300.0, 14.0))
+        .child(ui::vspacer(8.0))
+        .child(bar(240.0, 14.0))
+        .child(ui::vspacer(18.0))
+        .child(
+            view()
+                .w_full()
+                .h(px(200.0))
+                .rounded(px(m::RADIUS))
+                .bg(|| t::control_fill()),
+        )
+}
+
+fn detail_tabs(cap: Cap) -> impl IntoElement {
+    let request_count = detail_view(cap, |v| v.detail.request_headers.len()).unwrap_or(0);
+    let response_count = detail_view(cap, |v| v.detail.response_headers.len()).unwrap_or(0);
     let tab_button = move |index: usize, label: &'static str, count: usize| {
         view()
             .h(px(m::TAB_H))
@@ -961,22 +1149,25 @@ fn detail_tabs(cap: Cap, screen: DetailView) -> impl IntoElement {
         .child(view().flex_1())
 }
 
-fn detail_body(cap: Cap, screen: DetailView) -> impl IntoElement {
+fn detail_body(cap: Cap) -> impl IntoElement {
+    // 两侧内容（一串头部 + 240 高的正文框 + 「继续加载」）会比抽屉高：
+    // 竖滚放在这一层，抽屉头与页签固定。
     view()
         .flex_1()
         .w_full()
         .overflow_hidden()
-        .child(when(move || cap.tab.get() == 0, {
-            let screen = screen.clone();
-            move || side_panel(cap, true, screen.clone())
+        .child(when(move || cap.tab.get() == 0, move || {
+            scroll().scrollbar(true).flex_1().w_full().child(side_panel(cap, true))
         }))
         .child(when(move || cap.tab.get() == 1, move || {
-            side_panel(cap, false, screen.clone())
+            scroll().scrollbar(true).flex_1().w_full().child(side_panel(cap, false))
         }))
 }
 
-fn side_panel(cap: Cap, request: bool, screen: DetailView) -> impl IntoElement {
-    let detail = screen.detail.clone();
+fn side_panel(cap: Cap, request: bool) -> AnyElement {
+    let Some(detail) = detail_view(cap, |v| v.detail.clone()) else {
+        return view().into_element();
+    };
     let headers = if request {
         detail.request_headers.clone()
     } else {
@@ -987,26 +1178,14 @@ fn side_panel(cap: Cap, request: bool, screen: DetailView) -> impl IntoElement {
     } else {
         detail.response_body.clone()
     };
-    let content_type = if request {
-        detail.request_content_type.clone()
-    } else {
-        detail.response_content_type.clone()
-    };
-    let shown = if request {
-        screen.request_shown.clone()
-    } else {
-        screen.response_shown.clone()
-    };
-    let prettyable = if request {
-        screen.request_prettyable
-    } else {
-        screen.response_prettyable
-    };
-    let pretty = if request {
-        screen.request_pretty
-    } else {
-        screen.response_pretty
-    };
+    let prettyable = detail_view(cap, |v| {
+        if request {
+            v.request_prettyable
+        } else {
+            v.response_prettyable
+        }
+    })
+    .unwrap_or(false);
 
     let mut column = view().flex_col().p(px(16.0));
     if request {
@@ -1034,7 +1213,8 @@ fn side_panel(cap: Cap, request: bool, screen: DetailView) -> impl IntoElement {
         .child(ui::section_label(if request { "请求头" } else { "响应头" }))
         .child(headers_section(headers))
         .child(ui::vspacer(14.0))
-        .child(body_section(cap, request, body, content_type, shown, prettyable, pretty))
+        .child(body_section(cap, request, body, prettyable))
+        .into_element()
 }
 
 fn headers_section(headers: Vec<(String, String)>) -> impl IntoElement {
@@ -1079,20 +1259,25 @@ fn headers_section(headers: Vec<(String, String)>) -> impl IntoElement {
 
 /// 正文块：标题 + 体积 + 美化/原文两态 + 复制；正文本身是**只读多行框**
 /// （原生编辑控件扛得住几千行，逐行造 `text` 会又慢又没法选文字）。
-fn body_section(
-    cap: Cap,
-    request: bool,
-    body: Body,
-    content_type: Option<String>,
-    shown: String,
-    prettyable: bool,
-    pretty: bool,
-) -> impl IntoElement {
-    let _ = content_type;
+///
+/// 超过 [`CHUNK`] 的正文不整块进控件：先放前 32 KiB，底下给「继续加载剩余 …」，
+/// 每次再放 32 KiB。框里的文字、复制按钮的文案、剩余多少，全部经信号现读——
+/// 这个子树只在详情回来时建一次，快照会把切换美化态后的内容留在旧值上。
+fn body_section(cap: Cap, request: bool, body: Body, prettyable: bool) -> impl IntoElement {
     let title = if request { "请求体" } else { "响应体" };
     let size = crate::model::capture::format_bytes(body.size);
     let copyable = body.kind != Kind::Omitted;
-    let copy_label = if pretty { "复制美化" } else { "复制原文" };
+    let copy_label = move || {
+        let pretty = detail_view(cap, |v| {
+            if request {
+                v.request_pretty
+            } else {
+                v.response_pretty
+            }
+        })
+        .unwrap_or(false);
+        SharedString::from(if pretty { "复制美化" } else { "复制原文" })
+    };
 
     let mut head = view()
         .w_full()
@@ -1191,7 +1376,7 @@ fn body_section(
                 .multiline(true)
                 .readonly(true)
                 .scrollbar(true)
-                .value(move || shown.clone())
+                .value(move || detail_view(cap, |v| v.rendered(request)).unwrap_or_default())
                 .h(px(240.0))
                 .w_full()
                 .px(px(10.0))
@@ -1204,6 +1389,30 @@ fn body_section(
                 .font_family(f::FONT_MONO)
                 .text_color(|| t::ink()),
         )
+        .child(when(
+            move || detail_view(cap, |v| v.remaining(request) > 0).unwrap_or(false),
+            move || {
+                view().w_full().pt(px(8.0)).flex_row().items_center().child(
+                    ui::btn_text(
+                        move || {
+                            let rest = detail_view(cap, |v| v.remaining(request)).unwrap_or(0);
+                            SharedString::from(format!(
+                                "继续加载剩余 {}",
+                                crate::model::capture::format_bytes(rest as u64)
+                            ))
+                        },
+                        t::accent_ink,
+                        move || {
+                            cap.detail.update(|slot| {
+                                if let Some(view) = slot.as_mut() {
+                                    view.load_more(request);
+                                }
+                            });
+                        },
+                    ),
+                )
+            },
+        ))
 }
 
 /// 一行说明：什么形状、为什么没有美化/没有原文。
@@ -1265,12 +1474,23 @@ fn fixture_detail_row() -> CaptureRow {
         status: Some(200),
         error: false,
         request_size: 13,
-        response_size: 21,
+        response_size: if crate::harness_flag("NG_CAPTURE_BIG") {
+            big_body().len() as u64
+        } else {
+            21
+        },
         content_type: Some("application/json".to_owned()),
     }
 }
 
 fn fixture_detail() -> Detail {
+    let response_body = if crate::harness_flag("NG_CAPTURE_BIG") {
+        let content = big_body();
+        let size = content.len() as u64;
+        serde_json::json!({"encoding": "utf8", "size": size, "content": content})
+    } else {
+        serde_json::json!({"encoding": "utf8", "size": 21, "content": "{\"ok\":true,\"items\":[1]}"})
+    };
     let value = serde_json::json!({
         "request_id": 1,
         "time": 1_700_000_000_000u64,
@@ -1285,12 +1505,22 @@ fn fixture_detail() -> Detail {
         "response": {
             "status": 200,
             "headers": [["content-type", "application/json"]],
-            "body": {"encoding": "utf8", "size": 21, "content": "{\"ok\":true,\"items\":[1]}"},
+            "body": response_body,
         },
         "error": null,
     });
     Detail::from_value(&value)
 }
+
+/// 分块渲染的看板样本：40 KiB 的 JSON 数组（原文就超 32 KiB，美化后更长）。
+/// 只由 `NG_CAPTURE_BIG` 触发，用来目验「继续加载」与滚动。
+fn big_body() -> String {
+    let items: Vec<String> = (1..=1400)
+        .map(|index| format!("{{\"id\":{index},\"name\":\"row-{index}\"}}"))
+        .collect();
+    format!("{{\"items\":[{}]}}", items.join(","))
+}
+
 
 /// 压力口径的抓包行数（`NG_STRESS=35000`）：与列表压测同一个开关，
 /// 量的是抓包表的首帧与每格成本。

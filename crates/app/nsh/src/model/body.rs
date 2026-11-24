@@ -13,6 +13,26 @@
 /// 美化的字节阈值：64 KiB（字节数按记录里的 `size`，不是字符数）。
 pub const PRETTY_LIMIT: u64 = 64 * 1024;
 
+/// 一次渲染的正文上限：32 KiB。超出的部分先不进控件，由「继续加载」再放一段。
+///
+/// 为什么不是一次全塞：一个几千行的只读多行框要一次性排版、量宽、建行索引，
+/// 40–64 KiB 的整块会明显拖慢打开动作；分段把成本摊到用户真的往下看的时候。
+pub const CHUNK: usize = 32 * 1024;
+
+/// 取前 `limit` 字节，**落在字符边界上**（中文与 base64 混排也不能切出半个字）。
+///
+/// 不返回“是否截断”，调用方用 `text.len()` 与结果的 `len()` 比即可。
+pub fn take_prefix(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// 正文的后端形状（`encode_body` 的三种 + 没有正文）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -368,5 +388,19 @@ mod tests {
             "content": "hello",
         })));
         assert!(body.pretty(Some("text/plain")).is_none(), "纯文本不重排");
+    }
+
+    #[test]
+    fn prefix_split_stays_on_char_boundary() {
+        // 中文按 3 字节：在“第 3 个字中间”切也不能切出半个字
+        let text = "一二三四五";
+        assert_eq!(take_prefix(text, 6), "一二");
+        assert_eq!(take_prefix(text, 7), "一二");
+        assert_eq!(take_prefix(text, 8), "一二");
+        assert_eq!(take_prefix(text, 9), "一二三");
+        // 短文本原样返回，不额外分配
+        assert_eq!(take_prefix("abc", 32), "abc");
+        // 全切到 0 时给空串而不是 panic
+        assert_eq!(take_prefix("一", 1), "");
     }
 }

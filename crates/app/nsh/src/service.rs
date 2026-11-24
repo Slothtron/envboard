@@ -142,6 +142,16 @@ pub fn capture_detail(name: &str, request_id: u64) -> Result<Option<serde_json::
     }
 }
 
+/// 详情页用的异步形态：合并大记录的 headers 与正文要拷贝，放到线程上做，
+/// 让点击那一帧先把骨架画出来（ADR-8「点行 ≤200ms 出骨架」）。
+pub fn capture_detail_async(
+    name: String,
+    request_id: u64,
+) -> oneshot::Receiver<Result<Option<serde_json::Value>, Error>> {
+    off_thread(move || capture_detail(&name, request_id))
+}
+
+
 /// 开启抓包：工作区级单例会话切到这个环境（环境得先在跑）。
 pub fn start_debug(name: &str) -> Result<envboard_protocol::DebugView, Error> {
     match service() {
