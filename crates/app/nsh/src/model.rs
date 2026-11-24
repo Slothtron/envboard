@@ -7,6 +7,9 @@
 //! M3 起数据来自 `AdminService::snapshot()`；`fixture()` 只在 golden 用
 //! （`NG_GOLDEN=1`），把八种状态摆齐、逐像素基线才稳定。
 
+pub mod body;
+pub mod capture;
+
 use envboard_protocol::EnvView;
 use nsh_core::prelude::*;
 
