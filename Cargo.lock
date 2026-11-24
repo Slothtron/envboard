@@ -772,6 +772,7 @@ dependencies = [
  "png 0.17.16",
  "serde_json",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

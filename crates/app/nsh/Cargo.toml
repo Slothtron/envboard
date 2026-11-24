@@ -34,6 +34,16 @@ chrono = "0.4"
 # 注意：这条**不能**提升到 workspace.dependencies —— 那里不支持 target 条件表。
 [target.'cfg(target_os = "windows")'.dependencies]
 nsh-platform-windows = { version = "=0.6.1", default-features = false }
+# N1（单实例）：命名管道占位 + 二次启动提示。与 desktop 同版本（0.61.2，离线缓存
+# 已暖），只用 Pipes / FileSystem / Security / User32 四族。
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # 把 assets/app.rc 的 1 号图标编进 exe：NSH 优先用 exe 自带图标（LoadIconW(instance,1)），
 # 内嵌之后标题栏 / 任务栏 / Alt+Tab / 资源管理器才是同一枚图。

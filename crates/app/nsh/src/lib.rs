@@ -12,6 +12,9 @@ mod pages;
 mod prefs;
 mod service;
 mod shell;
+// N1（方案 §5.3 单实例）：preflight 是产品行为，不在 harness 后面 —— 发布物也要
+// 拦住第二个写者。
+pub mod single_instance;
 // T1（P6）托盘探针：只在 harness 构建里存在，产品构建不编这段代码。
 #[cfg(feature = "harness")]
 pub mod tray_probe;

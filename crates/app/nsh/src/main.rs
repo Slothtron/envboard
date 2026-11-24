@@ -34,6 +34,28 @@ fn flag(name: &str) -> bool {
 fn main() -> impl std::process::Termination {
     env_logger::init();
 
+    // N1（方案 §5.3）：单实例 preflight 必须在 `boot` 之前 —— 同一 state-dir 已有
+    // 实例时，让第二个进程在这里给出结论并 `exit 2`，而不是先撞 `InstanceLock`
+    // 把一句 `conflict` 甩给一个还没有窗口的进程（用户看到的是「双击没反应」）。
+    // 主实例的管道句柄挂在 `instance` 上，必须活到 `run_app` 返回。
+    let instance = envboard_nsh::single_instance::preflight();
+    match &instance {
+        envboard_nsh::single_instance::Preflight::Owner(_) => {
+            log::info!("单实例：本进程是主实例");
+        }
+        envboard_nsh::single_instance::Preflight::Occupied { pipe, state_dir } => {
+            log::warn!("单实例：{pipe} 已被占用（state-dir: {}）", state_dir.display());
+            envboard_nsh::single_instance::prompt(
+                &envboard_nsh::single_instance::occupied_message(state_dir),
+            );
+            return std::process::ExitCode::from(2);
+        }
+        envboard_nsh::single_instance::Preflight::Unavailable { reason } => {
+            // 机制不可用不拦着启动：互斥仍由 `InstanceLock` 兜底。
+            log::info!("单实例 preflight 不可用：{reason}");
+        }
+    }
+
     let app_id = envboard_nsh::APP_ID;
     let theme = nsh_base::Theme::from_json(envboard_ui::THEME_JSON)
         .expect("the traditional-colour theme parses");
@@ -48,6 +70,17 @@ fn main() -> impl std::process::Termination {
             Err(error) => {
                 let line = format!("{} · {}", error.code.as_str(), error.message);
                 log::error!("宿主启动失败：{line}");
+                // 迁移期最常见的冲突不是「自己开了两个」（那已被 preflight 拦住），
+                // 而是旧版 envboard（Tauri 版）还占着同一份 state-dir —— 它用另一条
+                // 管道名，preflight 看不见，这里收口成人话再退出。
+                if error.code.as_str() == "conflict"
+                    && error.message.contains("another envboard process holds")
+                {
+                    envboard_nsh::single_instance::prompt(
+                        &envboard_nsh::single_instance::lock_held_message(&line),
+                    );
+                    return std::process::ExitCode::from(2);
+                }
                 envboard_nsh::record_boot_error(line);
             }
         }
