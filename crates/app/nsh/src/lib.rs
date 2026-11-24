@@ -12,6 +12,9 @@ mod pages;
 mod prefs;
 mod service;
 mod shell;
+// T1（P6）托盘探针：只在 harness 构建里存在，产品构建不编这段代码。
+#[cfg(feature = "harness")]
+pub mod tray_probe;
 
 pub use brand::{icon_path, APP_ID, NAME, TAGLINE, WINDOW_TITLE};
 pub use service::record_boot_error;

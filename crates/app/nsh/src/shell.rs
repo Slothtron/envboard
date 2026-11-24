@@ -242,6 +242,13 @@ pub fn App() -> impl IntoElement {
         });
     }
 
+    // T1（P6）托盘探针：只在 `NG_TRAY_PROBE=1` 的 harness 构建里挂托盘、
+    // 把「关窗」改成隐藏。产品构建没有这段。
+    #[cfg(feature = "harness")]
+    if crate::tray_probe::enabled() {
+        crate::tray_probe::install();
+    }
+
     view()
         .flex_1()
         .w_full()

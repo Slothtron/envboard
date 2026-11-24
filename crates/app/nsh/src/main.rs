@@ -77,6 +77,14 @@ fn main() -> impl std::process::Termination {
         attributes.shadow = Some(false);
     }
 
+    // T1（P6）托盘探针：关窗要改成隐藏，所以关窗这件事交给应用自己判
+    // （`close_on_press = false` 之后平台只上报 closePress）。产品构建里
+    // 这个函数恒为 false，窗口仍由系统直接关。
+    #[cfg(feature = "harness")]
+    if envboard_nsh::tray_probe::wants_close_press() {
+        attributes.close_on_press = Some(false);
+    }
+
     let mut window = MainWindowOptions::default();
     window.default_size = Some(Size {
         width: Points(1280.0),
