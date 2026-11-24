@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use envboard_admin::AdminService;
 use envboard_engine::Error;
 use envboard_host::{CaControl, HostOptions, Prepared, StorePresence};
-use envboard_protocol::EnvView;
+use envboard_protocol::{CaptureRows, EnvView};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
@@ -120,6 +120,24 @@ pub fn remove(name: &str) -> Result<(), Error> {
 pub fn reallocate_port(name: &str) -> Result<EnvView, Error> {
     match service() {
         Some(s) => s.admin.reallocate_port(name),
+        None => Err(Error::internal_error("宿主尚未启动")),
+    }
+}
+
+/* ---------------- 抓包（EB-DESIGN-004：列表读瘦行，详情单独取） ---------------- */
+
+/// 抓包列表的一批瘦行（`after` 游标之后；不搬正文）。`None` = 该环境没在跑/无会话。
+pub fn capture_rows(name: &str, after: u64, limit: usize) -> Result<Option<CaptureRows>, Error> {
+    match service() {
+        Some(s) => s.admin.capture_rows(name, after, limit),
+        None => Err(Error::internal_error("宿主尚未启动")),
+    }
+}
+
+/// 单条抓包详情（完整记录，含 headers 与正文三形状）。
+pub fn capture_detail(name: &str, request_id: u64) -> Result<Option<serde_json::Value>, Error> {
+    match service() {
+        Some(s) => s.admin.capture_detail(name, request_id),
         None => Err(Error::internal_error("宿主尚未启动")),
     }
 }
