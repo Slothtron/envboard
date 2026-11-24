@@ -10,6 +10,7 @@
 pub mod body;
 pub mod capture;
 pub mod detail;
+pub mod har;
 
 use envboard_protocol::EnvView;
 use nsh_core::prelude::*;

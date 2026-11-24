@@ -378,6 +378,11 @@ fn toolbar(cap: Cap) -> impl IntoElement {
         .child(ui::btn_text("清空", t::ink_secondary, move || {
             ask_clear(cap)
         }))
+        .child(ui::spacer(6.0))
+        // 导出对齐桌面工具条：只出 HAR（JSONL 是后端能力，页面不摆两个按钮）。
+        .child(ui::btn_text("导出 HAR", t::accent_ink, move || {
+            actions::export_har(cap.ctx, cap.name.get_untracked())
+        }))
 }
 
 fn toggle_capture(cap: Cap, running: bool) {

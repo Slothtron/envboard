@@ -273,11 +273,39 @@ pub fn install_ca(cx: Ctx) {
     });
 }
 
+/// 导出 HAR：拉全量记录 + 拼 JSON + 写下载目录，几百 MB 级，全在普通线程上跑。
+///
+/// 任务挂**无主** owner：导出途中按「← 环境」返回时页面会被拆掉，
+/// 挂在页面 owner 上的任务还没被首次轮询就没了（M4 卸载证书踩过同一个坑），
+/// 而用户点下导出后期待的是“文件一定会出现”。只写信号、不建元素，挂出去是安全的。
+pub fn export_har(cx: Ctx, name: String) {
+    note(cx, format!("正在导出 {name} 的 HAR…"));
+    Owner::detached().run(|| {
+        spawn(async move {
+            match service::export_har(name).await {
+                Ok(Ok(export)) => {
+                    let file = export
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| export.path.display().to_string());
+                    succeed(cx, format!("HAR 已导出：{file}（{} 条）", export.entries));
+                }
+                Ok(Err(error)) => {
+                    fail(cx, error);
+                }
+                Err(_) => {
+                    cx.error.set(Some("导出失败：回传通道已断开".to_owned()));
+                }
+            }
+        });
+    });
+}
+
 /// 卸载根证书：**不直接做**，先弹确认（可逆，所以确认框不印“不可撤销”、
 /// 确认键也不是胭脂）。
 pub fn ask_uninstall_ca(cx: Ctx) {
-    cx.confirm.set(Some(Confirm::uninstall_ca()));
-}
+    cx.confirm.set(Some(Confirm::uninstall_ca()));}
 
 fn uninstall_ca(cx: Ctx) {
     note(

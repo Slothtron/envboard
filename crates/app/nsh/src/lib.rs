@@ -6,6 +6,7 @@
 
 mod actions;
 mod brand;
+mod export;
 mod model;
 mod pages;
 mod prefs;

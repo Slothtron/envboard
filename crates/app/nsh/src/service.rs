@@ -166,6 +166,38 @@ pub fn clear_capture(name: &str) -> Result<bool, Error> {
     }
 }
 
+/// 一份导出的结果：文件落在哪、装了多少条。
+pub struct HarExport {
+    pub path: PathBuf,
+    pub entries: usize,
+}
+
+/// 导出当前会话为 HAR 1.2：拉全部记录（含正文）→ 拼 HAR → 写进下载目录。
+///
+/// 记录是几百 MB 级的 `Value`（256 MiB/环境缓冲 + 序列化），所以整段放普通线程跑；
+/// 文件名对齐桌面形态（`<env>-session-<id>.har`），重名不覆盖。
+pub fn export_har(name: String) -> oneshot::Receiver<Result<HarExport, Error>> {
+    off_thread(move || {
+        let s = service().ok_or_else(|| Error::internal_error("宿主尚未启动"))?;
+        let view = s
+            .admin
+            .captures(&name, usize::MAX)?
+            .ok_or_else(|| Error::internal_error(format!("{name} 没有进行中的抓包会话")))?;
+        let har = crate::model::har::har(&name, &view.records);
+        let entries = har
+            .get("log")
+            .and_then(|log| log.get("entries"))
+            .and_then(|entries| entries.as_array())
+            .map(Vec::len)
+            .unwrap_or(0);
+        let text = serde_json::to_string_pretty(&har)
+            .map_err(|error| Error::internal_error(format!("HAR 序列化失败：{error}")))?;
+        let stem = format!("{name}-session-{}", view.session.id);
+        let path = crate::export::write_unique(&crate::export::downloads_dir(), &stem, "har", &text)?;
+        Ok(HarExport { path, entries })
+    })
+}
+
 /// 异步动作的落点：普通线程 + `Handle::block_on` + oneshot。
 ///
 /// 线程只活到这次动作结束（一秒级的 start/stop），不是线程池——M3 的写入频率
