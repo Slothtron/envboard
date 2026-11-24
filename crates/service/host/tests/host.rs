@@ -47,10 +47,17 @@ fn prepare_with_hands_the_facade_that_the_screens_use() {
     let prepared: Prepared =
         prepare_with(options, fake_engine()).expect("组合根必须能装出一个可用宿主");
 
-    // 写：建一个环境（请求体形状 = envboard-admin crate 文档 的 environment.create）。
+    // 写：建一个环境（typed 请求，形状 = envboard-protocol 的 `EnvCreateReq`）。
     let created = prepared
         .admin
-        .create(&serde_json::json!({ "name": "alpha", "listen": { "port": 16_600 } }))
+        .create(&envboard_protocol::EnvCreateReq {
+            name: "alpha".to_owned(),
+            listen: Some(envboard_protocol::ListenReq {
+                port: Some(16_600),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
         .expect("create must land through the facade");
     assert_eq!(created.name, "alpha");
 
@@ -94,7 +101,14 @@ async fn startup_returns_the_reconcile_report_instead_of_printing_it() {
     let prepared = prepare_with(options, fake_engine()).expect("组合根必须能装出一个可用宿主");
     prepared
         .admin
-        .create(&serde_json::json!({ "name": "beta", "listen": { "port": 16_601 } }))
+        .create(&envboard_protocol::EnvCreateReq {
+            name: "beta".to_owned(),
+            listen: Some(envboard_protocol::ListenReq {
+                port: Some(16_601),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
         .expect("create must land");
 
     // startup 只做编排：返回报告，打印由调用方决定（宿主 println、界面渲染）。

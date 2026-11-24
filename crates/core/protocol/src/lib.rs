@@ -78,6 +78,8 @@
 //! 改游标域、删字段是破坏性变更：必须同步本 crate 的类型定义并评估界面迁移。
 //! 事件词汇（信封内 type/data）的兼容规则在 `envboard-events`，与本契约独立。
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -158,7 +160,8 @@ pub struct CaptureView {
     pub session: SessionInfo,
     pub captured: u64,
     pub dropped: u64,
-    pub records: Vec<Value>,
+    /// 完整记录（按 `Arc` 共享：引擎缓冲里那一份与界面拿到的是同一个对象）。
+    pub records: Vec<Arc<Record>>,
 }
 
 /// 抓包增量视图（调试实时流的读侧原语）：会话元数据 + 计数 + 游标之后的新记录。
@@ -170,7 +173,7 @@ pub struct CaptureDelta {
     /// 缓冲内最旧的 request_id（None = 空缓冲）。
     pub oldest: Option<u64>,
     /// request_id 严格大于游标的记录（时间序，至多 limit 条）。
-    pub records: Vec<Value>,
+    pub records: Vec<Arc<Record>>,
 }
 
 /// 调试会话视图：目标环境 + 其抓包会话。
@@ -178,6 +181,165 @@ pub struct CaptureDelta {
 pub struct DebugView {
     pub env: String,
     pub capture: CaptureView,
+}
+
+// --------------------------------------------------------------------------- #
+// 抓包记录本体（typed）
+// --------------------------------------------------------------------------- #
+//
+// 这一族类型是**进程内唯一的记录表示**：引擎缓冲、管理门面、界面之间都搬它，
+// 不经过 `serde_json::Value`。序列化只在边缘发生（桌面 adapter 的 wire 出口、
+// HAR 文件、调试 JSONL），且与历史 JSON v2 逐键同名同形 —— 形状漂移就是契约漂移。
+
+/// 一条抓包记录（会话内的一次请求/响应交换）。
+///
+/// 形状与历史 JSON v2 一一对应：`{version, session, request_id, time, duration_ms,
+/// request, response, error}`。字段全带 `default`，读侧对缺键宽容（旧记录照读）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Record {
+    /// 记录形状版本（当前 2）。
+    #[serde(default = "record_version")]
+    pub version: u64,
+    /// 会话号（会话 = 实例生命周期）。
+    #[serde(default)]
+    pub session: u64,
+    /// 会话内自增的请求号（抓包游标域）。
+    #[serde(default)]
+    pub request_id: u64,
+    /// 请求到达时刻（unix ms）。
+    #[serde(default)]
+    pub time: u64,
+    /// 上游交换耗时（ms；请求行到达 → 响应体收齐）。
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub request: RecordRequest,
+    /// 无响应（连接失败 / 进行中）→ None。
+    #[serde(default)]
+    pub response: Option<RecordResponse>,
+    /// 记录以错误结束时的说明（正常记录为 None）。
+    #[serde(default)]
+    pub error: Option<RecordError>,
+}
+
+fn record_version() -> u64 {
+    2
+}
+
+impl Default for Record {
+    /// 空记录：版本仍是 2（`Default` 不该造出一条「v0」记录）。
+    fn default() -> Self {
+        Record {
+            version: record_version(),
+            session: 0,
+            request_id: 0,
+            time: 0,
+            duration_ms: 0,
+            request: RecordRequest::default(),
+            response: None,
+            error: None,
+        }
+    }
+}
+
+/// 请求侧：方法、拆分后的 path/query、authority、头部与正文。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordRequest {
+    pub method: String,
+    /// 纯路径，不含 query（v2 起 path 与 query 分存）。
+    pub path: String,
+    /// 原始查询串（不含前导 `?`；空串 = 没有）。
+    pub query: String,
+    pub authority: String,
+    /// 头部按 `[[name, value], …]` 保序留存（大小写原样，重复名不合并）。
+    pub headers: Vec<(String, String)>,
+    pub body: Option<RecordBody>,
+}
+
+/// 响应侧：状态码（无响应 = None）、头部与正文。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordResponse {
+    pub status: Option<u16>,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<RecordBody>,
+}
+
+/// 正文的三种形状（对齐 mitmproxy「缺失而非截断」）：
+/// UTF-8 直存 / 二进制 base64 / 超上限只留字节数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RecordBody {
+    /// 超过后端上限，正文未记录：`{"omitted": true, "size": n}`。
+    Omitted { omitted: bool, size: u64 },
+    /// 正文本体：`{"encoding": "utf8"|"base64", "size": n, "content": s}`。
+    Present {
+        encoding: String,
+        size: u64,
+        content: String,
+    },
+}
+
+impl RecordBody {
+    /// 原始字节数（`omitted` 也带）。
+    pub fn size(&self) -> u64 {
+        match self {
+            RecordBody::Omitted { size, .. } | RecordBody::Present { size, .. } => *size,
+        }
+    }
+
+    /// 原文（`omitted` = None；二进制给 base64 串）。
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            RecordBody::Omitted { .. } => None,
+            RecordBody::Present { content, .. } => Some(content),
+        }
+    }
+
+    /// 是否只留了字节数（正文超上限）。
+    pub fn is_omitted(&self) -> bool {
+        matches!(self, RecordBody::Omitted { .. })
+    }
+
+    /// 是否 base64（二进制正文）。
+    pub fn is_base64(&self) -> bool {
+        matches!(self, RecordBody::Present { encoding, .. } if encoding == "base64")
+    }
+}
+
+/// 记录以错误结束时的说明：`"连接被重置"` 这样的一句话，或 `{kind, message}` 结构。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RecordError {
+    /// 一句话原因（历史形态）。
+    Text(String),
+    /// 结构化原因。
+    Detail(RecordErrorDetail),
+}
+
+/// 结构化错误原因（引擎当前只写 `null`；形状留给未来的分类错误）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordErrorDetail {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl RecordError {
+    /// 给人看的那一句话（结构化的按 `kind · message` 拼）。
+    pub fn text(&self) -> String {
+        match self {
+            RecordError::Text(text) => text.clone(),
+            RecordError::Detail(detail) => match detail.message.as_deref() {
+                Some(message) if !message.is_empty() => {
+                    format!("{} · {message}", detail.kind)
+                }
+                _ => detail.kind.clone(),
+            },
+        }
+    }
 }
 
 /// 抓包列表的一行：**瘦投影**，只带表格与过滤要的字段，不含头部与正文。
@@ -202,6 +364,49 @@ pub struct CaptureRow {
     pub response_size: u64,
     /// 响应头里的 content-type 原值（大小写保留）；过滤「资源类型」用。
     pub content_type: Option<String>,
+}
+
+impl Record {
+    /// 投影成列表瘦行：只读字段，不碰正文（列表 35k 行不为每条克隆 headers/body）。
+    ///
+    /// 缺字段给中性值（空串 / None / 0），不 panic —— 投影是读侧，不该因为一条
+    /// 畸形记录让整个列表读不出来。
+    pub fn row(&self) -> CaptureRow {
+        CaptureRow {
+            request_id: self.request_id,
+            time: self.time,
+            method: self.request.method.clone(),
+            authority: self.request.authority.clone(),
+            path: self.request.path.clone(),
+            status: self.response.as_ref().and_then(|response| response.status),
+            error: self.error.is_some(),
+            request_size: self.request.body.as_ref().map(RecordBody::size).unwrap_or(0),
+            response_size: self
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref())
+                .map(RecordBody::size)
+                .unwrap_or(0),
+            content_type: self
+                .response
+                .as_ref()
+                .and_then(|response| content_type_of(&response.headers)),
+        }
+    }
+
+    /// 响应头里的 content-type 原值（大小写不敏感匹配，参数保留）。
+    pub fn response_content_type(&self) -> Option<String> {
+        self.response
+            .as_ref()
+            .and_then(|response| content_type_of(&response.headers))
+    }
+}
+
+fn content_type_of(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.clone())
 }
 
 /// 抓包瘦行视图：会话元数据 + 计数 + 游标之后的行。
@@ -244,7 +449,7 @@ pub struct ListenReq {
 }
 
 /// `POST /api/environments` 请求体。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvCreateReq {
     pub name: String,
@@ -446,7 +651,7 @@ pub struct DebugSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DebugEvents {
     pub cursor: u64,
-    pub records: Vec<Value>,
+    pub records: Vec<Arc<Record>>,
     pub captured: u64,
     pub dropped: u64,
     pub oldest: Option<u64>,
@@ -568,5 +773,142 @@ mod tests {
         assert_eq!(cleared.rules, Some(None));
         let bound: EnvPatchReq = serde_json::from_str(r#"{"rules":"beta"}"#).unwrap();
         assert_eq!(bound.rules, Some(Some("beta".into())));
+    }
+
+    /// 记录本体（typed）序列化出来的 wire 形状必须与历史 JSON v2 逐键一致：
+    /// 桌面 adapter 的出口、HAR 文件、调试 JSONL 都靠这份形状。
+    #[test]
+    fn record_serializes_to_the_historical_shape() {
+        let record = Record {
+            version: 2,
+            session: 7,
+            request_id: 42,
+            time: 1_700_000_000_123,
+            duration_ms: 12,
+            request: RecordRequest {
+                method: "POST".into(),
+                path: "/v1/orders".into(),
+                query: "page=2".into(),
+                authority: "api.example.com".into(),
+                headers: vec![("Content-Type".into(), "application/json".into())],
+                body: Some(RecordBody::Present {
+                    encoding: "utf8".into(),
+                    size: 12,
+                    content: "{}".into(),
+                }),
+            },
+            response: Some(RecordResponse {
+                status: Some(502),
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: Some(RecordBody::Omitted {
+                    omitted: true,
+                    size: 400_000,
+                }),
+            }),
+            error: None,
+        };
+        let value = serde_json::to_value(&record).unwrap();
+        for key in [
+            "version",
+            "session",
+            "request_id",
+            "time",
+            "duration_ms",
+            "request",
+            "response",
+            "error",
+        ] {
+            assert!(value.get(key).is_some(), "缺键 {key}");
+        }
+        assert_eq!(value["request"]["headers"], serde_json::json!([["Content-Type", "application/json"]]));
+        assert_eq!(
+            value["request"]["body"],
+            serde_json::json!({"encoding": "utf8", "size": 12, "content": "{}"})
+        );
+        assert_eq!(value["response"]["status"], 502);
+        assert_eq!(
+            value["response"]["body"],
+            serde_json::json!({"omitted": true, "size": 400000}),
+            "omitted 的键集合与顺序不得变"
+        );
+        assert!(value["error"].is_null());
+        // 往返：同一份 JSON 读回来还是同一条记录。
+        let back: Record = serde_json::from_value(value).unwrap();
+        assert_eq!(back, record);
+    }
+
+    /// 瘦行投影：只带表格与过滤要的字段，content-type 取原值（参数保留）。
+    #[test]
+    fn record_projects_to_a_thin_row() {
+        let record = Record {
+            request_id: 9,
+            time: 1_700_000_000_000,
+            request: RecordRequest {
+                method: "GET".into(),
+                path: "/get".into(),
+                query: "a=1".into(),
+                authority: "httpbin.org:80".into(),
+                body: Some(RecordBody::Present {
+                    encoding: "utf8".into(),
+                    size: 3,
+                    content: "abc".into(),
+                }),
+                ..Default::default()
+            },
+            response: Some(RecordResponse {
+                status: Some(200),
+                headers: vec![("Content-Type".into(), "application/json; charset=utf-8".into())],
+                body: Some(RecordBody::Present {
+                    encoding: "utf8".into(),
+                    size: 5,
+                    content: "hello".into(),
+                }),
+            }),
+            ..Default::default()
+        };
+        let row = record.row();
+        assert_eq!(row.request_id, 9);
+        assert_eq!(row.method, "GET");
+        assert_eq!(row.path, "/get", "行里的 path 不含 query");
+        assert_eq!(row.authority, "httpbin.org:80");
+        assert_eq!(row.status, Some(200));
+        assert!(!row.error);
+        assert_eq!(row.request_size, 3);
+        assert_eq!(row.response_size, 5);
+        assert_eq!(
+            row.content_type.as_deref(),
+            Some("application/json; charset=utf-8"),
+            "原值，不回炉"
+        );
+        assert_eq!(record.response_content_type().as_deref(), Some("application/json; charset=utf-8"));
+    }
+
+    /// 宽松读：旧记录 `body: null` / `error: "…"` 都能读进来（读侧不因畸形记录炸掉）。
+    #[test]
+    fn record_reads_legacy_null_body_and_text_error() {
+        let value = serde_json::json!({
+            "request_id": 5,
+            "time": 2,
+            "request": {"method": "GET", "path": "/y", "authority": "h", "body": null},
+            "response": null,
+            "error": "connection reset",
+        });
+        let record: Record = serde_json::from_value(value).unwrap();
+        assert!(record.request.body.is_none());
+        assert!(record.response.is_none());
+        assert_eq!(record.error.as_ref().map(RecordError::text).as_deref(), Some("connection reset"));
+        let row = record.row();
+        assert!(row.error);
+        assert_eq!(row.status, None);
+        assert_eq!(row.response_size, 0);
+    }
+
+    /// `Arc` 共享的记录在序列化时与裸记录同形（wire 形状不受共享方式影响）。
+    #[test]
+    fn arc_records_serialize_like_plain_records() {
+        let record = Record::default();
+        let shared = serde_json::to_value(vec![Arc::new(record.clone())]).unwrap();
+        let plain = serde_json::to_value(vec![record]).unwrap();
+        assert_eq!(shared, plain);
     }
 }

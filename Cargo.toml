@@ -58,7 +58,9 @@ async-trait = "0.1.92"
 # 比手写 split_once('?') 稳；本地两套 registry 源缓存均已暖，离线可解析。
 http = "1.5.0"
 libc = "0.2.189"
-serde = { version = "1.0.229", features = ["derive"] }
+# `rc`：抓包记录在进程内以 `Arc<Record>` 共享（S1），serde 需要 Arc 的实现；
+# 只影响派生 impl 的可见性，不改任何 wire 形状。
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

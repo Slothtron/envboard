@@ -1,10 +1,7 @@
 //! 环境域：CRUD + 生命周期 + 每环境读取（logs / captures 读侧）。
 
 use envboard_engine::{CoreInfo, Error};
-use envboard_protocol::{EnvView, ReconcileReport};
-use serde_json::Value;
-
-use envboard_protocol::{EnvCreateReq, EnvPatchReq};
+use envboard_protocol::{EnvCreateReq, EnvPatchReq, EnvView, ReconcileReport};
 
 use super::AdminService;
 
@@ -17,17 +14,18 @@ impl AdminService {
         self.manager.get(name)
     }
 
-    /// `POST /api/environments`：入口先过 `EnvCreateReq` 形状校验。
-    pub fn create(&self, body: &Value) -> Result<EnvView, Error> {
-        Self::parse_request::<EnvCreateReq>("request", body)?;
-        self.manager.create(body)
+    /// `POST /api/environments`：请求体是 typed `EnvCreateReq`（`deny_unknown_fields`
+    /// 的形状校验在反序列化时就完成，适配器解码失败即 `invalid_config`）。
+    pub fn create(&self, request: &EnvCreateReq) -> Result<EnvView, Error> {
+        let body = Self::ledger_value(request)?;
+        self.manager.create(&body)
     }
 
     /// `PATCH /api/environments/:name`：三态（未提及 / 显式 null / 给值）由
     /// `EnvPatchReq` 保住，语义校验在 domain merge。
-    pub fn update(&self, name: &str, patch: &Value) -> Result<EnvView, Error> {
-        Self::parse_request::<EnvPatchReq>("request", patch)?;
-        self.manager.update(name, patch)
+    pub fn update(&self, name: &str, patch: &EnvPatchReq) -> Result<EnvView, Error> {
+        let body = Self::ledger_value(patch)?;
+        self.manager.update(name, &body)
     }
 
     pub fn remove(&self, name: &str) -> Result<(), Error> {

@@ -9,9 +9,11 @@
 //! capture 字段本身是环境的 hot 字段：开关经 `update` 落账本并热应用，
 //! 本域只是它的两个驱动方之一（另一个是环境页的开关）。
 
+use std::sync::Arc;
+
 use envboard_engine::{
     CaptureDelta as EngineCaptureDelta, CaptureRows as EngineCaptureRows,
-    CaptureView as EngineCaptureView, Error, ErrorCode,
+    CaptureView as EngineCaptureView, Error, ErrorCode, Record,
 };
 use envboard_protocol::DebugView;
 use serde_json::{Value, json};
@@ -34,7 +36,7 @@ impl Manager {
     }
 
     /// 单条抓包详情（全缓冲查找；被淘汰/不存在 → None）。
-    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Value>, Error> {
+    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Arc<Record>>, Error> {
         self.require(name)?;
         Ok(self.engine.capture_get(name, request_id))
     }

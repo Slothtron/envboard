@@ -117,8 +117,7 @@ pub fn watch_debug(shell: State<'_, Shell>, on_event: Channel<Value>) -> u64 {
                 cursor = view
                     .records
                     .last()
-                    .and_then(|record| record.get("request_id"))
-                    .and_then(Value::as_u64)
+                    .map(|record| record.request_id)
                     .unwrap_or(cursor);
                 session_key = Some(key);
                 last_counts = Some((view.captured, view.dropped));
@@ -138,13 +137,8 @@ pub fn watch_debug(shell: State<'_, Shell>, on_event: Channel<Value>) -> u64 {
                 if delta.records.is_empty() && last_counts == Some(counts) {
                     continue;
                 }
-                if let Some(id) = delta
-                    .records
-                    .last()
-                    .and_then(|record| record.get("request_id"))
-                    .and_then(Value::as_u64)
-                {
-                    cursor = id;
+                if let Some(record) = delta.records.last() {
+                    cursor = record.request_id;
                 }
                 last_counts = Some(counts);
                 let frame = DebugEvents {

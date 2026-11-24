@@ -1,10 +1,11 @@
 //! 调试域：工作区级抓包单例 + 每环境抓包读侧 + 故障注入探针。
 
+use std::sync::Arc;
+
 use envboard_engine::{
-    CaptureDelta as EngineCaptureDelta, CaptureView as EngineCaptureView, Error,
+    CaptureDelta as EngineCaptureDelta, CaptureView as EngineCaptureView, Error, Record,
 };
 use envboard_protocol::{CaptureRows, DebugStartReq, DebugView};
-use serde_json::Value;
 
 use super::AdminService;
 
@@ -13,7 +14,8 @@ impl AdminService {
         self.manager.captures(name, limit)
     }
 
-    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Value>, Error> {
+    /// 单条记录本体（`Arc` 共享：调用方拿到的是引擎缓冲里那一份，不做深拷贝）。
+    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Arc<Record>>, Error> {
         self.manager.capture_detail(name, request_id)
     }
 
@@ -31,10 +33,9 @@ impl AdminService {
         self.manager.clear_capture(name)
     }
 
-    /// `POST /api/debug`：入口先过 `DebugStartReq` 形状校验。
-    pub fn start_debug(&self, body: &Value) -> Result<DebugView, Error> {
-        let req = Self::parse_request::<DebugStartReq>("request", body)?;
-        self.manager.start_debug(&req.env)
+    /// `POST /api/debug`：请求体是 typed `DebugStartReq {env}`。
+    pub fn start_debug(&self, request: &DebugStartReq) -> Result<DebugView, Error> {
+        self.manager.start_debug(&request.env)
     }
 
     pub fn stop_debug(&self) -> Result<bool, Error> {

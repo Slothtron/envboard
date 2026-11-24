@@ -10,6 +10,8 @@
 //!
 //! 全部纯函数，不碰窗口；页面只问「这一条该显示什么」。
 
+use envboard_protocol::RecordBody;
+
 /// 美化的字节阈值：64 KiB（字节数按记录里的 `size`，不是字符数）。
 pub const PRETTY_LIMIT: u64 = 64 * 1024;
 
@@ -36,7 +38,7 @@ pub fn take_prefix(text: &str, limit: usize) -> &str {
 /// 正文的后端形状（`encode_body` 的三种 + 没有正文）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
-    /// 没有正文（body 为 `null`）。
+    /// 没有正文（记录里 body 为 None）。
     Absent,
     /// UTF-8 文本。
     Text,
@@ -61,39 +63,30 @@ impl Default for Kind {
 }
 
 impl Body {
-    /// 从记录里的 `body` 字段读：`null` / 缺字段 = 没有正文。
-    pub fn from_value(value: Option<&serde_json::Value>) -> Self {
-        let Some(value) = value.filter(|v| !v.is_null()) else {
+    /// 从记录里的 typed 正文块读：`None` = 没有正文。
+    pub fn from_record(body: Option<&RecordBody>) -> Self {
+        let Some(body) = body else {
             return Body::default();
         };
-        let size = value
-            .get("size")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        if value.get("omitted").is_some() {
-            return Body {
+        match body {
+            RecordBody::Omitted { size, .. } => Body {
                 kind: Kind::Omitted,
-                size,
+                size: *size,
                 raw: String::new(),
-            };
-        }
-        let encoding = value
-            .get("encoding")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("utf8");
-        let raw = value
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        Body {
-            kind: if encoding == "base64" {
-                Kind::Binary
-            } else {
-                Kind::Text
             },
-            size,
-            raw,
+            RecordBody::Present {
+                encoding,
+                size,
+                content,
+            } => Body {
+                kind: if encoding == "base64" {
+                    Kind::Binary
+                } else {
+                    Kind::Text
+                },
+                size: *size,
+                raw: content.clone(),
+            },
         }
     }
 
@@ -300,15 +293,24 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    /// UTF-8 正文块（测试里最常用的一种）。
+    fn utf8(size: u64, content: &str) -> RecordBody {
+        RecordBody::Present {
+            encoding: "utf8".to_owned(),
+            size,
+            content: content.to_owned(),
+        }
+    }
+
+    /// 把一块正文读成展示态（`None` = 没有正文）。
+    fn view(block: RecordBody) -> Body {
+        Body::from_record(Some(&block))
+    }
 
     #[test]
     fn json_pretty_uses_two_spaces_and_keeps_values() {
-        let body = Body::from_value(Some(&json!({
-            "encoding": "utf8",
-            "size": 13,
-            "content": "{\"a\":1,\"b\":[2,3]}",
-        })));
+        let body = view(utf8(13, "{\"a\":1,\"b\":[2,3]}"));
         let pretty = body.pretty(Some("application/json")).unwrap();
         assert!(pretty.contains("\n  \"a\": 1,"), "两空格缩进：{pretty}");
         assert_eq!(body.raw, "{\"a\":1,\"b\":[2,3]}", "原文不动");
@@ -318,11 +320,7 @@ mod tests {
 
     #[test]
     fn invalid_json_has_no_pretty_state() {
-        let body = Body::from_value(Some(&json!({
-            "encoding": "utf8",
-            "size": 6,
-            "content": "{oops",
-        })));
+        let body = view(utf8(6, "{oops"));
         assert!(body.pretty(Some("application/json")).is_none());
         assert!(!body.can_pretty(Some("application/json")));
     }
@@ -343,50 +341,45 @@ mod tests {
 
     #[test]
     fn binary_and_omitted_have_only_raw_or_a_note() {
-        let binary = Body::from_value(Some(&json!({
-            "encoding": "base64",
-            "size": 6,
-            "content": "AAECAw==",
-        })));
+        let binary = view(RecordBody::Present {
+            encoding: "base64".to_owned(),
+            size: 6,
+            content: "AAECAw==".to_owned(),
+        });
         assert_eq!(binary.kind, Kind::Binary);
         assert!(binary.pretty(None).is_none());
         assert!(binary.note().unwrap().contains("二进制"));
 
-        let omitted = Body::from_value(Some(&json!({ "omitted": true, "size": 400_000 })));
+        let omitted = view(RecordBody::Omitted {
+            omitted: true,
+            size: 400_000,
+        });
         assert_eq!(omitted.kind, Kind::Omitted);
         assert!(omitted.pretty(None).is_none());
         assert!(omitted.note().unwrap().contains("未记录"));
 
-        let absent = Body::from_value(Some(&serde_json::Value::Null));
+        let absent = Body::from_record(None);
         assert_eq!(absent.kind, Kind::Absent);
         assert!(absent.note().is_none());
     }
 
     #[test]
     fn bodies_over_64_kib_skip_pretty() {
-        let big = json!({
-            "encoding": "utf8",
-            "size": PRETTY_LIMIT,
-            "content": format!("{{\"pad\":\"{}\"}}", "x".repeat(PRETTY_LIMIT as usize)),
-        });
-        let body = Body::from_value(Some(&big));
+        let big = utf8(
+            PRETTY_LIMIT,
+            &format!("{{\"pad\":\"{}\"}}", "x".repeat(PRETTY_LIMIT as usize)),
+        );
+        let body = view(big);
         assert!(body.pretty(Some("application/json")).is_none(), "超过 64 KiB 不美化");
         // 边界内（64 KiB 整）仍可美化：阈值按 `size` 与内容长度的较大者算，这里是 size 超了
-        let ok = json!({
-            "encoding": "utf8",
-            "size": 1024,
-            "content": "{\"a\":1}",
-        });
-        assert!(Body::from_value(Some(&ok)).pretty(Some("application/json")).is_some());
+        assert!(view(utf8(1024, "{\"a\":1}"))
+            .pretty(Some("application/json"))
+            .is_some());
     }
 
     #[test]
     fn plain_text_has_no_pretty_state() {
-        let body = Body::from_value(Some(&json!({
-            "encoding": "utf8",
-            "size": 5,
-            "content": "hello",
-        })));
+        let body = view(utf8(5, "hello"));
         assert!(body.pretty(Some("text/plain")).is_none(), "纯文本不重排");
     }
 

@@ -1,16 +1,17 @@
 //! HAR 1.2 导出（EB-DESIGN-004 §9 问题 2）：只含我们记录到的字段。
 //!
-//! 与桌面 `ops.rs` 的 `har_from_records` 同形（那一份自己注释「自 web 传输面原样移植」），
-//! 这里只做纯函数：记录 JSON 进、`Value` 出，落盘与界面都不掺进来，好单测。
+//! 输入是 typed [`Record`]（不读取任何 JSON 中间形态）；输出是一份 HAR 文档 ——
+//! HAR 本身就是 JSON 文件格式，这里的一次编码属于**落盘边界**，不是进程内传输。
+//! 纯函数，落盘与界面都不掺进来，好单测。
 
+use std::sync::Arc;
+
+use envboard_protocol::{Record, RecordBody};
 use serde_json::{json, Value};
 
 /// 拼一整个 HAR：`log.version` 固定 1.2，creator 写本进程版本。
-pub fn har(env: &str, records: &[Value]) -> Value {
-    let entries: Vec<Value> = records
-        .iter()
-        .filter_map(entry_of)
-        .collect();
+pub fn har(env: &str, records: &[Arc<Record>]) -> Value {
+    let entries: Vec<Value> = records.iter().filter_map(|record| entry_of(record)).collect();
     json!({
         "log": {
             "version": "1.2",
@@ -22,57 +23,57 @@ pub fn har(env: &str, records: &[Value]) -> Value {
     })
 }
 
-/// 一条记录 → 一条 entry；缺 `request` 或 `response` 的记录（比如以错误收尾的那条）
-/// 直接跳过——HAR 没有「无响应」的表达，硬塞一个空 response 会把下游解析器带偏。
-/// 注意 `response` 在记录里是 `null` 而不是缺键，所以要按 `is_null` 判。
-fn entry_of(record: &Value) -> Option<Value> {
-    let request = record.get("request")?;
-    let response = record.get("response").filter(|response| !response.is_null())?;
+/// 一条记录 → 一条 entry；无响应的记录（比如以错误收尾的那条）直接跳过——
+/// HAR 没有「无响应」的表达，硬塞一个空 response 会把下游解析器带偏。
+fn entry_of(record: &Record) -> Option<Value> {
+    let response = record.response.as_ref()?;
 
     // 抓包记录 v2 起 path 与 query 分存（query 不带前导 `?`）；URL 必须拼回查询串，
-    // 否则导出丢参数。更老的记录没有 query 字段，按空串处理。
-    let query = request.get("query").and_then(Value::as_str).unwrap_or("");
+    // 否则导出丢参数。
     let url = format!(
         "http://{}{}{}",
-        request.get("authority").and_then(Value::as_str).unwrap_or(""),
-        request.get("path").and_then(Value::as_str).unwrap_or(""),
-        if query.is_empty() {
+        record.request.authority,
+        record.request.path,
+        if record.request.query.is_empty() {
             String::new()
         } else {
-            format!("?{query}")
+            format!("?{}", record.request.query)
         },
     );
 
     Some(json!({
         // HAR 要 ISO-8601；我们记的是毫秒数，原样写成字符串并保留毫秒（v2 才补 ISO 格式）。
-        "startedDateTime": record
-            .get("time")
-            .and_then(Value::as_u64)
-            .map(|ms| ms.to_string())
-            .unwrap_or_default(),
+        "startedDateTime": if record.time == 0 {
+            String::new()
+        } else {
+            record.time.to_string()
+        },
         "time": 0,
         "_envboard": {
-            "session": record.get("session").cloned().unwrap_or(Value::Null),
-            "request_id": record.get("request_id").cloned().unwrap_or(Value::Null),
+            "session": record.session,
+            "request_id": record.request_id,
         },
         "request": {
-            "method": request.get("method").cloned().unwrap_or(Value::Null),
+            "method": record.request.method,
             "url": url,
             "httpVersion": "HTTP/1.1",
-            "headers": headers(request.get("headers")),
+            "headers": headers(&record.request.headers),
             "queryString": [],
             "headersSize": -1,
-            "bodySize": body_size(request.get("body")),
-            "postData": content(request.get("body").unwrap_or(&Value::Null)),
+            "bodySize": body_size(record.request.body.as_ref()),
+            "postData": content(record.request.body.as_ref()),
         },
         "response": {
-            "status": response.get("status").cloned().unwrap_or(Value::Null),
+            "status": match response.status {
+                Some(status) => json!(status),
+                None => Value::Null,
+            },
             "statusText": "",
             "httpVersion": "HTTP/1.1",
-            "headers": headers(response.get("headers")),
-            "content": content(response.get("body").unwrap_or(&Value::Null)),
+            "headers": headers(&response.headers),
+            "content": content(response.body.as_ref()),
             "headersSize": -1,
-            "bodySize": body_size(response.get("body")),
+            "bodySize": body_size(response.body.as_ref()),
             "redirectURL": "",
         },
         "cache": {},
@@ -81,36 +82,32 @@ fn entry_of(record: &Value) -> Option<Value> {
 }
 
 /// 正文块：`omitted`（超后端上限）只留体积，`content` 照原文给（base64 的也原样带走）。
-fn content(body: &Value) -> Value {
-    let size = body.get("size").and_then(Value::as_u64).unwrap_or(0);
-    if body.get("omitted").is_some() {
-        return json!({"size": size, "mimeType": null, "text": null});
-    }
-    let text = body.get("content").and_then(Value::as_str).unwrap_or("");
-    json!({"size": size, "mimeType": null, "text": text})
-}
-
-fn body_size(body: Option<&Value>) -> Value {
-    body.and_then(|body| body.get("size"))
-        .cloned()
-        .unwrap_or(json!(-1))
-}
-
-/// `[[k, v], …]` → `[{name, value}, …]`；形状不对的整条丢掉，不猜。
-fn headers(value: Option<&Value>) -> Value {
-    let Some(pairs) = value.and_then(Value::as_array) else {
-        return Value::Array(Vec::new());
+fn content(body: Option<&RecordBody>) -> Value {
+    let Some(body) = body else {
+        return json!({"size": 0, "mimeType": null, "text": ""});
     };
+    match body {
+        RecordBody::Omitted { size, .. } => json!({"size": size, "mimeType": null, "text": null}),
+        RecordBody::Present { size, content, .. } => {
+            json!({"size": size, "mimeType": null, "text": content})
+        }
+    }
+}
+
+/// 正文的字节数；没有正文给 -1（不编数字）。
+fn body_size(body: Option<&RecordBody>) -> Value {
+    match body {
+        Some(body) => json!(body.size()),
+        None => json!(-1),
+    }
+}
+
+/// `[(k, v), …]` → `[{name, value}, …]`。
+fn headers(pairs: &[(String, String)]) -> Value {
     Value::Array(
         pairs
             .iter()
-            .filter_map(|pair| {
-                let items = pair.as_array()?;
-                Some(json!({
-                    "name": items.first().cloned().unwrap_or(Value::Null),
-                    "value": items.get(1).cloned().unwrap_or(Value::Null),
-                }))
-            })
+            .map(|(name, value)| json!({"name": name, "value": value}))
             .collect(),
     )
 }
@@ -118,39 +115,49 @@ fn headers(value: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use envboard_protocol::{RecordError, RecordRequest, RecordResponse};
 
-    fn record(id: u64, query: &str) -> Value {
-        json!({
-            "version": 2,
-            "session": 7,
-            "request_id": id,
-            "time": 1_700_000_000_123u64,
-            "request": {
-                "method": "GET",
-                "path": "/v1/orders",
-                "query": query,
-                "authority": "api.example.com",
-                "headers": [["accept", "application/json"]],
-                "body": null,
+    fn record(id: u64, query: &str) -> Record {
+        Record {
+            version: 2,
+            session: 7,
+            request_id: id,
+            time: 1_700_000_000_123,
+            duration_ms: 4,
+            request: RecordRequest {
+                method: "GET".to_owned(),
+                path: "/v1/orders".to_owned(),
+                query: query.to_owned(),
+                authority: "api.example.com".to_owned(),
+                headers: vec![("accept".to_owned(), "application/json".to_owned())],
+                body: None,
             },
-            "response": {
-                "status": 200,
-                "headers": [["content-type", "application/json"]],
-                "body": {"encoding": "utf8", "size": 11, "content": "{\"ok\":true}"},
-            },
-            "error": null,
-        })
+            response: Some(RecordResponse {
+                status: Some(200),
+                headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+                body: Some(RecordBody::Present {
+                    encoding: "utf8".to_owned(),
+                    size: 11,
+                    content: "{\"ok\":true}".to_owned(),
+                }),
+            }),
+            error: None,
+        }
+    }
+
+    fn records(items: Vec<Record>) -> Vec<Arc<Record>> {
+        items.into_iter().map(Arc::new).collect()
     }
 
     #[test]
     fn url_keeps_query_string() {
-        let with_query = har("proxy-a", &[record(1, "page=2")]);
+        let with_query = har("proxy-a", &records(vec![record(1, "page=2")]));
         let url = with_query["log"]["entries"][0]["request"]["url"]
             .as_str()
             .unwrap_or_default();
         assert_eq!(url, "http://api.example.com/v1/orders?page=2");
         // 没有查询串时不留孤零零的 `?`
-        let plain = har("proxy-a", &[record(2, "")]);
+        let plain = har("proxy-a", &records(vec![record(2, "")]));
         assert_eq!(
             plain["log"]["entries"][0]["request"]["url"]
                 .as_str()
@@ -161,7 +168,7 @@ mod tests {
 
     #[test]
     fn header_and_meta_shapes() {
-        let with_headers = har("proxy-a", &[record(3, "")]);
+        let with_headers = har("proxy-a", &records(vec![record(3, "")]));
         let entry = &with_headers["log"]["entries"][0];
         assert_eq!(entry["request"]["headers"][0]["name"], "accept");
         assert_eq!(entry["request"]["headers"][0]["value"], "application/json");
@@ -177,22 +184,45 @@ mod tests {
 
     #[test]
     fn omitted_body_has_no_text_and_errors_are_skipped() {
-        let omitted = json!({
-            "request_id": 4,
-            "time": 1u64,
-            "request": {"method": "POST", "path": "/x", "authority": "h", "headers": []},
-            "response": {"status": 200, "headers": [], "body": {"omitted": true, "size": 300_000}},
-            "error": null,
-        });
+        let omitted = Record {
+            version: 2,
+            session: 7,
+            request_id: 4,
+            time: 1,
+            duration_ms: 0,
+            request: RecordRequest {
+                method: "POST".to_owned(),
+                path: "/x".to_owned(),
+                authority: "h".to_owned(),
+                ..RecordRequest::default()
+            },
+            response: Some(RecordResponse {
+                status: Some(200),
+                headers: Vec::new(),
+                body: Some(RecordBody::Omitted {
+                    omitted: true,
+                    size: 300_000,
+                }),
+            }),
+            error: None,
+        };
         // 收尾错误的那条没有 response，HAR 表达不了，跳过
-        let failed = json!({
-            "request_id": 5,
-            "time": 2u64,
-            "request": {"method": "GET", "path": "/y", "authority": "h", "headers": []},
-            "response": null,
-            "error": "connection reset",
-        });
-        let exported = har("proxy-a", &[omitted, failed]);
+        let failed = Record {
+            version: 2,
+            session: 7,
+            request_id: 5,
+            time: 2,
+            duration_ms: 0,
+            request: RecordRequest {
+                method: "GET".to_owned(),
+                path: "/y".to_owned(),
+                authority: "h".to_owned(),
+                ..RecordRequest::default()
+            },
+            response: None,
+            error: Some(RecordError::Text("connection reset".to_owned())),
+        };
+        let exported = har("proxy-a", &records(vec![omitted, failed]));
         assert_eq!(exported["log"]["entries"].as_array().map(Vec::len), Some(1));
         assert_eq!(exported["log"]["entries"][0]["response"]["content"]["size"], 300_000);
         assert_eq!(

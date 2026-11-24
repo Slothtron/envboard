@@ -224,7 +224,7 @@ impl ProxyEngine for EngineBackend {
         })
     }
 
-    fn capture_get(&self, env: &str, request_id: u64) -> Option<serde_json::Value> {
+    fn capture_get(&self, env: &str, request_id: u64) -> Option<std::sync::Arc<crate::Record>> {
         let guard = self.entries.lock().unwrap();
         let engine = guard.get(env)?.engine.as_ref()?;
         engine.shared_handle().capture.get(request_id)

@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::ports::LineWriter;
 use crate::proxy::{CoreInfo, Listen};
 use crate::sha256;
-use crate::{CaptureDelta, CaptureRows, CaptureView};
+use crate::{CaptureDelta, CaptureRows, CaptureView, Record};
 
 /// 启动/热更一个引擎实例所需的全部输入（一等字段，没有透传通道）。
 #[derive(Clone)]
@@ -201,7 +201,7 @@ pub trait ProxyEngine: Send + Sync {
     }
 
     /// 单条抓包详情（全缓冲查找；后写优先）。None = 记录不在缓冲或实例不在跑。
-    fn capture_get(&self, _env: &str, _request_id: u64) -> Option<serde_json::Value> {
+    fn capture_get(&self, _env: &str, _request_id: u64) -> Option<std::sync::Arc<Record>> {
         None
     }
 

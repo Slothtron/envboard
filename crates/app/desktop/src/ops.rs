@@ -8,6 +8,7 @@
 use envboard_admin::AdminService;
 use envboard_engine::{Error, ErrorCode};
 use envboard_host::{CaControl, StorePresence};
+use envboard_protocol::{DebugStartReq, EnvCreateReq, EnvPatchReq, ProxyPutReq};
 use serde_json::{Value, json};
 
 /// 命令核的统一返回：成功 = wire 形状的 JSON，失败 = 门面错误信封。
@@ -15,6 +16,16 @@ pub type OpsResult = Result<Value, Error>;
 
 fn value<T: serde::Serialize>(item: T) -> OpsResult {
     serde_json::to_value(item).map_err(|error| Error::internal_error(error.to_string()))
+}
+
+/// 传输层解码：命令收到的仍是 JSON，**先解成 typed 请求**再进门面。
+///
+/// 这是退役中的桌面 adapter 的内部动作（NSH 直接构造 typed 请求，不经过这里）；
+/// 错误信封与门面自己解码时逐字一致（`invalid_config` + `request`）。
+fn decode_request<T: serde::de::DeserializeOwned>(body: &Value) -> Result<T, Error> {
+    serde_json::from_value(body.clone()).map_err(|error| {
+        Error::invalid_config("request", format!("malformed request body: {error}"))
+    })
 }
 
 fn not_found(message: String) -> Error {
@@ -126,11 +137,13 @@ pub fn env_get(admin: &AdminService, name: &str) -> OpsResult {
 }
 
 pub fn env_create(admin: &AdminService, body: &Value) -> OpsResult {
-    value(admin.create(body)?)
+    let request: EnvCreateReq = decode_request(body)?;
+    value(admin.create(&request)?)
 }
 
 pub fn env_patch(admin: &AdminService, name: &str, patch: &Value) -> OpsResult {
-    value(admin.update(name, patch)?)
+    let request: EnvPatchReq = decode_request(patch)?;
+    value(admin.update(name, &request)?)
 }
 
 pub fn env_delete(admin: &AdminService, name: &str) -> OpsResult {
@@ -169,8 +182,9 @@ pub fn env_captures(admin: &AdminService, name: &str, limit: usize) -> OpsResult
 
 pub fn env_capture_detail(admin: &AdminService, name: &str, request_id: u64) -> OpsResult {
     // 全缓冲查找（不是 tail(1) 再比对 —— 只有最新一条查得到是旧实现的 bug）。
+    // 拿到的是 `Arc<Record>`（与引擎缓冲同一份对象），出口处编码成 wire 形状。
     match admin.capture_detail(name, request_id)? {
-        Some(record) => Ok(record),
+        Some(record) => value(record),
         None => Err(no_live_session(name)),
     }
 }
@@ -192,7 +206,11 @@ pub fn env_captures_export(admin: &AdminService, name: &str, format: &str) -> Op
             let mut body = envboard_events::header_line();
             body.push('\n');
             for record in &view.records {
-                body.push_str(&record.to_string());
+                // adapter 出口的一次编码（线上形状 = 历史 v2，逐键不变）。
+                let wire = serde_json::to_string(&**record).map_err(|error| {
+                    Error::internal_error(format!("record serialization failed: {error}"))
+                })?;
+                body.push_str(&wire);
                 body.push('\n');
             }
             Ok(json!({
@@ -201,7 +219,8 @@ pub fn env_captures_export(admin: &AdminService, name: &str, format: &str) -> Op
             }))
         }
         "har" => {
-            let har = har_from_records(name, &view.records);
+            let wire = to_wire_records(&view.records)?;
+            let har = har_from_records(name, &wire);
             let text = serde_json::to_string_pretty(&har).map_err(|error| {
                 Error::internal_error(format!("har serialization failed: {error}"))
             })?;
@@ -215,6 +234,21 @@ pub fn env_captures_export(admin: &AdminService, name: &str, format: &str) -> Op
             format!("format must be har or jsonl, got {other:?}"),
         )),
     }
+}
+
+/// 把 typed 记录编码成 wire 形状，喂给桌面自己那份「自 web 传输面移植」的 HAR 拼装。
+///
+/// 只有退役中的桌面 adapter 需要这一步：NSH 侧直接吃 typed 记录（`model::har`），
+/// 核心与管理面全程不碰 JSON。
+fn to_wire_records(records: &[std::sync::Arc<envboard_engine::Record>]) -> Result<Vec<Value>, Error> {
+    records
+        .iter()
+        .map(|record| {
+            serde_json::to_value(&**record).map_err(|error| {
+                Error::internal_error(format!("record serialization failed: {error}"))
+            })
+        })
+        .collect()
 }
 
 /// HAR 1.2 形状（自 web 传输面原样移植）：只含我们记录到的字段。
@@ -316,7 +350,9 @@ pub fn debug_get(admin: &AdminService) -> OpsResult {
 }
 
 pub fn debug_start(admin: &AdminService, env: &str) -> OpsResult {
-    value(admin.start_debug(&json!({"env": env}))?)
+    value(admin.start_debug(&DebugStartReq {
+        env: env.to_owned(),
+    })?)
 }
 
 pub fn debug_stop(admin: &AdminService) -> OpsResult {
@@ -372,7 +408,8 @@ pub fn proxies_list(admin: &AdminService) -> OpsResult {
 }
 
 pub fn proxies_put(admin: &AdminService, body: &Value) -> OpsResult {
-    value(admin.proxy_put(body)?)
+    let request: ProxyPutReq = decode_request(body)?;
+    value(admin.proxy_put(&request)?)
 }
 
 pub fn proxies_delete(admin: &AdminService, name: &str) -> OpsResult {

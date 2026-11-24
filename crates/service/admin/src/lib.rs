@@ -15,10 +15,12 @@
 //!   `envboard-desktop` 的 IPC 命令调用。capabilities 圈禁与 CSP 是 Tauri 绑定的
 //!   职责（安全约定见 `envboard-protocol` crate 文档）。历次换传输
 //!   （GPUI → web → Tauri）门面零漂移，是这条拆分的直接兑现。
-//! - **请求体是 JSON `Value`，不是结构体参数**：写动作收 `&Value`，先过
-//!   [`protocol`](envboard_protocol) 的类型化请求 DTO（`deny_unknown_fields`，
-//!   未知字段响亮拒绝 → `invalid_config` + `field` 指向具体路径），再转发
-//!   manager。界面不需要（也不许）自己拼领域对象。
+//! - **入参出参都是 typed DTO，不是 JSON `Value`**：写动作收 `envboard-protocol`
+//!   的请求结构（`EnvCreateReq` / `EnvPatchReq` / `ProxyPutReq` / `DebugStartReq`，
+//!   `deny_unknown_fields`，未知字段响亮拒绝 → `invalid_config` + `field` 指向
+//!   具体路径）。形状校验在适配器解码时就完成；manager 的账本仍是 JSON
+//!   （`state.db` 的 disk-of-record），门面只在持久化边界做一次编码。
+//!   界面不需要（也不许）自己拼领域对象。
 //! - **统一错误信封**：所有失败以 [`Error`] 返回
 //!   `{code, message, field?}`；码表与可重试性见 `envboard-engine::api::error`
 //!   模块文档。界面只翻译不判定。
@@ -129,7 +131,7 @@ use std::sync::Arc;
 
 use envboard_engine::Error;
 use envboard_manager::Manager;
-use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 
 /// Admin API 的服务面：包一个 [`Manager`]，一域一模块（见各文件头注释）。
@@ -143,13 +145,14 @@ impl AdminService {
         Self { manager }
     }
 
-    /// 从裸 JSON 解析类型化请求；失败归 `invalid_config`（field 指向请求体）。
+    /// 把 typed 请求落成**账本形状**（`state.db` 里存的就是这份 JSON）。
     ///
-    /// DTO 只做**形状**校验（键集合与类型）；字段级语义校验仍归 domain
-    /// （`Environment::from_json` 等），两层共用同一份词汇。
-    fn parse_request<T: DeserializeOwned>(field: &str, body: &Value) -> Result<T, Error> {
-        serde_json::from_value(body.clone()).map_err(|error| {
-            Error::invalid_config(field, format!("malformed request body: {error}"))
+    /// 这是持久化边界的一次编码，不是进程内传输格式：门面的入参出参全是
+    /// `envboard-protocol` 的 typed DTO，只有 manager 的账本（disk-of-record）
+    /// 仍然是 JSON —— 它要跨版本读回、要能被人直接看。
+    fn ledger_value<T: Serialize>(request: &T) -> Result<Value, Error> {
+        serde_json::to_value(request).map_err(|error| {
+            Error::invalid_config("request", format!("malformed request body: {error}"))
         })
     }
 }

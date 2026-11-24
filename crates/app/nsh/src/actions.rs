@@ -145,7 +145,10 @@ pub fn create(cx: Ctx) {
         }
         format!("env-{n:02}")
     };
-    match service::create(serde_json::json!({ "name": next })) {
+    match service::create(&envboard_protocol::EnvCreateReq {
+        name: next,
+        ..Default::default()
+    }) {
         Ok(_) => {
             refresh(cx);
             succeed(cx, "已新建环境");

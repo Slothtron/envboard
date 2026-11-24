@@ -1,8 +1,9 @@
-//! 一条抓包记录的形状（从 `capture_detail` 的 JSON 直接读）。
+//! 一条抓包记录的形状（从 typed `Record` 直接读，不经过 JSON）。
 //!
 //! 解析**宽容**：字段缺了给中性值，不 panic、也不猜——详情面板宁可少一行，
 //! 不能因为某条记录的头字段形状怪就整块报错。正文三形状交给 `body::Body`。
 
+use envboard_protocol::Record;
 use envboard_ui::primitives::Tone;
 
 use crate::model::body::Body;
@@ -30,42 +31,29 @@ pub struct Detail {
 }
 
 impl Detail {
-    pub fn from_value(value: &serde_json::Value) -> Self {
-        let request = value.get("request");
-        let response = value.get("response");
-        let text = |v: Option<&serde_json::Value>, key: &str| {
-            v.and_then(|v| v.get(key))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
-        let request_headers = headers_of(request);
-        let response_headers = headers_of(response);
+    /// 从记录本体读出一屏详情（headers 与两侧正文都在）。
+    pub fn from_record(record: &Record) -> Self {
+        let response = record.response.as_ref();
+        let request_headers = record.request.headers.clone();
+        let response_headers = response
+            .map(|response| response.headers.clone())
+            .unwrap_or_default();
         Detail {
-            request_id: value
-                .get("request_id")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-            time_ms: value
-                .get("time")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-            method: text(request, "method"),
-            authority: text(request, "authority"),
-            path: text(request, "path"),
-            query: text(request, "query"),
-            status: response
-                .and_then(|r| r.get("status"))
-                .and_then(serde_json::Value::as_u64)
-                .map(|s| s as u16),
-            error: value.get("error").filter(|e| !e.is_null()).map(|e| match e {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }),
+            request_id: record.request_id,
+            time_ms: record.time,
+            method: record.request.method.clone(),
+            authority: record.request.authority.clone(),
+            path: record.request.path.clone(),
+            query: record.request.query.clone(),
+            status: response.and_then(|response| response.status),
+            error: record
+                .error
+                .as_ref()
+                .map(envboard_protocol::RecordError::text),
             request_content_type: content_type_of(&request_headers),
             response_content_type: content_type_of(&response_headers),
-            request_body: Body::from_value(request.and_then(|r| r.get("body"))),
-            response_body: Body::from_value(response.and_then(|r| r.get("body"))),
+            request_body: Body::from_record(record.request.body.as_ref()),
+            response_body: Body::from_record(response.and_then(|response| response.body.as_ref())),
             request_headers,
             response_headers,
         }
@@ -126,23 +114,6 @@ impl Detail {
     }
 }
 
-fn headers_of(value: Option<&serde_json::Value>) -> Vec<(String, String)> {
-    let Some(list) = value
-        .and_then(|v| v.get("headers"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Vec::new();
-    };
-    list.iter()
-        .filter_map(|pair| {
-            let pair = pair.as_array()?;
-            let name = pair.first()?.as_str()?;
-            let value = pair.get(1)?.as_str().unwrap_or_default();
-            Some((name.to_owned(), value.to_owned()))
-        })
-        .collect()
-}
-
 /// content-type 取原值（不带参数），大小写不敏感地找。
 fn content_type_of(headers: &[(String, String)]) -> Option<String> {
     headers
@@ -154,34 +125,45 @@ fn content_type_of(headers: &[(String, String)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use envboard_protocol::{Record, RecordBody, RecordRequest, RecordResponse};
 
-    fn record() -> serde_json::Value {
-        json!({
-            "version": 2,
-            "session": 7,
-            "request_id": 42,
-            "time": 1_700_000_000_123u64,
-            "request": {
-                "method": "POST",
-                "path": "/v1/orders",
-                "query": "page=2",
-                "authority": "api.example.com",
-                "headers": [["Content-Type", "application/json"], ["X-Trace", "a"]],
-                "body": {"encoding": "utf8", "size": 12, "content": "{\"n\":1,\"m\":2}"},
+    fn record() -> Record {
+        Record {
+            version: 2,
+            session: 7,
+            request_id: 42,
+            time: 1_700_000_000_123,
+            duration_ms: 9,
+            request: RecordRequest {
+                method: "POST".to_owned(),
+                path: "/v1/orders".to_owned(),
+                query: "page=2".to_owned(),
+                authority: "api.example.com".to_owned(),
+                headers: vec![
+                    ("Content-Type".to_owned(), "application/json".to_owned()),
+                    ("X-Trace".to_owned(), "a".to_owned()),
+                ],
+                body: Some(RecordBody::Present {
+                    encoding: "utf8".to_owned(),
+                    size: 12,
+                    content: "{\"n\":1,\"m\":2}".to_owned(),
+                }),
             },
-            "response": {
-                "status": 502,
-                "headers": [["content-type", "text/html; charset=utf-8"]],
-                "body": {"omitted": true, "size": 400_000},
-            },
-            "error": null,
-        })
+            response: Some(RecordResponse {
+                status: Some(502),
+                headers: vec![("content-type".to_owned(), "text/html; charset=utf-8".to_owned())],
+                body: Some(RecordBody::Omitted {
+                    omitted: true,
+                    size: 400_000,
+                }),
+            }),
+            error: None,
+        }
     }
 
     #[test]
     fn parses_record_with_bodies_and_headers() {
-        let d = Detail::from_value(&record());
+        let d = Detail::from_record(&record());
         assert_eq!(d.request_id, 42);
         assert_eq!(d.method, "POST");
         assert_eq!(d.url(), "https://api.example.com/v1/orders?page=2");
@@ -200,19 +182,33 @@ mod tests {
 
     #[test]
     fn missing_fields_stay_neutral() {
-        let d = Detail::from_value(&json!({ "request_id": 1 }));
+        let d = Detail::from_record(&Record {
+            request_id: 1,
+            ..Record::default()
+        });
         assert_eq!(d.status, None);
         assert_eq!(d.status_text(), "—");
         assert!(d.request_headers.is_empty());
         assert_eq!(d.time_text(), "—");
         assert_eq!(d.url(), "https://");
-        // error 非 null 时状态列写 ERR，哪怕有状态码
-        let d = Detail::from_value(&json!({
-            "request_id": 2,
-            "request": {"method": "GET", "path": "/x", "authority": "a"},
-            "response": {"status": 200, "headers": []},
-            "error": "connection reset",
-        }));
+        // error 非 none 时状态列写 ERR，哪怕有状态码
+        let d = Detail::from_record(&Record {
+            request_id: 2,
+            request: RecordRequest {
+                method: "GET".to_owned(),
+                path: "/x".to_owned(),
+                authority: "a".to_owned(),
+                ..RecordRequest::default()
+            },
+            response: Some(RecordResponse {
+                status: Some(200),
+                ..RecordResponse::default()
+            }),
+            error: Some(envboard_protocol::RecordError::Text(
+                "connection reset".to_owned(),
+            )),
+            ..Record::default()
+        });
         assert_eq!(d.status_text(), "ERR");
         assert_eq!(d.status_tone(), Tone::Critical);
         assert_eq!(d.error.as_deref(), Some("connection reset"));

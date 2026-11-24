@@ -11,7 +11,15 @@
 use std::path::PathBuf;
 
 use envboard_host::HostOptions;
-use serde_json::json;
+use envboard_protocol::EnvCreateReq;
+
+/// 只给名字的建请求（端口交给管理器随机分）。
+fn named(name: &str) -> EnvCreateReq {
+    EnvCreateReq {
+        name: name.to_owned(),
+        ..Default::default()
+    }
+}
 
 fn state_dir() -> PathBuf {
     std::env::temp_dir().join("eb-m3-gui")
@@ -48,8 +56,8 @@ fn list_read_write_round_trip() {
         assert!(admin.list().expect("list").is_empty());
 
         // 建两条（端口由管理器在区间里随机分）。
-        let a = admin.create(&json!({ "name": "alpha" })).expect("create alpha");
-        let b = admin.create(&json!({ "name": "beta" })).expect("create beta");
+        let a = admin.create(&named("alpha")).expect("create alpha");
+        let b = admin.create(&named("beta")).expect("create beta");
         assert_eq!(a.health, "stopped");
         assert_ne!(a.listen.port, b.listen.port, "两个环境不该分到同一个端口");
 
@@ -67,9 +75,9 @@ fn list_read_write_round_trip() {
         assert_eq!(rows.len(), 2);
 
         // 错误信封：重名、坏名字都必须是 Error（code + message），不是 panic。
-        let dup = admin.create(&json!({ "name": "beta" })).unwrap_err();
+        let dup = admin.create(&named("beta")).unwrap_err();
         assert!(!dup.message.is_empty(), "错误必须带人话 message：{dup:?}");
-        let bad = admin.create(&json!({ "name": "has space / slash" })).unwrap_err();
+        let bad = admin.create(&named("has space / slash")).unwrap_err();
         assert!(!bad.code.as_str().is_empty());
 
         // 删一条：列表少一行，再读一次确认真的没了。

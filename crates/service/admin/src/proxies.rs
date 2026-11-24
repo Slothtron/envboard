@@ -2,7 +2,6 @@
 
 use envboard_engine::Error;
 use envboard_protocol::{ProxyPutReq, ProxyView};
-use serde_json::Value;
 
 use super::AdminService;
 
@@ -15,10 +14,10 @@ impl AdminService {
         self.manager.proxy_get(name)
     }
 
-    /// `POST /api/proxies`（put 语义）：入口先过 `ProxyPutReq` 形状校验。
-    pub fn proxy_put(&self, body: &Value) -> Result<ProxyView, Error> {
-        Self::parse_request::<ProxyPutReq>("request", body)?;
-        self.manager.proxy_put(body)
+    /// `POST /api/proxies`（put 语义）：请求体是 typed `ProxyPutReq`。
+    pub fn proxy_put(&self, request: &ProxyPutReq) -> Result<ProxyView, Error> {
+        let body = Self::ledger_value(request)?;
+        self.manager.proxy_put(&body)
     }
 
     pub fn proxy_delete(&self, name: &str) -> Result<(), Error> {

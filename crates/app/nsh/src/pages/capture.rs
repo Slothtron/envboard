@@ -14,7 +14,9 @@
 
 use std::time::Duration;
 
-use envboard_protocol::CaptureRow;
+use envboard_protocol::{
+    CaptureRow, Record, RecordBody, RecordRequest, RecordResponse,
+};
 use nsh_core::prelude::*;
 
 use envboard_ui::primitives as ui;
@@ -924,11 +926,11 @@ fn open_detail(cap: Cap, request_id: u64) {
     }
     spawn(async move {
         match service::capture_detail_async(name, request_id).await {
-            Ok(Ok(Some(value))) => {
+            Ok(Ok(Some(record))) => {
                 // 用户可能在取详情期间点了别的行或关掉抽屉：只回填还停在这一条上的那次。
                 if cap.selected.get() == Some(request_id) {
                     cap.detail
-                        .set(Some(DetailView::build(Detail::from_value(&value))));
+                        .set(Some(DetailView::build(Detail::from_record(&record))));
                 }
             }
             Ok(Ok(None)) => {
@@ -1487,29 +1489,47 @@ fn fixture_detail() -> Detail {
     let response_body = if crate::harness_flag("NG_CAPTURE_BIG") {
         let content = big_body();
         let size = content.len() as u64;
-        serde_json::json!({"encoding": "utf8", "size": size, "content": content})
+        RecordBody::Present {
+            encoding: "utf8".to_owned(),
+            size,
+            content,
+        }
     } else {
-        serde_json::json!({"encoding": "utf8", "size": 21, "content": "{\"ok\":true,\"items\":[1]}"})
+        RecordBody::Present {
+            encoding: "utf8".to_owned(),
+            size: 21,
+            content: "{\"ok\":true,\"items\":[1]}".to_owned(),
+        }
     };
-    let value = serde_json::json!({
-        "request_id": 1,
-        "time": 1_700_000_000_000u64,
-        "request": {
-            "method": "POST",
-            "path": "/v1/orders",
-            "query": "page=2",
-            "authority": "api.example.com",
-            "headers": [["content-type", "application/json"], ["x-trace", "m5"]],
-            "body": {"encoding": "utf8", "size": 13, "content": "{\"id\":1,\"n\":2}"},
+    let record = Record {
+        version: 2,
+        session: 1,
+        request_id: 1,
+        time: 1_700_000_000_000,
+        duration_ms: 7,
+        request: RecordRequest {
+            method: "POST".to_owned(),
+            path: "/v1/orders".to_owned(),
+            query: "page=2".to_owned(),
+            authority: "api.example.com".to_owned(),
+            headers: vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("x-trace".to_owned(), "m5".to_owned()),
+            ],
+            body: Some(RecordBody::Present {
+                encoding: "utf8".to_owned(),
+                size: 13,
+                content: "{\"id\":1,\"n\":2}".to_owned(),
+            }),
         },
-        "response": {
-            "status": 200,
-            "headers": [["content-type", "application/json"]],
-            "body": response_body,
-        },
-        "error": null,
-    });
-    Detail::from_value(&value)
+        response: Some(RecordResponse {
+            status: Some(200),
+            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+            body: Some(response_body),
+        }),
+        error: None,
+    };
+    Detail::from_record(&record)
 }
 
 /// 分块渲染的看板样本：40 KiB 的 JSON 数组（原文就超 32 KiB，美化后更长）。

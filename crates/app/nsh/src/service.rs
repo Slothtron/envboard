@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use envboard_admin::AdminService;
 use envboard_engine::Error;
 use envboard_host::{CaControl, HostOptions, Prepared, StorePresence};
-use envboard_protocol::{CaptureRows, EnvView};
+use envboard_protocol::{CaptureRows, DebugStartReq, EnvCreateReq, EnvView, Record};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
@@ -103,9 +103,9 @@ pub fn list() -> Result<Vec<EnvView>, Error> {
     }
 }
 
-pub fn create(body: serde_json::Value) -> Result<EnvView, Error> {
+pub fn create(request: &EnvCreateReq) -> Result<EnvView, Error> {
     match service() {
-        Some(s) => s.admin.create(&body),
+        Some(s) => s.admin.create(request),
         None => Err(Error::internal_error("宿主尚未启动")),
     }
 }
@@ -134,20 +134,22 @@ pub fn capture_rows(name: &str, after: u64, limit: usize) -> Result<Option<Captu
     }
 }
 
-/// 单条抓包详情（完整记录，含 headers 与正文三形状）。
-pub fn capture_detail(name: &str, request_id: u64) -> Result<Option<serde_json::Value>, Error> {
+/// 单条抓包详情（完整记录本体，含 headers 与正文三形状）。
+///
+/// 拿到的是 `Arc<Record>` —— 引擎缓冲里那一份的句柄，不做深拷贝。
+pub fn capture_detail(name: &str, request_id: u64) -> Result<Option<Arc<Record>>, Error> {
     match service() {
         Some(s) => s.admin.capture_detail(name, request_id),
         None => Err(Error::internal_error("宿主尚未启动")),
     }
 }
 
-/// 详情页用的异步形态：合并大记录的 headers 与正文要拷贝，放到线程上做，
+/// 详情页用的异步形态：`Body` 的文本化（BASE64 解码 / JSON 重排）在线程上做，
 /// 让点击那一帧先把骨架画出来（ADR-8「点行 ≤200ms 出骨架」）。
 pub fn capture_detail_async(
     name: String,
     request_id: u64,
-) -> oneshot::Receiver<Result<Option<serde_json::Value>, Error>> {
+) -> oneshot::Receiver<Result<Option<Arc<Record>>, Error>> {
     off_thread(move || capture_detail(&name, request_id))
 }
 
@@ -155,7 +157,9 @@ pub fn capture_detail_async(
 /// 开启抓包：工作区级单例会话切到这个环境（环境得先在跑）。
 pub fn start_debug(name: &str) -> Result<envboard_protocol::DebugView, Error> {
     match service() {
-        Some(s) => s.admin.start_debug(&serde_json::json!({ "env": name })),
+        Some(s) => s.admin.start_debug(&DebugStartReq {
+            env: name.to_owned(),
+        }),
         None => Err(Error::internal_error("宿主尚未启动")),
     }
 }
