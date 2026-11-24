@@ -15,6 +15,9 @@ mod shell;
 // N1（方案 §5.3 单实例）：preflight 是产品行为，不在 harness 后面 —— 发布物也要
 // 拦住第二个写者。
 pub mod single_instance;
+// T2（方案 §6）：托盘是产品的常驻形态（关窗即隐藏、单击唤出、计数 tooltip），
+// 同时是隐藏态降频的判据来源（`window_visible()`）。
+mod tray;
 // T1（P6）托盘探针：只在 harness 构建里存在，产品构建不编这段代码。
 #[cfg(feature = "harness")]
 pub mod tray_probe;

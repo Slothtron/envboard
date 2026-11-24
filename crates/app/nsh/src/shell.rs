@@ -9,8 +9,6 @@
 //! 写操作自己刷一次（`actions`），所以点完立刻变，不靠下一拍。`NG_GOLDEN=1` 时
 //! 不启宿主、用 `model::fixture()`——golden 要的是**像素**，不是账本内容。
 
-use std::time::Duration;
-
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 
@@ -189,6 +187,17 @@ pub fn App() -> impl IntoElement {
     // 主题的初值：`NG_DARK` 优先（golden 的深色用例），否则读用户偏好，
     // 都没有就跟随系统 —— 与桌面形态同一份 `ui.json`、同一套回退。
     let theme = signal(initial_theme(synthetic));
+    // 「关闭窗口时退出程序」：默认常驻（方案 §6.1 第 6 条）。有宿主时读用户的
+    // `ui.json`；没有宿主（golden / 压力）时不碰文件，取默认。
+    let close_to_tray = signal(
+        if synthetic {
+            true
+        } else {
+            service::ui_prefs_file()
+                .and_then(prefs::close_to_tray)
+                .unwrap_or(true)
+        },
+    );
 
     let cx = Ctx {
         envs,
@@ -203,6 +212,9 @@ pub fn App() -> impl IntoElement {
         confirm,
         theme,
         capture_env,
+        page,
+        captured: signal(0u64),
+        close_to_tray,
     };
 
     // 落地的外观：偏好是“跟随系统”时交给平台自己判，别在这里猜系统是深是浅。
@@ -229,11 +241,13 @@ pub fn App() -> impl IntoElement {
 
     if !synthetic && service::service().is_some() {
         // 第一拍同步读，窗口第一帧就有内容；之后在引擎线程上按定时器轮询。
+        // 间隔不是常数：窗口隐藏时 800 → 2000（T1 实测「隐藏不省 CPU」，
+        // 降频才有那 10 分钟的结论）。
         let generation = std::cell::Cell::new(0u64);
         poll_once(cx, &generation, true);
         spawn(async move {
             loop {
-                timer(Duration::from_millis(800)).await;
+                timer(crate::tray::snapshot_interval()).await;
                 match background(async { service::snapshot() }).await {
                     Ok(snap) => poll_snapshot(cx, &generation, snap),
                     Err(error) => cx.error.set(Some(format!("轮询任务失败：{error}"))),
@@ -242,11 +256,18 @@ pub fn App() -> impl IntoElement {
         });
     }
 
-    // T1（P6）托盘探针：只在 `NG_TRAY_PROBE=1` 的 harness 构建里挂托盘、
-    // 把「关窗」改成隐藏。产品构建没有这段。
+    // T1（P6）托盘探针优先：它要测的是「托盘行为能不能成立」，与产品托盘
+    // 同时挂会各挂一份图标。只在 `NG_TRAY_PROBE=1` 的 harness 构建里生效。
     #[cfg(feature = "harness")]
-    if crate::tray_probe::enabled() {
+    let probe = crate::tray_probe::enabled();
+    #[cfg(not(feature = "harness"))]
+    let probe = false;
+    if probe {
+        #[cfg(feature = "harness")]
         crate::tray_probe::install();
+    } else {
+        // T2：产品托盘（关窗即隐藏、单击唤出、菜单计数、tooltip）。
+        crate::tray::install(cx);
     }
 
     // N2（方案 §5.2）：二次启动的激活请求由等待线程记数，界面这边轮询取走并把

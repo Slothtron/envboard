@@ -13,8 +13,6 @@
 //!
 //! 页面生命周期 = 一次进入：返回环境列表即卸载，再进来从空表重新读。
 
-use std::time::Duration;
-
 use envboard_protocol::{
     CaptureRow, Record, RecordBody, RecordRequest, RecordResponse,
 };
@@ -44,13 +42,6 @@ const PAGE: usize = 500;
 /// 这是「显示窗口」而不是「缓冲副本」：引擎里可能留着 35k 行，界面只挂最新
 /// `ROWS_LIMIT` 行；再往前的历史不属于当前视图，切到更早的记录要先缩窗口。
 const ROWS_LIMIT: usize = 4000;
-/// 轻拍间隔：这一拍只比对版本号（一次哈希表查 + 一次原子读，不碰引擎缓冲）。
-///
-/// 名义值取 80ms 而不是 100ms：Windows 定时器有约 15.6ms 的粒度，`timer(100ms)`
-/// 实测定格在 ~109ms（10s 内只跳了 92 次），照 100ms 排会在边界上冒出 >100ms 的
-/// 出场延迟。80ms 名义值实测定格 ~87ms，最坏一拍仍 ≤100ms —— 这就是验收口径
-/// 「新记录 ≤100ms 出现」的余量来源。
-const POLL_MS: u64 = 80;
 
 /// 抓包会话的元数据（工具栏那条 chip 的全部信息）。
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -307,14 +298,19 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
             loaded: true,
             error: None,
         });
+        // 托盘上要显示这个数，和界面里的 chip 同源（T2，方案 §6.1 第 1 条）。
+        cap_info.ctx.captured.set(count as u64);
     } else {
-        // 首拍同步读（窗口第一帧就有内容），之后 100ms 一拍只看版本号：
+        // 首拍同步读（窗口第一帧就有内容），之后可见时 80ms 一拍只看版本号：
         // 版本没变（空闲）就什么都不做，变了才去读一段尾部窗口。
         // `spawn` 归当前 owner：返回环境列表时页面卸载，循环随之取消。
         spawn(async move {
             pull(cap_info);
             loop {
-                timer(Duration::from_millis(POLL_MS)).await;
+                // 间隔不是常数：窗口隐藏时 80 → 1000（T1 硬要求，见 `tray.rs`）。
+                // 版本号机制保证「有变化才读」，降频只推迟「后台新记录上屏」，
+                // 而窗口本来不可见。
+                timer(crate::tray::capture_poll_interval()).await;
                 if due(cap_info) {
                     pull(cap_info);
                 }
@@ -416,6 +412,9 @@ fn pull_once(cap: Cap, name: &str, limit: usize) -> bool {
                 meta.loaded = true;
                 meta.error = None;
             });
+            // 托盘的「捕获 N」跟着这个数走（T2，方案 §6.1 第 1 条）：只写信号，
+            // 托盘侧自己判断值变没变、变了才重建菜单。
+            cap.ctx.captured.set(batch.captured);
             let saturated = batch.rows.len() >= limit;
             // 缓冲按字节淘汰：比 `oldest` 老的行已经不在引擎里了，本地也不该留着。
             cap.rows.update(|rows| {

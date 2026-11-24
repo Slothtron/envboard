@@ -928,8 +928,8 @@ fn dash() -> String {
 // 对话框（焦点隔离、Esc 关、遮罩由设计系统画）。平台那层没有长相，所以这里
 // 只负责**内容**，壳在 `ui::dialog_shell`。
 
-/// 设置：**只放用户真会改的东西**——外观三档 + 关于。
-/// 主题一改就落盘（`ui.json`），与桌面形态共用同一份偏好文件，换框架不换偏好。
+/// 设置：**只放用户真会改的东西**——外观三档、关窗行为、关于。
+/// 主题与关窗行为一改就落盘（`ui.json`），与桌面形态共用同一份偏好文件，换框架不换偏好。
 pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
     let shell = ui::dialog_shell(m::DIALOG_W_LG, "设置", "改动立即生效");
     let close = move || ctx.settings.set(false);
@@ -962,6 +962,31 @@ pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
             .into_element(),
         ui::vspacer(8.0).into_element(),
         text("跟随系统 = 用 Windows 的浅/深设置；三档换的都是同一套令牌，只有色值在换。")
+            .text_size(px(f::CAPTION))
+            .font_family(f::FONT_TEXT)
+            .text_color(|| t::ink_tertiary())
+            .into_element(),
+        ui::vspacer(16.0).into_element(),
+        ui::divider().into_element(),
+        ui::vspacer(14.0).into_element(),
+        ui::section_label("行为").into_element(),
+        view()
+            .flex_row()
+            .items_center()
+            .child(ui::choice_live(
+                "常驻托盘",
+                move || ctx.close_to_tray.get(),
+                move || actions::set_close_to_tray(ctx, true),
+            ))
+            .child(ui::spacer(6.0))
+            .child(ui::choice_live(
+                "关窗即退",
+                move || !ctx.close_to_tray.get(),
+                move || actions::set_close_to_tray(ctx, false),
+            ))
+            .into_element(),
+        ui::vspacer(8.0).into_element(),
+        text("常驻 = 关窗只藏起窗口，代理与抓包继续跑，点托盘图标唤回；关窗即退 = 回到没有托盘时。")
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
             .text_color(|| t::ink_tertiary())

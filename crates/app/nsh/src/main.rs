@@ -119,13 +119,10 @@ fn main() -> impl std::process::Termination {
         attributes.shadow = Some(false);
     }
 
-    // T1（P6）托盘探针：关窗要改成隐藏，所以关窗这件事交给应用自己判
-    // （`close_on_press = false` 之后平台只上报 closePress）。产品构建里
-    // 这个函数恒为 false，窗口仍由系统直接关。
-    #[cfg(feature = "harness")]
-    if envboard_nsh::tray_probe::wants_close_press() {
-        attributes.close_on_press = Some(false);
-    }
+    // T2（方案 §6.1）：关窗由应用接管 —— 默认「藏进托盘」，用户在设置里关掉
+    // 「常驻」时由 `crate::tray` 的关窗处理改成真关。这条对发布物同样成立，
+    // 所以不在 `harness` 后面（T1 探针只是共用同一条属性）。
+    attributes.close_on_press = Some(false);
 
     let mut window = MainWindowOptions::default();
     window.default_size = Some(Size {
