@@ -230,7 +230,7 @@ impl ProxyEngine for EngineBackend {
         engine.shared_handle().capture.get(request_id)
     }
 
-    fn capture_rows(&self, env: &str, after: u64, limit: usize) -> Option<crate::CaptureRows> {
+    fn capture_rows(&self, env: &str, limit: usize) -> Option<crate::CaptureRows> {
         let guard = self.entries.lock().unwrap();
         let engine = guard.get(env)?.engine.as_ref()?;
         let shared = engine.shared_handle();
@@ -243,7 +243,7 @@ impl ProxyEngine for EngineBackend {
             captured: shared.capture.captured(),
             dropped: shared.capture.dropped(),
             oldest: shared.capture.oldest(),
-            rows: shared.capture.rows(after, limit),
+            rows: shared.capture.rows_tail(limit),
         })
     }
 

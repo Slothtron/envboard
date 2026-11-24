@@ -205,10 +205,12 @@ pub trait ProxyEngine: Send + Sync {
         None
     }
 
-    /// 抓包瘦行（列表读原语）：游标之后的行，只带表格与过滤要的字段。
+    /// 抓包瘦行（列表读原语）：**尾部窗口**（最后 limit 条按 request_id 升序），
+    /// 只带表格与过滤要的字段。记录是请求跑完才入队的，所以入队顺序 ≠ id 顺序；
+    /// 尾窗口 + 读侧按 id 合并，才不会被「先完成的大 id」顶掉「后完成的小 id」。
     /// 与 [`capture_delta`](Self::capture_delta) 的区别是**不搬正文**——35k 行的
     /// 列表若走整记录克隆，等于把缓冲再复制一份。默认 None：不支持就不假装。
-    fn capture_rows(&self, _env: &str, _after: u64, _limit: usize) -> Option<CaptureRows> {
+    fn capture_rows(&self, _env: &str, _limit: usize) -> Option<CaptureRows> {
         None
     }
 

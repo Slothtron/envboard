@@ -38,8 +38,11 @@ const COL_TYPE: f32 = 96.0;
 
 /// 一次读多少行。批小一点，缓冲锁的持有时间短、每拍的界面工作也分摊得开。
 const PAGE: usize = 500;
-/// 一拍里最多追几批（首屏 35k 行要追 70 批，靠一帧追完会卡住，所以分拍）。
-const PULL_MAX_PAGES: usize = 8;
+/// 表最多挂多少行（首屏与合并上限同一处口径）。
+///
+/// 这是「显示窗口」而不是「缓冲副本」：引擎里可能留着 35k 行，界面只挂最新
+/// `ROWS_LIMIT` 行；再往前的历史不属于当前视图，切到更早的记录要先缩窗口。
+const ROWS_LIMIT: usize = 4000;
 const POLL_MS: u64 = 500;
 
 /// 抓包会话的元数据（工具栏那条 chip 的全部信息）。
@@ -337,70 +340,66 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
         )
 }
 
-// ---- 数据：增量合并 -----------------------------------------------------
+// ---- 数据：尾部窗口合并 ---------------------------------------------------
 
-/// 拉一拍：游标之后的行批量并入；会话/代次变了就清表重来，缓冲淘汰了就砍头。
+/// 拉一拍：尾部窗口并入本地表；会话/代次变了就清表重来。
+///
+/// 为什么不再用游标：记录是**请求跑完**才入队的，入队顺序 ≠ request_id 顺序。
+/// 「游标 = 表里最大 id」会让先完成的大 id 把游标顶高，后完成的小 id 永远读不到
+/// （真机四并发只显示了一条）。尾窗口每拍都覆盖最新的一段，读侧按 id 归并去重，
+/// 顺序由 id 决定而不由完成时刻决定。
 fn pull(cap: Cap) {
     let name = cap.name.get_untracked();
     if name.is_empty() {
         return;
     }
-    let mut pages = 0usize;
-    loop {
-        if pages >= PULL_MAX_PAGES {
-            break;
+    // 首屏（表还空）一次要够 `ROWS_LIMIT`，之后每拍只要增量那一小段。
+    let limit = cap
+        .rows
+        .with_untracked(|rows| if rows.is_empty() { ROWS_LIMIT } else { PAGE });
+    // 这一拍把窗口读满了：说明两拍之间完成的行可能多于窗口，立即用大窗口补读一次
+    // （只在满窗时补，常态仍是一拍一次）。
+    if pull_once(cap, &name, limit) && limit < ROWS_LIMIT {
+        pull_once(cap, &name, ROWS_LIMIT);
+    }
+}
+
+/// 读一次并把这一窗口并进表。返回值 = 是否读满窗口（满窗意味着可能有行在两拍之间漏过）。
+fn pull_once(cap: Cap, name: &str, limit: usize) -> bool {
+    match service::capture_rows(name, limit) {
+        Ok(Some(batch)) => {
+            let session_changed = cap.meta.with_untracked(|meta| {
+                meta.session != batch.session.id || meta.generation != batch.session.generation
+            });
+            if session_changed {
+                cap.rows.update(|rows| rows.clear());
+            }
+            cap.meta.update(|meta| {
+                meta.session = batch.session.id;
+                meta.generation = batch.session.generation;
+                meta.captured = batch.captured;
+                meta.dropped = batch.dropped;
+                meta.loaded = true;
+                meta.error = None;
+            });
+            let saturated = batch.rows.len() >= limit;
+            // 缓冲按字节淘汰：比 `oldest` 老的行已经不在引擎里了，本地也不该留着。
+            cap.rows.update(|rows| {
+                crate::model::capture::merge_rows(rows, batch.rows, batch.oldest, ROWS_LIMIT);
+            });
+            saturated
         }
-        let cursor = cap
-            .rows
-            .with_untracked(|rows| rows.last().map(|row| row.request_id).unwrap_or(0));
-        match service::capture_rows(&name, cursor, PAGE) {
-            Ok(Some(batch)) => {
-                let session_changed = cap.meta.with_untracked(|meta| {
-                    meta.session != batch.session.id || meta.generation != batch.session.generation
-                });
-                if session_changed {
-                    cap.rows.update(|rows| rows.clear());
-                }
-                cap.meta.update(|meta| {
-                    meta.session = batch.session.id;
-                    meta.generation = batch.session.generation;
-                    meta.captured = batch.captured;
-                    meta.dropped = batch.dropped;
-                    meta.loaded = true;
-                    meta.error = None;
-                });
-                // 缓冲按字节淘汰：比 `oldest` 老的行已经不在引擎里了，本地也不该留着。
-                if let Some(oldest) = batch.oldest {
-                    cap.rows.update(|rows| {
-                        let drop_to = rows
-                            .iter()
-                            .position(|row| row.request_id >= oldest)
-                            .unwrap_or(rows.len());
-                        rows.drain(..drop_to);
-                    });
-                }
-                if batch.rows.is_empty() {
-                    break;
-                }
-                cap.rows.update(|rows| rows.extend(batch.rows));
-                pages += 1;
-                if session_changed {
-                    // 新会话的行从 1 开始；游标已清，下一轮从 0 拉。
-                    continue;
-                }
-            }
-            Ok(None) => {
-                cap.meta.update(|meta| {
-                    meta.loaded = true;
-                    meta.error = None;
-                });
-                break;
-            }
-            Err(error) => {
-                let line = format!("{} · {}", error.code.as_str(), error.message);
-                cap.meta.update(|meta| meta.error = Some(line));
-                break;
-            }
+        Ok(None) => {
+            cap.meta.update(|meta| {
+                meta.loaded = true;
+                meta.error = None;
+            });
+            false
+        }
+        Err(error) => {
+            let line = format!("{} · {}", error.code.as_str(), error.message);
+            cap.meta.update(|meta| meta.error = Some(line));
+            false
         }
     }
 }

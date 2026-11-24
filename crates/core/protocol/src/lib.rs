@@ -417,7 +417,10 @@ pub struct CaptureRows {
     pub dropped: u64,
     /// 缓冲内最旧的 request_id（None = 空缓冲）。
     pub oldest: Option<u64>,
-    /// request_id 严格大于 `after` 的行（时间序，至多 limit 条）。
+    /// 尾部窗口的瘦行：最后 limit 条记录，按 `request_id` 升序。
+    ///
+    /// 不是「游标之后」——记录是请求跑完才入队的，入队顺序 ≠ id 顺序；读侧按 id
+    /// 合并去重，才不会让先完成的大 id 顶掉后完成的小 id。
     pub rows: Vec<CaptureRow>,
 }
 

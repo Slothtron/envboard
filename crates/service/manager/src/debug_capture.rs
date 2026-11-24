@@ -41,15 +41,15 @@ impl Manager {
         Ok(self.engine.capture_get(name, request_id))
     }
 
-    /// 抓包瘦行（列表读原语）：游标之后的行，不搬正文。None = 实例不在跑。
+    /// 抓包瘦行（列表读原语）：尾部窗口（按 request_id 升序），不搬正文。
+    /// None = 实例不在跑。
     pub fn capture_rows(
         &self,
         name: &str,
-        after: u64,
         limit: usize,
     ) -> Result<Option<EngineCaptureRows>, Error> {
         self.require(name)?;
-        Ok(self.engine.capture_rows(name, after, limit))
+        Ok(self.engine.capture_rows(name, limit))
     }
 
     /// 手动清空抓包会话（generation +1，会话延续）。

@@ -19,14 +19,9 @@ impl AdminService {
         self.manager.capture_detail(name, request_id)
     }
 
-    /// 列表用的瘦行（游标之后，只带表格与过滤要的字段，不搬正文）。
-    pub fn capture_rows(
-        &self,
-        name: &str,
-        after: u64,
-        limit: usize,
-    ) -> Result<Option<CaptureRows>, Error> {
-        self.manager.capture_rows(name, after, limit)
+    /// 列表用的瘦行（尾部窗口，按 request_id 升序；只带表格与过滤要的字段，不搬正文）。
+    pub fn capture_rows(&self, name: &str, limit: usize) -> Result<Option<CaptureRows>, Error> {
+        self.manager.capture_rows(name, limit)
     }
 
     pub fn clear_capture(&self, name: &str) -> Result<bool, Error> {

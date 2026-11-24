@@ -126,10 +126,11 @@ pub fn reallocate_port(name: &str) -> Result<EnvView, Error> {
 
 /* ---------------- 抓包（EB-DESIGN-004：列表读瘦行，详情单独取） ---------------- */
 
-/// 抓包列表的一批瘦行（`after` 游标之后；不搬正文）。`None` = 该环境没在跑/无会话。
-pub fn capture_rows(name: &str, after: u64, limit: usize) -> Result<Option<CaptureRows>, Error> {
+/// 抓包列表的一拍瘦行（尾部窗口，按 request_id 升序；不搬正文）。
+/// `None` = 该环境没在跑/无会话。
+pub fn capture_rows(name: &str, limit: usize) -> Result<Option<CaptureRows>, Error> {
     match service() {
-        Some(s) => s.admin.capture_rows(name, after, limit),
+        Some(s) => s.admin.capture_rows(name, limit),
         None => Err(Error::internal_error("宿主尚未启动")),
     }
 }

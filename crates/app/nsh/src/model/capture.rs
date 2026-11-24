@@ -190,6 +190,55 @@ pub fn resource_of(row: &CaptureRow) -> ResFilter {
     }
 }
 
+// ---- 合并（读侧止血） -------------------------------------------------------
+
+/// 把一拍**尾部窗口**并入本地表：按 `request_id` 归并去重（同 id 取这一拍的那份）、
+/// 丢掉已被引擎淘汰的头、超上限砍头。
+///
+/// 为什么必须按 id 归并而不是直接 append：记录是请求跑完才入队的，入队顺序 ≠ id 顺序。
+/// 旧实现拿「最后一行 id」当游标，先完成的大 id 把游标顶高，后完成的小 id 就永远
+/// 进不来（真机四并发只显示了一条）。改成尾窗口 + 按 id 归并后，顺序由 id 决定，
+/// 迟到的记录会插到它该在的位置。
+///
+/// 两段都已是 id 升序，所以是一次线性归并：`O(表内行数 + 这一拍行数)`。
+pub fn merge_rows(
+    rows: &mut Vec<CaptureRow>,
+    incoming: Vec<CaptureRow>,
+    oldest: Option<u64>,
+    limit: usize,
+) {
+    let cutoff = oldest.unwrap_or(0);
+    // 引擎里已经没有的（比 oldest 更老）不该继续挂在表上。
+    let kept = std::mem::take(rows);
+    let mut left = kept.into_iter().filter(|row| row.request_id >= cutoff).peekable();
+    let mut right = incoming
+        .into_iter()
+        .filter(|row| row.request_id >= cutoff)
+        .peekable();
+    let mut out: Vec<CaptureRow> = Vec::new();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some(l), Some(r)) => match l.request_id.cmp(&r.request_id) {
+                std::cmp::Ordering::Less => out.push(left.next().expect("peeked")),
+                std::cmp::Ordering::Greater => out.push(right.next().expect("peeked")),
+                std::cmp::Ordering::Equal => {
+                    // 同一条被读了两遍：以这一拍为准（它是引擎缓冲里的当前值）。
+                    left.next();
+                    out.push(right.next().expect("peeked"));
+                }
+            },
+            (Some(_), None) => out.push(left.next().expect("peeked")),
+            (None, Some(_)) => out.push(right.next().expect("peeked")),
+            (None, None) => break,
+        }
+    }
+    if out.len() > limit {
+        let drop_to = out.len() - limit;
+        out.drain(..drop_to);
+    }
+    *rows = out;
+}
+
 // ---- 计数与过滤 ------------------------------------------------------------
 
 /// 两维的计数。判据与过滤同源（`StatusFilter::matches` / `resource_of`）。
@@ -428,5 +477,62 @@ mod tests {
         assert_eq!(format_bytes(999), "999 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    // ---- 归并（S2 的读侧规则） --------------------------------------------
+
+    fn row_at(id: u64, path: &str) -> CaptureRow {
+        CaptureRow {
+            request_id: id,
+            path: path.to_owned(),
+            ..row(Some(200), false)
+        }
+    }
+
+    fn ids(rows: &[CaptureRow]) -> Vec<u64> {
+        rows.iter().map(|row| row.request_id).collect()
+    }
+
+    /// 迟到的小 id 必须插回它该在的位置，而不是被丢弃或追加到末尾。
+    #[test]
+    fn merge_inserts_late_small_ids_in_id_order() {
+        let mut rows = vec![row_at(21, "/a"), row_at(23, "/c")];
+        // 这一拍：22 是刚完成的（比 21 晚跑完、id 更大）；20 是慢请求迟到。
+        merge_rows(&mut rows, vec![row_at(20, "/slow"), row_at(22, "/b")], None, 4000);
+        assert_eq!(ids(&rows), vec![20, 21, 22, 23], "按 id 升序，五条一条不少");
+    }
+
+    /// 同一条被两拍都读到：保留这一拍的那份（表格内容随记录更新而更新）。
+    #[test]
+    fn merge_dedupes_the_same_request_id() {
+        let mut rows = vec![row_at(7, "/old-path")];
+        merge_rows(&mut rows, vec![row_at(7, "/new-path")], None, 4000);
+        assert_eq!(rows.len(), 1, "同 id 不重复");
+        assert_eq!(rows[0].path, "/new-path");
+    }
+
+    /// 引擎按字节淘汰了老记录：本地表也不该继续显示（否则点开是「记录已不在缓冲」）。
+    #[test]
+    fn merge_drops_rows_older_than_the_buffer_window() {
+        let mut rows = vec![row_at(1, "/gone"), row_at(5, "/kept"), row_at(9, "/kept")];
+        merge_rows(&mut rows, vec![row_at(9, "/kept"), row_at(12, "/new")], Some(5), 4000);
+        assert_eq!(ids(&rows), vec![5, 9, 12], "比 oldest(5) 老的 1 丢掉");
+        // 一整拍都比 oldest 老（缓冲刚被清空重填）：表也该空
+        let mut rows = vec![row_at(1, "/gone")];
+        merge_rows(&mut rows, vec![row_at(2, "/gone")], Some(10), 4000);
+        assert!(rows.is_empty());
+    }
+
+    /// 表有上限：只留 id 最大的那一段，砍头不砍尾。
+    #[test]
+    fn merge_trims_the_head_to_the_row_limit() {
+        let mut rows = vec![row_at(1, "/a"), row_at(2, "/b")];
+        merge_rows(
+            &mut rows,
+            vec![row_at(3, "/c"), row_at(4, "/d"), row_at(5, "/e")],
+            None,
+            3,
+        );
+        assert_eq!(ids(&rows), vec![3, 4, 5], "上限 3 → 留最新三条");
     }
 }

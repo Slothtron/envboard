@@ -130,8 +130,18 @@ impl CaptureBuffer {
     }
 
     /// 缓冲内最旧的 request_id（空缓冲 = None）。
+    ///
+    /// 「最旧」= 缓冲里**最小**的 id，不是 `front()`：入队顺序是完成顺序，慢请求
+    /// 会带着小 id 后入队，`front()` 可能是刚进来的大 id（真机四并发时 `front()`
+    /// 就是 4，读侧拿它当淘汰线，把 1/2/3 全砍了）。淘汰按入队（完成）顺序走，
+    /// 所以「比最小 id 还小的记录一定不在缓冲里」仍成立——这正是读侧要的线。
     pub fn oldest(&self) -> Option<u64> {
-        self.records.lock().unwrap().front().map(|(id, _, _)| *id)
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _, _)| *id)
+            .min()
     }
 
     /// 单条详情（按 request_id；后写优先——重启后 id 复位时新记录覆盖旧认知）。
@@ -154,24 +164,31 @@ impl CaptureBuffer {
             .collect()
     }
 
-    /// 列表读原语：游标之后的**瘦行**（只投影表格与过滤要的字段，不 clone body）。
+    /// 列表读原语：**尾部窗口**的瘦行（最后 limit 条按 `request_id` 升序）。
+    ///
+    /// 为什么不是「游标之后」：记录是**请求跑完**才入队的，入队顺序 ≠ id 顺序。
+    /// 游标会让「先完成的大 id」把游标顶高，「后完成的小 id」永久丢失（真机复现过）。
+    /// 尾部窗口按完成顺序取最近 limit 条，再按 id 排序，读侧按 id 合并即可自愈；
+    /// 排序只在 ≤limit 条上做，不看整个缓冲。
     ///
     /// 与 [`since`](Self::since) 的区别就是内存：`since` 每条整记录进界面，
     /// 35k 行等于把缓冲再复制一份；列表要的只是十来个数与几段短字符串。
     /// 详情仍走 [`get`](Self::get)。
-    pub fn rows(&self, after: u64, limit: usize) -> Vec<CaptureRow> {
+    pub fn rows_tail(&self, limit: usize) -> Vec<CaptureRow> {
         let records = self.records.lock().unwrap();
-        records
+        let start = records.len().saturating_sub(limit);
+        let mut rows: Vec<CaptureRow> = records
             .iter()
-            .filter(|(id, _, _)| *id > after)
-            .take(limit)
+            .skip(start)
             .map(|(id, record, _)| {
                 let mut row = record.row();
                 // 缓冲内元组的 id 是权威（记录里的 `request_id` 与它同值）。
                 row.request_id = *id;
                 row
             })
-            .collect()
+            .collect();
+        rows.sort_unstable_by_key(|row| row.request_id);
+        rows
     }
 
 }
@@ -348,6 +365,18 @@ mod tests {
         assert_eq!(tight.since(3, 10).len(), 2, "游标 3 之后的记录都还在");
     }
 
+    /// 「最旧」按 id 算，不按入队顺序算：慢请求的小 id 后入队，`front()` 可能是大 id。
+    #[test]
+    fn oldest_is_the_smallest_id_not_the_first_queued() {
+        let buffer = buffer(0);
+        // 完成顺序 4,3,2,1（1 号是最慢的那个）。
+        for id in [4, 3, 2, 1] {
+            buffer.push(id, Arc::new(capture_record(id, Some(200), false)), 10);
+        }
+        assert_eq!(buffer.oldest(), Some(1), "淘汰线取最小 id");
+        assert_eq!(buffer.tail(usize::MAX).len(), 4, "四条都还在");
+    }
+
     #[test]
     fn bodies_are_utf8_or_base64_or_omitted() {
         let utf8 = encode_body(b"hello");
@@ -415,7 +444,7 @@ mod tests {
     fn rows_project_fields_without_bodies() {
         let buffer = buffer(0);
         buffer.push(11, Arc::new(capture_record(11, Some(201), false)), 100);
-        let rows = buffer.rows(0, usize::MAX);
+        let rows = buffer.rows_tail(usize::MAX);
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.request_id, 11);
@@ -434,28 +463,47 @@ mod tests {
 
         // 失败记录：无响应 → status None、error true、响应大小 0。
         buffer.push(12, Arc::new(capture_record(12, None, true)), 100);
-        let failed = &buffer.rows(11, usize::MAX)[0];
+        let failed = buffer
+            .rows_tail(usize::MAX)
+            .into_iter()
+            .find(|row| row.request_id == 12)
+            .expect("刚存的失败记录");
         assert_eq!(failed.status, None);
         assert!(failed.error);
         assert_eq!(failed.response_size, 0);
         assert_eq!(failed.content_type, None);
     }
 
+    /// 尾部窗口按 **id** 升序，不按完成顺序：这是并发丢行那个缺陷的修法根基。
     #[test]
-    fn rows_respect_cursor_and_limit_like_since() {
+    fn rows_tail_sorts_by_request_id_not_by_completion() {
         let buffer = buffer(0);
-        for id in [3, 5, 8] {
+        // 完成顺序：23, 20, 22, 21（慢请求后完成，id 反而更小）
+        for id in [23, 20, 22, 21] {
             buffer.push(id, Arc::new(capture_record(id, Some(200), false)), 100);
         }
-        let ids: Vec<u64> = buffer.rows(3, 10).iter().map(|r| r.request_id).collect();
-        assert_eq!(ids, vec![5, 8], "严格大于游标，时间序");
-        assert_eq!(buffer.rows(0, 2).len(), 2, "limit 生效");
-        assert!(buffer.rows(8, 10).is_empty());
+        let ids: Vec<u64> = buffer
+            .rows_tail(usize::MAX)
+            .iter()
+            .map(|row| row.request_id)
+            .collect();
+        assert_eq!(ids, vec![20, 21, 22, 23], "四条都在，且按 id 升序");
+    }
+
+    #[test]
+    fn rows_tail_respects_limit_and_the_increment_view() {
+        let buffer = buffer(0);
+        for id in [3, 5, 8, 9] {
+            buffer.push(id, Arc::new(capture_record(id, Some(200), false)), 100);
+        }
+        let ids: Vec<u64> = buffer.rows_tail(2).iter().map(|r| r.request_id).collect();
+        assert_eq!(ids, vec![8, 9], "只留最后入队的 2 条，仍按 id 升序");
         assert_eq!(
-            buffer.rows(0, usize::MAX).len(),
+            buffer.rows_tail(usize::MAX).len(),
             buffer.since(0, usize::MAX).len(),
             "行数与整记录读一致"
         );
+        assert!(buffer.rows_tail(0).is_empty(), "limit 0 = 空窗口");
     }
 
     /// 缓冲只持有 `Arc`：读出来的与存进去的是同一个对象（不复制记录体）。
