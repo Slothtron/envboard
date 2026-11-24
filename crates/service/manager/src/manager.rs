@@ -45,6 +45,7 @@ use envboard_engine::{
 use envboard_protocol::EnvView;
 use serde_json::Value;
 
+use crate::capture_watch::CaptureWatch;
 use crate::events::ControlEventLog;
 use crate::ports::{EventStorePort, FilePort, PortProbe, StateRepo};
 use crate::state::{ManagerConfig, PersistedState, StoredError};
@@ -73,6 +74,8 @@ pub struct Manager {
     pub(crate) debug_target: Mutex<Option<String>>,
     /// 导入的 HAR 会话库（只读、进程生命周期、多会话并存）。
     pub(crate) har_library: crate::har::HarLibrary,
+    /// 抓包数据版本（S3）：读侧据它判断「该不该去读一段窗口」。
+    pub(crate) capture_watch: Arc<CaptureWatch>,
 }
 
 impl Manager {
@@ -124,6 +127,15 @@ impl Manager {
             crate::events::DEFAULT_MAX_EVENT_BYTES,
             logger.clone(),
         );
+        // 抓包版本号：engine 每条记录入队后回调（放锁之后，不占引擎锁），
+        // 这里只做一次计数自增 —— 便宜到可以在请求线程上直接跑。
+        let capture_watch = Arc::new(CaptureWatch::default());
+        {
+            let watch = capture_watch.clone();
+            engine.watch_capture(Arc::new(move |env: &str, _request_id: u64| {
+                watch.bump(env);
+            }));
+        }
         let manager = Self {
             config,
             engine,
@@ -139,6 +151,7 @@ impl Manager {
             generation: AtomicU64::new(1),
             debug_target: Mutex::new(None),
             har_library: crate::har::HarLibrary::default(),
+            capture_watch,
         };
         for message in manager.reconcile_rules()? {
             manager.logger.log(LogLevel::Info, &message);

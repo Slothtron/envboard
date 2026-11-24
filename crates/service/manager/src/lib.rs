@@ -117,6 +117,7 @@ pub mod state;
 pub mod state_sqlite;
 
 // Manager 的域拆分：各文件以 `impl Manager` 扩展同一类型（见 manager.rs 头注）。
+mod capture_watch;
 mod debug_capture;
 mod ledger;
 mod lifecycle;
@@ -128,6 +129,7 @@ mod rules_store;
 
 pub use envboard_protocol::{DebugView, Desired, EnvView, ProxyView, ReconcileReport};
 pub use manager::Manager;
+pub use capture_watch::CaptureWatch;
 pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};
 pub use state::{
     InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION, StoredError,

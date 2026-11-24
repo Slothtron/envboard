@@ -28,6 +28,11 @@ impl AdminService {
         self.manager.clear_capture(name)
     }
 
+    /// 抓包数据版本（S3）：同进程读侧据此判断要不要去读窗口，0 = 从未变化。
+    pub fn capture_version(&self, name: &str) -> u64 {
+        self.manager.capture_version(name)
+    }
+
     /// `POST /api/debug`：请求体是 typed `DebugStartReq {env}`。
     pub fn start_debug(&self, request: &DebugStartReq) -> Result<DebugView, Error> {
         self.manager.start_debug(&request.env)

@@ -46,6 +46,9 @@ pub struct EngineConfig {
     pub capture: bool,
     /// 抓包缓冲字节预算（0 = 默认 256 MiB）。
     pub capture_budget: usize,
+    /// 抓包入队通知（S3）：每入队一条记录回调一次，给同进程读侧做「有新行」的提醒。
+    /// None = 不通知（桌面/测试不需要）。
+    pub capture_notify: Option<crate::capture::CaptureNotify>,
 }
 
 impl Default for EngineConfig {
@@ -63,6 +66,7 @@ impl Default for EngineConfig {
             trajectory_writer: None,
             capture: false,
             capture_budget: 0,
+            capture_notify: None,
         }
     }
 }

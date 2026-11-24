@@ -167,6 +167,8 @@ impl Manager {
         if let Some(handle) = handle {
             self.engine.stop(&handle).await?;
         }
+        // 实例没了，缓冲跟着消失：让抓包页据版本号察觉「数据变了」而不是停在旧行。
+        self.capture_watch.bump(name);
         let mut state = self.state.lock().unwrap();
         state.desired.insert(name.into(), Desired::Stopped);
         state.marks.remove(name);

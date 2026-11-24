@@ -190,6 +190,7 @@ impl EngineInstance {
                 } else {
                     crate::capture::DEFAULT_CAPTURE_BUDGET
                 },
+                config.capture_notify.clone(),
             ),
             ca,
             strict: tls::strict_upstream_client_config()?,

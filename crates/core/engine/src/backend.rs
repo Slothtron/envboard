@@ -57,6 +57,8 @@ pub struct EngineBackend {
     /// 轨迹记录器与会话 id，**独立于 entries 的生命周期**：stop 移除 Entry 后
     /// 再 start，seq/request_id 仍要续着上一次的走（否则轨迹文件断档）。
     recorders: Mutex<BTreeMap<String, (Arc<TrajectoryRecorder>, u64)>>,
+    /// 抓包入队通知（S3）。注册晚于实例启动时，下一次 start 才带上——如实，不追认。
+    capture_notify: Mutex<Option<Arc<dyn Fn(&str, u64) + Send + Sync>>>,
 }
 
 impl EngineBackend {
@@ -65,11 +67,26 @@ impl EngineBackend {
             ca,
             entries: Mutex::new(BTreeMap::new()),
             recorders: Mutex::new(BTreeMap::new()),
+            capture_notify: Mutex::new(None),
         }
+    }
+
+    /// 把后端级通知绑到一个环境上：引擎实例不知道自己是哪个环境（v2 纪律），
+    /// 环境名在此刻闭包进去。
+    fn notify_for(&self, env: &str) -> Option<crate::capture::CaptureNotify> {
+        let hook = self.capture_notify.lock().unwrap().clone()?;
+        let env = env.to_owned();
+        Some(std::sync::Arc::new(move |request_id: u64| {
+            hook(&env, request_id)
+        }))
     }
 }
 
-fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> EngineConfig {
+fn spec_to_config(
+    spec: &EngineSpec,
+    log: Option<Arc<dyn LineWriter>>,
+    capture_notify: Option<crate::capture::CaptureNotify>,
+) -> EngineConfig {
     EngineConfig {
         listen: spec.listen,
         insecure_hosts: spec.insecure_hosts.clone(),
@@ -83,6 +100,7 @@ fn spec_to_config(spec: &EngineSpec, log: Option<Arc<dyn LineWriter>>) -> Engine
         trajectory_writer: spec.trajectory.clone(),
         capture: spec.capture,
         capture_budget: spec.capture_budget,
+        capture_notify,
     }
 }
 
@@ -138,7 +156,7 @@ impl ProxyEngine for EngineBackend {
             (slot.0.clone(), session_id)
         };
         let engine = EngineInstance::start(
-            spec_to_config(&spec, Some(pump.writer())),
+            spec_to_config(&spec, Some(pump.writer()), self.notify_for(&env)),
             self.ca.clone(),
             recorder,
             session_id,
@@ -172,7 +190,8 @@ impl ProxyEngine for EngineBackend {
         // apply 是同步语义（ArcSwap 换入即生效），锁内直接转发是安全的：
         // EngineInstance::apply_config 不持簿记锁、不做 I/O。
         let engine = entry.live_engine()?;
-        engine.apply_config(spec_to_config(&spec, None))?;
+        // 热更新也要带上通知钩子：否则改一次规则就把「有新行」的提醒弄丢了。
+        engine.apply_config(spec_to_config(&spec, None, self.notify_for(&handle.env)))?;
         let receipt = receipt_of(&spec);
         *entry.receipt.lock().unwrap() = receipt.clone();
         Ok(receipt)
@@ -254,6 +273,10 @@ impl ProxyEngine for EngineBackend {
         };
         engine.shared_handle().capture.clear();
         true
+    }
+
+    fn watch_capture(&self, notify: std::sync::Arc<dyn Fn(&str, u64) + Send + Sync>) {
+        *self.capture_notify.lock().unwrap() = Some(notify);
     }
 
     async fn stop(&self, handle: &EngineHandle) -> Result<(), Error> {

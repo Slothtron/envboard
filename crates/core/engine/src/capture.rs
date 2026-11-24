@@ -27,6 +27,12 @@ pub const CAPTURE_BODY_LIMIT: usize = 256 * 1024;
 pub const DEFAULT_CAPTURE_BUDGET: usize = 256 * 1024 * 1024;
 
 /// 单条记录的估算字节数由写入方统计后传入；淘汰按字节预算执行。
+/// 记录入队的进程内通知（S3）：参数是刚入队那条的 `request_id`。
+///
+/// 它不是审计、不是落盘，也不搬记录本体——只给同进程读侧一个「有新行」的提醒。
+/// 调用点在**释放缓冲锁之后**、在代理的工作线程上，所以实现必须轻（一次加锁计数即可）。
+pub type CaptureNotify = Arc<dyn Fn(u64) + Send + Sync>;
+
 pub struct CaptureBuffer {
     session_id: u64,
     started_at: u64,
@@ -37,10 +43,17 @@ pub struct CaptureBuffer {
     captured: AtomicU64,
     dropped: AtomicU64,
     generation: AtomicU64,
+    /// 入队通知（None = 没人订阅，静默）。
+    notify: Option<CaptureNotify>,
 }
 
 impl CaptureBuffer {
-    pub fn new(session_id: u64, started_at: u64, budget: usize) -> Self {
+    pub fn new(
+        session_id: u64,
+        started_at: u64,
+        budget: usize,
+        notify: Option<CaptureNotify>,
+    ) -> Self {
         CaptureBuffer {
             session_id,
             started_at,
@@ -50,6 +63,7 @@ impl CaptureBuffer {
             captured: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             generation: AtomicU64::new(1),
+            notify,
         }
     }
 
@@ -74,27 +88,33 @@ impl CaptureBuffer {
     }
 
     /// 追加一条记录。永不失败：超预算就从最旧淘汰；字节数由调用方给 estimate。
+    /// 入队通知在放锁之后发（通知里若要读这条记录，不会跟这里的锁打结）。
     pub fn push(&self, request_id: u64, record: Arc<Record>, estimate: usize) {
         if self.budget > 0 && estimate > self.budget {
             // 单条超预算：记录进不来，如实计淘汰。
             self.dropped.fetch_add(1, Ordering::AcqRel);
             return;
         }
-        let mut records = self.records.lock().unwrap();
-        while self.budget > 0
-            && self.bytes.load(Ordering::Acquire) + estimate as u64 > self.budget as u64
         {
-            match records.pop_front() {
-                Some((_, _, evicted)) => {
-                    self.bytes.fetch_sub(evicted as u64, Ordering::AcqRel);
-                    self.dropped.fetch_add(1, Ordering::AcqRel);
+            let mut records = self.records.lock().unwrap();
+            while self.budget > 0
+                && self.bytes.load(Ordering::Acquire) + estimate as u64 > self.budget as u64
+            {
+                match records.pop_front() {
+                    Some((_, _, evicted)) => {
+                        self.bytes.fetch_sub(evicted as u64, Ordering::AcqRel);
+                        self.dropped.fetch_add(1, Ordering::AcqRel);
+                    }
+                    None => break,
                 }
-                None => break,
             }
+            records.push_back((request_id, record, estimate));
+            self.bytes.fetch_add(estimate as u64, Ordering::AcqRel);
+            self.captured.fetch_add(1, Ordering::AcqRel);
         }
-        records.push_back((request_id, record, estimate));
-        self.bytes.fetch_add(estimate as u64, Ordering::AcqRel);
-        self.captured.fetch_add(1, Ordering::AcqRel);
+        if let Some(notify) = &self.notify {
+            notify(request_id);
+        }
     }
 
     /// 手动清空：记录清零、generation +1，会话延续。
@@ -261,7 +281,7 @@ mod tests {
     use envboard_protocol::{RecordBody, RecordRequest, RecordResponse};
 
     fn buffer(budget: usize) -> CaptureBuffer {
-        CaptureBuffer::new(1, 1000, budget)
+        CaptureBuffer::new(1, 1000, budget, None)
     }
 
     /// 最小的可辨识记录：request_id 与 time 跟着 id 走，方便断言顺序。
@@ -282,6 +302,61 @@ mod tests {
 
     fn push(buffer: &CaptureBuffer, id: u64, estimate: usize) {
         buffer.push(id, Arc::new(rec(id)), estimate);
+    }
+
+    #[test]
+    fn notify_fires_once_per_admitted_record() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let buffer = CaptureBuffer::new(
+            1,
+            1000,
+            300,
+            Some(Arc::new(move |id: u64| sink.lock().unwrap().push(id))),
+        );
+        push(&buffer, 1, 100);
+        push(&buffer, 2, 100);
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2], "每条入队的记录通知一次");
+
+        // 单条超预算被丢弃：什么都没进来，也就不该报「有新行」。
+        push(&buffer, 3, 500);
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn notify_runs_after_the_buffer_lock_is_released() {
+        // 回调里直接读缓冲（`rows_tail`）：通知若在持锁时发，这里会自锁死。
+        // 用带超时的通道把「死锁」变成「失败」而不是「挂住整个测试进程」。
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
+        let weak_slot: Arc<Mutex<Option<std::sync::Weak<CaptureBuffer>>>> =
+            Arc::new(Mutex::new(None));
+        let hole = weak_slot.clone();
+        let buffer = Arc::new(CaptureBuffer::new(
+            1,
+            1000,
+            0,
+            Some(Arc::new(move |_id: u64| {
+                let rows = hole
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|weak| weak.upgrade())
+                    .map(|buffer| buffer.rows_tail(10).len())
+                    .unwrap_or(0);
+                let _ = tx.send(rows);
+            })),
+        ));
+        *weak_slot.lock().unwrap() = Some(Arc::downgrade(&buffer));
+
+        let pushing = buffer.clone();
+        let worker = std::thread::spawn(move || {
+            pushing.push(9, Arc::new(rec(9)), 10);
+        });
+        let rows = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("通知在缓冲锁内读缓冲会死锁");
+        worker.join().unwrap();
+        assert_eq!(rows, 1, "通知发出时这条记录已经可见");
     }
 
     #[test]

@@ -55,7 +55,18 @@ impl Manager {
     /// 手动清空抓包会话（generation +1，会话延续）。
     pub fn clear_capture(&self, name: &str) -> Result<bool, Error> {
         self.require(name)?;
-        Ok(self.engine.clear_capture(name))
+        let cleared = self.engine.clear_capture(name);
+        if cleared {
+            // 空会话也要让读侧重读一次：行数归零不是一个「新记录」事件。
+            self.capture_watch.bump(name);
+        }
+        Ok(cleared)
+    }
+
+    /// 抓包数据版本（S3）：读侧 100ms 拍一次只看这个数，变了才去读窗口。
+    /// 0 = 该环境从未有过变化。
+    pub fn capture_version(&self, name: &str) -> u64 {
+        self.capture_watch.version(name)
     }
 
     // ---- 调试会话（工作区级单例）：切换即换代 —— 停旧、清旧、开新 ---- //
@@ -85,9 +96,12 @@ impl Manager {
         if let Some(old) = previous.as_ref().filter(|old| *old != env) {
             let _ = self.engine.clear_capture(old);
             let _ = self.set_capture_field(old, false);
+            self.capture_watch.bump(old);
         }
         self.set_capture_field(env, true)?;
         *self.debug_target.lock().unwrap() = Some(env.to_string());
+        // 开关抓包不产生记录，但列表该重读一次（否则「已自动开启」的界面停在上一次的样子）。
+        self.capture_watch.bump(env);
         self.events.emit(
             self.clock.now_unix_ms(),
             ControlEvent::Custom {
@@ -111,6 +125,7 @@ impl Manager {
         let _ = self.engine.clear_capture(&target);
         let _ = self.set_capture_field(&target, false);
         *self.debug_target.lock().unwrap() = None;
+        self.capture_watch.bump(&target);
         self.events.emit(
             self.clock.now_unix_ms(),
             ControlEvent::Custom {

@@ -126,11 +126,47 @@ pub fn reallocate_port(name: &str) -> Result<EnvView, Error> {
 
 /* ---------------- 抓包（EB-DESIGN-004：列表读瘦行，详情单独取） ---------------- */
 
+/// 量测探针（仅 `harness` 构建）：把「读窗口 / 查版本」的每次调用落一行
+/// `<unix_ms> <tag>` 到 `EB_PROBE_CAPTURE` 指定的文件。只在设了该环境变量时写，
+/// 产品构建里没有这段代码。
+///
+/// 用途是 S3 验收里那条「空闲 10s 内 tail 调用 0 次」——不数调用就只能靠猜。
+#[cfg(feature = "harness")]
+fn probe(tag: &str) {
+    use std::io::Write as _;
+    let Ok(path) = std::env::var("EB_PROBE_CAPTURE") else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{now} {tag}");
+    }
+}
+
 /// 抓包列表的一拍瘦行（尾部窗口，按 request_id 升序；不搬正文）。
 /// `None` = 该环境没在跑/无会话。
 pub fn capture_rows(name: &str, limit: usize) -> Result<Option<CaptureRows>, Error> {
+    #[cfg(feature = "harness")]
+    probe("rows");
     match service() {
         Some(s) => s.admin.capture_rows(name, limit),
+        None => Err(Error::internal_error("宿主尚未启动")),
+    }
+}
+
+/// 抓包数据版本（S3）：页面的 100ms 轻拍只看这个数，变了才去读窗口。
+pub fn capture_version(name: &str) -> Result<u64, Error> {
+    #[cfg(feature = "harness")]
+    probe("version");
+    match service() {
+        Some(s) => Ok(s.admin.capture_version(name)),
         None => Err(Error::internal_error("宿主尚未启动")),
     }
 }

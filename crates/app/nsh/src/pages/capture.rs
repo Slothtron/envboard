@@ -7,8 +7,9 @@
 //!    计数与过滤共用 `model::capture` 的同一套判据；
 //! 3. **正文纯文本**：不做语法高亮，只重排缩进；**64 KiB 以上只给原文**；
 //! 4. **复制跟随当前视图**：美化态复制美化文本、原文态复制原文；
-//! 5. **列表是活的**：500ms 一拍增量，按 `request_id` 去重合并；会话换了（实例重启）、
-//!    代次换了（手动清空）就把本地行清掉重来。
+//! 5. **列表是活的**：100ms 一拍只看版本号（`service::capture_version`），变了才去读一段
+//!    尾部窗口、按 `request_id` 去重合并；会话换了（实例重启）、代次换了（手动清空）
+//!    就把本地行清掉重来。空闲时一拍不读 —— 读窗口是唯一会碰引擎缓冲的动作。
 //!
 //! 页面生命周期 = 一次进入：返回环境列表即卸载，再进来从空表重新读。
 
@@ -43,7 +44,13 @@ const PAGE: usize = 500;
 /// 这是「显示窗口」而不是「缓冲副本」：引擎里可能留着 35k 行，界面只挂最新
 /// `ROWS_LIMIT` 行；再往前的历史不属于当前视图，切到更早的记录要先缩窗口。
 const ROWS_LIMIT: usize = 4000;
-const POLL_MS: u64 = 500;
+/// 轻拍间隔：这一拍只比对版本号（一次哈希表查 + 一次原子读，不碰引擎缓冲）。
+///
+/// 名义值取 80ms 而不是 100ms：Windows 定时器有约 15.6ms 的粒度，`timer(100ms)`
+/// 实测定格在 ~109ms（10s 内只跳了 92 次），照 100ms 排会在边界上冒出 >100ms 的
+/// 出场延迟。80ms 名义值实测定格 ~87ms，最坏一拍仍 ≤100ms —— 这就是验收口径
+/// 「新记录 ≤100ms 出现」的余量来源。
+const POLL_MS: u64 = 80;
 
 /// 抓包会话的元数据（工具栏那条 chip 的全部信息）。
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -213,6 +220,8 @@ struct Cap {
     selected: Signal<Option<u64>>,
     detail: Signal<Option<DetailView>>,
     tab: Signal<usize>,
+    /// 上一次读到的数据版本（`service::capture_version`）：轻拍只拿它与当前版本比对。
+    seen: Signal<u64>,
 }
 
 // ---- 入口 ----------------------------------------------------------------
@@ -245,6 +254,7 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
         selected,
         detail,
         tab,
+        seen: signal(0u64),
     };
 
     if synthetic {
@@ -298,13 +308,16 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
             error: None,
         });
     } else {
-        // 首拍同步读（窗口第一帧就有内容），之后每 500ms 一拍。
+        // 首拍同步读（窗口第一帧就有内容），之后 100ms 一拍只看版本号：
+        // 版本没变（空闲）就什么都不做，变了才去读一段尾部窗口。
         // `spawn` 归当前 owner：返回环境列表时页面卸载，循环随之取消。
         spawn(async move {
             pull(cap_info);
             loop {
                 timer(Duration::from_millis(POLL_MS)).await;
-                pull(cap_info);
+                if due(cap_info) {
+                    pull(cap_info);
+                }
             }
         });
     }
@@ -353,6 +366,11 @@ fn pull(cap: Cap) {
     if name.is_empty() {
         return;
     }
+    // 先记版本、再读窗口：读的当口又落了新行，下一拍还会再读一次。
+    // 反过来（读完再记版本）会把读窗口期间到达的记录吞掉——那是最难查的一类漏行。
+    if let Ok(version) = service::capture_version(&name) {
+        cap.seen.set(version);
+    }
     // 首屏（表还空）一次要够 `ROWS_LIMIT`，之后每拍只要增量那一小段。
     let limit = cap
         .rows
@@ -361,6 +379,22 @@ fn pull(cap: Cap) {
     // （只在满窗时补，常态仍是一拍一次）。
     if pull_once(cap, &name, limit) && limit < ROWS_LIMIT {
         pull_once(cap, &name, ROWS_LIMIT);
+    }
+}
+
+/// 这一拍该不该读窗口：只看「版本号变没变」。
+///
+/// 版本号是 manager 的进程内计数（引擎每入队一条记录、清空、开关各自增一次），
+/// 一次原子读 + 一次哈希表查，空闲时这条路径不碰引擎缓冲、不发 IPC。
+/// 宿主没起来时读版本会失败：不读窗口，等宿主回来（首拍已经报过错了）。
+fn due(cap: Cap) -> bool {
+    let name = cap.name.get_untracked();
+    if name.is_empty() {
+        return false;
+    }
+    match service::capture_version(&name) {
+        Ok(version) => version != cap.seen.get_untracked(),
+        Err(_) => false,
     }
 }
 

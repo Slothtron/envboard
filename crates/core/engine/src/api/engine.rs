@@ -219,6 +219,12 @@ pub trait ProxyEngine: Send + Sync {
         false
     }
 
+    /// 注册「有新抓包记录」的进程内通知（S3）：实现方在每条记录入队后回调
+    /// `(env, request_id)`。这是**同进程**的提醒，不是审计、不是落盘；读侧拿它
+    /// 决定「要不要去读」，读什么仍走 [`capture_rows`](Self::capture_rows)。
+    /// 默认空实现：不支持通知就不假装支持（读侧退化成按需读）。
+    fn watch_capture(&self, _notify: std::sync::Arc<dyn Fn(&str, u64) + Send + Sync>) {}
+
     /// 故障注入旋钮（live 断言与集成测试用）：
     /// 把已登记实例置为 failed 并释放监听 —— 与"引擎线程 panic 后运行时散掉、
     /// socket 关闭"同构。返回 false = 该实现不支持注入（调用方不得假装成功）。
