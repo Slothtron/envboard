@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::ports::LineWriter;
 use crate::proxy::{CoreInfo, Listen};
 use crate::sha256;
-use crate::{CaptureDelta, CaptureView};
+use crate::{CaptureDelta, CaptureRows, CaptureView};
 
 /// 启动/热更一个引擎实例所需的全部输入（一等字段，没有透传通道）。
 #[derive(Clone)]
@@ -202,6 +202,13 @@ pub trait ProxyEngine: Send + Sync {
 
     /// 单条抓包详情（全缓冲查找；后写优先）。None = 记录不在缓冲或实例不在跑。
     fn capture_get(&self, _env: &str, _request_id: u64) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// 抓包瘦行（列表读原语）：游标之后的行，只带表格与过滤要的字段。
+    /// 与 [`capture_delta`](Self::capture_delta) 的区别是**不搬正文**——35k 行的
+    /// 列表若走整记录克隆，等于把缓冲再复制一份。默认 None：不支持就不假装。
+    fn capture_rows(&self, _env: &str, _after: u64, _limit: usize) -> Option<CaptureRows> {
         None
     }
 

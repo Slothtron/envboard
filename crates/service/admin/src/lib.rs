@@ -82,6 +82,7 @@
 //! | `start_debug(body)` / `stop_debug()` | 收 `DebugStartReq {env}`；切换即换代（原目标停止并清空） |
 //! | `debug_delta(after, limit)` | 增量 `(最新游标, DebugEvents)`；游标域 = 会话内 request_id |
 //! | `captures(name, limit)` / `capture_detail(name, request_id)` | 无活会话 → None；单条记录 |
+//! | `capture_rows(name, after, limit)` | 列表读原语：瘦行（id/方法/状态/域名/路径/大小/content-type），不搬正文 |
 //! | `clear_capture(name)` | 清空当前会话记录（generation +1） |
 //! | `inject_fault(name, reason)` | **测试探针**，只给验收用；引擎不支持 → false |
 //!

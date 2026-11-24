@@ -3,7 +3,7 @@
 use envboard_engine::{
     CaptureDelta as EngineCaptureDelta, CaptureView as EngineCaptureView, Error,
 };
-use envboard_protocol::{DebugStartReq, DebugView};
+use envboard_protocol::{CaptureRows, DebugStartReq, DebugView};
 use serde_json::Value;
 
 use super::AdminService;
@@ -15,6 +15,16 @@ impl AdminService {
 
     pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Value>, Error> {
         self.manager.capture_detail(name, request_id)
+    }
+
+    /// 列表用的瘦行（游标之后，只带表格与过滤要的字段，不搬正文）。
+    pub fn capture_rows(
+        &self,
+        name: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Option<CaptureRows>, Error> {
+        self.manager.capture_rows(name, after, limit)
     }
 
     pub fn clear_capture(&self, name: &str) -> Result<bool, Error> {

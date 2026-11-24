@@ -12,6 +12,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use envboard_protocol::CaptureRow;
+
 /// 单侧（请求或响应）正文的记录上限；超过则只记头与元数据、body 标 omitted
 /// （对齐 mitmproxy「缺失而非截断」）。
 pub const CAPTURE_BODY_LIMIT: usize = 256 * 1024;
@@ -145,6 +147,22 @@ impl CaptureBuffer {
             .map(|(_, r, _)| r.clone())
             .collect()
     }
+
+    /// 列表读原语：游标之后的**瘦行**（只投影表格与过滤要的字段，不 clone body）。
+    ///
+    /// 与 [`since`](Self::since) 的区别就是内存：`since` 每条都整记录克隆（含
+    /// headers 与 body，单条上限 256 KiB），35k 行等于把缓冲再复制一份；列表要的
+    /// 只是十来个数与几段短字符串。详情仍走 [`get`](Self::get)。
+    pub fn rows(&self, after: u64, limit: usize) -> Vec<CaptureRow> {
+        let records = self.records.lock().unwrap();
+        records
+            .iter()
+            .filter(|(id, _, _)| *id > after)
+            .take(limit)
+            .map(|(id, record, _)| row_of(*id, record))
+            .collect()
+    }
+
 }
 
 impl std::fmt::Debug for CaptureBuffer {
@@ -157,6 +175,68 @@ impl std::fmt::Debug for CaptureBuffer {
             .field("bytes", &self.bytes.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
+}
+
+/// 把完整记录投影成列表行：只读字段，不碰 body。
+///
+/// 记录形状由写入方决定（见 `envboard-events` 的抓包契约）；这里按约定路径取字段，
+/// 缺字段一律给中性值（空串 / None / 0），不 panic —— 投影是读侧，不该因为一条
+/// 畸形记录让整个列表读不出来。
+fn row_of(id: u64, record: &serde_json::Value) -> CaptureRow {
+    let request = record.get("request");
+    let response = record.get("response");
+    let text = |scope: Option<&serde_json::Value>, key: &str| -> String {
+        scope
+            .and_then(|s| s.get(key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    CaptureRow {
+        request_id: id,
+        time: record
+            .get("time")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        method: text(request, "method"),
+        authority: text(request, "authority"),
+        path: text(request, "path"),
+        status: response
+            .and_then(|r| r.get("status"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|status| status as u16),
+        error: record
+            .get("error")
+            .map(|error| !error.is_null())
+            .unwrap_or(false),
+        request_size: body_size(request.and_then(|r| r.get("body"))),
+        response_size: body_size(response.and_then(|r| r.get("body"))),
+        content_type: content_type_of(response.and_then(|r| r.get("headers"))),
+    }
+}
+
+/// 正文的字节数（`null` / 缺字段 = 0；`omitted` 也带 size）。
+fn body_size(body: Option<&serde_json::Value>) -> u64 {
+    body.and_then(|body| body.get("size"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// 响应头里的 content-type 原值：列表的「资源类型」过滤按它分组。
+fn content_type_of(headers: Option<&serde_json::Value>) -> Option<String> {
+    headers
+        .and_then(serde_json::Value::as_array)
+        .and_then(|rows| {
+            rows.iter().find_map(|pair| {
+                let pair = pair.as_array()?;
+                let key = pair.first()?.as_str()?;
+                if key.eq_ignore_ascii_case("content-type") {
+                    pair.get(1)?.as_str().map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        })
 }
 
 /// 把正文编成可 JSON 的形状：UTF-8 直存，二进制 base64；超限标 omitted。
@@ -286,5 +366,76 @@ mod tests {
         let omitted = encode_body(&vec![0u8; CAPTURE_BODY_LIMIT + 1]);
         assert_eq!(omitted["omitted"], serde_json::Value::Bool(true));
         assert_eq!(omitted["size"], serde_json::json!(CAPTURE_BODY_LIMIT + 1));
+    }
+
+    /// 一条抓包记录的最小形状（字段名照记录契约；正文故意给一大段）。
+    fn capture_record(id: u64, status: Option<u64>, error: bool) -> serde_json::Value {
+        let response = status.map(|status| {
+            json!({
+                "status": status,
+                "headers": [["Content-Type", "application/json; charset=utf-8"], ["X-Trace", "abc"]],
+                "body": { "encoding": "utf8", "size": 4096, "content": "x".repeat(4096) },
+            })
+        });
+        let record = json!({
+            "version": 2,
+            "session": 9,
+            "request_id": id,
+            "time": 1_700_000_000_000u64 + id,
+            "request": {
+                "method": "POST",
+                "path": "/v1/orders",
+                "query": "page=2",
+                "authority": "api.example.com",
+                "headers": [["Accept", "*/*"]],
+                "body": { "encoding": "utf8", "size": 128, "content": "y".repeat(128) },
+            },
+            "response": response,
+            "error": if error { json!({ "kind": "connect" }) } else { serde_json::Value::Null },
+        });
+        record
+    }
+
+    #[test]
+    fn rows_project_fields_without_bodies() {
+        let buffer = buffer(0);
+        buffer.push(11, capture_record(11, Some(201), false), 100);
+        let rows = buffer.rows(0, usize::MAX);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.request_id, 11);
+        assert_eq!(row.method, "POST");
+        assert_eq!(row.authority, "api.example.com");
+        assert_eq!(row.path, "/v1/orders", "path 不含 query");
+        assert_eq!(row.status, Some(201));
+        assert!(!row.error);
+        assert_eq!(row.request_size, 128);
+        assert_eq!(row.response_size, 4096);
+        assert_eq!(
+            row.content_type.as_deref(),
+            Some("application/json; charset=utf-8"),
+            "content-type 取原值、大小写不敏感匹配"
+        );
+
+        // 失败记录：无响应 → status None、error true、响应大小 0。
+        buffer.push(12, capture_record(12, None, true), 100);
+        let failed = &buffer.rows(11, usize::MAX)[0];
+        assert_eq!(failed.status, None);
+        assert!(failed.error);
+        assert_eq!(failed.response_size, 0);
+        assert_eq!(failed.content_type, None);
+    }
+
+    #[test]
+    fn rows_respect_cursor_and_limit_like_since() {
+        let buffer = buffer(0);
+        for id in [3, 5, 8] {
+            buffer.push(id, capture_record(id, Some(200), false), 100);
+        }
+        let ids: Vec<u64> = buffer.rows(3, 10).iter().map(|r| r.request_id).collect();
+        assert_eq!(ids, vec![5, 8], "严格大于游标，时间序");
+        assert_eq!(buffer.rows(0, 2).len(), 2, "limit 生效");
+        assert!(buffer.rows(8, 10).is_empty());
+        assert_eq!(buffer.rows(0, usize::MAX).len(), buffer.since(0, usize::MAX).len(), "行数与整记录读一致");
     }
 }

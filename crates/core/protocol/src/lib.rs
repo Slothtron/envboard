@@ -180,6 +180,42 @@ pub struct DebugView {
     pub capture: CaptureView,
 }
 
+/// 抓包列表的一行：**瘦投影**，只带表格与过滤要的字段，不含头部与正文。
+///
+/// 存在的理由是内存：完整记录带 body（单条上限 256 KiB），35k 行整条克隆等于
+/// 把引擎缓冲再复制一份进界面堆。详情仍走 [`CaptureView`] 的单条读取。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureRow {
+    pub request_id: u64,
+    /// 记录到的时刻（unix ms）；缺失为 0。
+    pub time: u64,
+    pub method: String,
+    pub authority: String,
+    /// 纯路径，不含 query（v2 起 path 与 query 分存）。
+    pub path: String,
+    /// 无响应（连接失败 / 进行中）→ None。
+    pub status: Option<u16>,
+    /// 该记录以错误结束（记录里的 `error` 非 null）。
+    pub error: bool,
+    /// 请求体 / 响应体字节数（只搬数，不搬正文）；无体为 0。
+    pub request_size: u64,
+    pub response_size: u64,
+    /// 响应头里的 content-type 原值（大小写保留）；过滤「资源类型」用。
+    pub content_type: Option<String>,
+}
+
+/// 抓包瘦行视图：会话元数据 + 计数 + 游标之后的行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureRows {
+    pub session: SessionInfo,
+    pub captured: u64,
+    pub dropped: u64,
+    /// 缓冲内最旧的 request_id（None = 空缓冲）。
+    pub oldest: Option<u64>,
+    /// request_id 严格大于 `after` 的行（时间序，至多 limit 条）。
+    pub rows: Vec<CaptureRow>,
+}
+
 /// reconcile 的执行结果。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReconcileReport {

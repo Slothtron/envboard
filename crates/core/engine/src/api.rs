@@ -15,7 +15,7 @@ pub use engine::{
 };
 // 抓包会话词汇是 UI 边界形状，唯一定义在 envboard-protocol；引擎经这里
 // 以原名读写（`crate::CaptureView` 等路径不变）。
-pub use envboard_protocol::{CaptureDelta, CaptureView, SessionInfo};
+pub use envboard_protocol::{CaptureDelta, CaptureRow, CaptureRows, CaptureView, SessionInfo};
 pub use error::{Error, ErrorCode, Retryability};
 pub use ports::{
     ClockPort, FixedClock, LineWriter, LogLevel, LoggerPort, ManualClock, NullLineWriter,

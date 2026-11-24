@@ -10,7 +10,8 @@
 //! 本域只是它的两个驱动方之一（另一个是环境页的开关）。
 
 use envboard_engine::{
-    CaptureDelta as EngineCaptureDelta, CaptureView as EngineCaptureView, Error, ErrorCode,
+    CaptureDelta as EngineCaptureDelta, CaptureRows as EngineCaptureRows,
+    CaptureView as EngineCaptureView, Error, ErrorCode,
 };
 use envboard_protocol::DebugView;
 use serde_json::{Value, json};
@@ -36,6 +37,17 @@ impl Manager {
     pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Value>, Error> {
         self.require(name)?;
         Ok(self.engine.capture_get(name, request_id))
+    }
+
+    /// 抓包瘦行（列表读原语）：游标之后的行，不搬正文。None = 实例不在跑。
+    pub fn capture_rows(
+        &self,
+        name: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Option<EngineCaptureRows>, Error> {
+        self.require(name)?;
+        Ok(self.engine.capture_rows(name, after, limit))
     }
 
     /// 手动清空抓包会话（generation +1，会话延续）。
