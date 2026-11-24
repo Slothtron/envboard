@@ -249,6 +249,11 @@ pub fn App() -> impl IntoElement {
         crate::tray_probe::install();
     }
 
+    // N2（方案 §5.2）：二次启动的激活请求由等待线程记数，界面这边轮询取走并把
+    // 窗口拉到前台。产品代码，不在 harness 后面 —— 否则发布物里「双击唤出」
+    // 就只剩 N1 的「请自己找窗口」。
+    crate::single_instance::install();
+
     view()
         .flex_1()
         .w_full()

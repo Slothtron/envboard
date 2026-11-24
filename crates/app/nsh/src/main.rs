@@ -34,21 +34,30 @@ fn flag(name: &str) -> bool {
 fn main() -> impl std::process::Termination {
     env_logger::init();
 
-    // N1（方案 §5.3）：单实例 preflight 必须在 `boot` 之前 —— 同一 state-dir 已有
-    // 实例时，让第二个进程在这里给出结论并 `exit 2`，而不是先撞 `InstanceLock`
+    // N（方案 §5.2）：单实例 preflight 必须在 `boot` 之前。同一 state-dir 已有
+    // 实例时，第二个进程在这里握手：被接受就 `exit 0`（主实例会把窗口拉到
+    // 前台），被拒或没应答就给出结论再 `exit 3` —— 而不是先撞 `InstanceLock`，
     // 把一句 `conflict` 甩给一个还没有窗口的进程（用户看到的是「双击没反应」）。
     // 主实例的管道句柄挂在 `instance` 上，必须活到 `run_app` 返回。
     let instance = envboard_nsh::single_instance::preflight();
     match &instance {
-        envboard_nsh::single_instance::Preflight::Owner(_) => {
+        envboard_nsh::single_instance::Preflight::Owner(guard) => {
             log::info!("单实例：本进程是主实例");
+            // 等待线程立刻起（不等窗口）：这样次实例撞上「主实例正在 boot」
+            // 也能马上拿到回执，真正的开窗由界面线程轮询完成。
+            envboard_nsh::single_instance::spawn_waiter(guard);
         }
-        envboard_nsh::single_instance::Preflight::Occupied { pipe, state_dir } => {
-            log::warn!("单实例：{pipe} 已被占用（state-dir: {}）", state_dir.display());
+        envboard_nsh::single_instance::Preflight::Activated => {
+            log::info!("单实例：已有实例接受了激活请求，本进程退出");
+            return std::process::ExitCode::SUCCESS;
+        }
+        envboard_nsh::single_instance::Preflight::Rejected(why)
+        | envboard_nsh::single_instance::Preflight::NoResponse(why) => {
+            log::warn!("单实例：{why}");
             envboard_nsh::single_instance::prompt(
-                &envboard_nsh::single_instance::occupied_message(state_dir),
+                &envboard_nsh::single_instance::activation_failed_message(why),
             );
-            return std::process::ExitCode::from(2);
+            return std::process::ExitCode::from(3);
         }
         envboard_nsh::single_instance::Preflight::Unavailable { reason } => {
             // 机制不可用不拦着启动：互斥仍由 `InstanceLock` 兜底。
