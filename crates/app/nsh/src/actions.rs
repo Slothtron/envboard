@@ -41,6 +41,8 @@ pub struct Ctx {
     pub confirm: Signal<Option<Confirm>>,
     /// 当前主题三档：标题栏的标签与设置框的三档共用这一个值（V-1）。
     pub theme: Signal<ThemeChoice>,
+    /// 抓包子页正在看哪个环境（`None` = 在环境列表上）。
+    pub capture_env: Signal<Option<String>>,
 }
 
 /// 轻提示自动消失：每次显示都起一个定时器，到点只清掉**自己那次**写进去的值
@@ -324,6 +326,7 @@ fn uninstall_ca(cx: Ctx) {
 pub enum Ask {
     DeleteEnv(String),
     UninstallCa,
+    ClearCapture(String),
 }
 
 /// 一屏确认框的内容。文案定在这里而不是页面里：同一件事只写一遍。
@@ -364,6 +367,21 @@ impl Confirm {
             confirm_label: "卸载".to_owned(),
         }
     }
+
+    /// 清空抓包缓冲：记录只在这块内存里，清掉就真没了 —— 不可逆。
+    pub fn clear_capture(name: &str, count: usize) -> Self {
+        Self {
+            ask: Ask::ClearCapture(name.to_owned()),
+            title: format!("清空 {name} 的抓包记录？"),
+            note: "不可撤销".to_owned(),
+            body: format!(
+                "当前缓存的 {count} 条记录会从内存里移除；正在进行的抓包会话不受影响，\
+                 之后的新请求仍会记录。"
+            ),
+            irreversible: true,
+            confirm_label: "清空".to_owned(),
+        }
+    }
 }
 
 /// 弹确认框（删除环境走这里，不直接调 `remove`）。
@@ -384,5 +402,13 @@ pub fn run_confirm(cx: Ctx) {
     match confirm.ask {
         Ask::DeleteEnv(name) => remove(cx, name),
         Ask::UninstallCa => uninstall_ca(cx),
+        // 清空之后本地的行由抓包页在下一拍发现代次变化时自己清掉：
+        // 页面手里的行是页面自己的状态，`actions` 不越界去改它。
+        Ask::ClearCapture(name) => match service::clear_capture(&name) {
+            Ok(_) => succeed(cx, "抓包会话已清空"),
+            Err(error) => {
+                fail(cx, error);
+            }
+        },
     }
 }

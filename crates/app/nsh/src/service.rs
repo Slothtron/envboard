@@ -142,6 +142,30 @@ pub fn capture_detail(name: &str, request_id: u64) -> Result<Option<serde_json::
     }
 }
 
+/// 开启抓包：工作区级单例会话切到这个环境（环境得先在跑）。
+pub fn start_debug(name: &str) -> Result<envboard_protocol::DebugView, Error> {
+    match service() {
+        Some(s) => s.admin.start_debug(&serde_json::json!({ "env": name })),
+        None => Err(Error::internal_error("宿主尚未启动")),
+    }
+}
+
+/// 停止抓包（会话保留，可再开启）。
+pub fn stop_debug() -> Result<bool, Error> {
+    match service() {
+        Some(s) => s.admin.stop_debug(),
+        None => Err(Error::internal_error("宿主尚未启动")),
+    }
+}
+
+/// 清空抓包缓冲（不停止会话）。
+pub fn clear_capture(name: &str) -> Result<bool, Error> {
+    match service() {
+        Some(s) => s.admin.clear_capture(name),
+        None => Err(Error::internal_error("宿主尚未启动")),
+    }
+}
+
 /// 异步动作的落点：普通线程 + `Handle::block_on` + oneshot。
 ///
 /// 线程只活到这次动作结束（一秒级的 start/stop），不是线程池——M3 的写入频率

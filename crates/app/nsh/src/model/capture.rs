@@ -208,6 +208,8 @@ impl Counts {
         self.res[filter.index()]
     }
 
+    /// 全部（两维各自的总数相同）；列表空态与单测用它，所以允许“页面没直接调”。
+    #[allow(dead_code)]
     pub fn total(&self) -> usize {
         self.status[StatusFilter::All.index()]
     }

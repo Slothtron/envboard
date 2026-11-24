@@ -26,6 +26,9 @@ serde_json.workspace = true
 # 起窗日志（`RUST_LOG=info` 看平台层与宿主编排）。0.11 与样板同版本，离线缓存已暖。
 env_logger = "0.11"
 log = "0.4"
+# 抓包详情的时刻显示（本地时区 HH:MM:SS.mmm）。chrono 已在依赖图里（nsh-base 经它），
+# 这里只是把它提到本 crate 的直接依赖，不新增编译单元。
+chrono = "0.4"
 
 # 平台层只在 Windows 上存在；`default-features = false` 是不带 webview 的那套。
 # 注意：这条**不能**提升到 workspace.dependencies —— 那里不支持 target 条件表。

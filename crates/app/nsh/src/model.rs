@@ -9,6 +9,7 @@
 
 pub mod body;
 pub mod capture;
+pub mod detail;
 
 use envboard_protocol::EnvView;
 use nsh_core::prelude::*;
@@ -114,6 +115,8 @@ pub struct Env {
     pub description: String,
     /// 可直接粘进终端的一整行（`export https_proxy=…` 或只是一条 URL），来自 `EnvView`。
     pub proxy_command: String,
+    /// 抓包开关（只控记录；抓包页的「开启/停止」按它显示）。
+    pub capture: bool,
 }
 
 impl Env {
@@ -138,6 +141,7 @@ impl Env {
             upstream: view.upstream,
             description: view.description,
             proxy_command: view.proxy_command,
+            capture: view.capture,
         }
     }
 
@@ -361,6 +365,8 @@ fn env(name: &str, health: Health, port: u16, rules: &str, rules_missing: bool) 
         upstream: None,
         description: String::new(),
         proxy_command: format!("http://127.0.0.1:{port}"),
+        // 样本里让在跑的那几条也开着抓包：抓包页的「停止抓包」与 chip 才有东西可拍。
+        capture: matches!(health, Health::Running | Health::Unhealthy),
     }
 }
 

@@ -32,13 +32,19 @@ use std::time::{Duration, Instant};
 /// M4 起多三张：证书页、设置框、删除确认框。模态是平台原生的前景层，
 /// `PrintWindow(PW_RENDERFULLCONTENT)` 会把它一起拍进来 —— 也就是说
 /// “遮罩有没有盖满、卡片有没有居中”这两件事从此有像素守着。
-const CASES: [(&str, &[(&str, &str)]); 6] = [
+/// M5 再补两张抓包页：列表（瘦行 + 两列筛选入口）与详情（美化态正文）。
+const CASES: [(&str, &[(&str, &str)]); 8] = [
     ("env-light", &[("NG_PAGE", "env")]),
     ("env-dark", &[("NG_PAGE", "env"), ("NG_DARK", "1")]),
     ("drawer-light", &[("NG_PAGE", "env"), ("NG_DRAWER", "1")]),
     ("cert-light", &[("NG_PAGE", "cert")]),
     ("settings-light", &[("NG_PAGE", "env"), ("NG_SETTINGS", "1")]),
     ("confirm-light", &[("NG_PAGE", "env"), ("NG_CONFIRM", "1")]),
+    ("capture-light", &[("NG_PAGE", "capture")]),
+    (
+        "capture-detail-light",
+        &[("NG_PAGE", "capture"), ("NG_CAPTURE_DETAIL", "1")],
+    ),
 ];
 
 fn golden_dir() -> PathBuf {

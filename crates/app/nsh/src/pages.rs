@@ -15,6 +15,9 @@ use crate::model::{self, Env, Health};
 use crate::prefs::ThemeChoice;
 use crate::service;
 
+/// 抓包子页（M5，EB-DESIGN-004 方案 C）。
+pub mod capture;
+
 // ---- 列宽 ----------------------------------------------------------------
 //
 // 归页面而不是设计系统：列宽是这张表的排版决定，换个页面就该换一组数。
@@ -618,6 +621,12 @@ fn drawer_footer(ctx: Ctx, name: Signal<String>) -> impl IntoElement {
         .child(ui::spacer(8.0))
         .child(ui::btn_subtle("换个端口", move || {
             actions::reallocate_port(ctx, name.get())
+        }))
+        .child(ui::spacer(8.0))
+        // 抓包是环境的下钻（桌面版的入口在行菜单里：「抓包日志」）。
+        .child(ui::btn_subtle("抓包日志", move || {
+            ctx.capture_env.set(Some(name.get()));
+            ctx.drawer.set(false);
         }))
         .child(view().flex_1())
         // 删除不直接做：先弹确认（全仓唯一不可逆的动作，也是唯一用胭脂填充的按钮）。

@@ -47,12 +47,18 @@ fn stress_rows() -> usize {
         .unwrap_or(0)
 }
 
-/// `NG_PAGE=env|rules|cert`；`rules` 是环境页的「规则」子页签。
+/// `NG_PAGE=env|rules|cert|capture`；`rules` 是环境页的「规则」子页签，
+/// `capture` 是抓包子页（M5）。`NG_CAPTURE=1` 等价于 `NG_PAGE=capture`
+/// （抓包基线自己一个开关，不必和页面开关叠着记）。
 fn page_from_env() -> usize {
     match crate::harness_var("NG_PAGE").unwrap_or_default().as_str() {
         "cert" => 1,
         _ => 0,
     }
+}
+
+fn capture_from_env() -> bool {
+    flag("NG_CAPTURE") || crate::harness_var("NG_PAGE").as_deref() == Some("capture")
 }
 
 fn section_from_env() -> usize {
@@ -155,11 +161,18 @@ pub fn App() -> impl IntoElement {
     } else {
         Vec::new()
     };
-    let envs = signal(initial);
+    let envs = signal(initial.clone());
     let page = signal(page_from_env());
     let section = signal(section_from_env());
     let filter = signal(0usize);
     let search = signal(String::new());
+    // 抓包子页：默认关；`NG_CAPTURE`/`NG_PAGE=capture` 时直接落在第一个环境上
+    // （golden 与截图不用点到入口才有内容可拍）。
+    let capture_env = signal(if capture_from_env() {
+        initial.first().map(|env| env.name.clone())
+    } else {
+        None
+    });
     let selected = signal(if synthetic {
         selected_from_env(&envs.get())
     } else {
@@ -189,6 +202,7 @@ pub fn App() -> impl IntoElement {
         settings,
         confirm,
         theme,
+        capture_env,
     };
 
     // 落地的外观：偏好是“跟随系统”时交给平台自己判，别在这里猜系统是深是浅。
@@ -246,8 +260,13 @@ pub fn App() -> impl IntoElement {
                 .relative()
                 .overflow_hidden()
                 .child(when(
-                    move || page.get() == 0,
+                    move || page.get() == 0 && capture_env.get().is_none(),
                     move || pages::env_page(cx, filter, section, search),
+                ))
+                // 抓包子页占的是环境页的位置（它是环境的下钻，不是第四个顶层页）。
+                .child(when(
+                    move || page.get() == 0 && capture_env.get().is_some(),
+                    move || pages::capture::page(cx),
                 ))
                 .child(when(
                     move || page.get() == 1,
