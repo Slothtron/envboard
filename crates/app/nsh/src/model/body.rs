@@ -10,6 +10,8 @@
 //!
 //! 全部纯函数，不碰窗口；页面只问「这一条该显示什么」。
 
+use std::sync::Arc;
+
 use envboard_protocol::RecordBody;
 
 /// 美化的字节阈值：64 KiB（字节数按记录里的 `size`，不是字符数）。
@@ -49,16 +51,25 @@ pub enum Kind {
 }
 
 /// 一条正文：形状 + 字节数 + 原始文本（`Binary` 时是 base64）。
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+///
+/// `raw` 是 `Arc<str>` 而不是 `String`（S4）：详情面板一旦建好，`Body` 会被
+/// 信号快照、页签子树、复制按钮各取一份，`String` 每份都是一次整段克隆；
+/// `Arc<str>` 让之后所有持有都是 O(1) 计数。物化只发生一次
+/// （`from_record` 从 `Record` 的 `String` 转过来，≤ 后端 256 KiB 上限）。
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Body {
     pub kind: Kind,
     pub size: u64,
-    pub raw: String,
+    pub raw: Arc<str>,
 }
 
-impl Default for Kind {
+impl Default for Body {
     fn default() -> Self {
-        Kind::Absent
+        Body {
+            kind: Kind::Absent,
+            size: 0,
+            raw: Arc::from(""),
+        }
     }
 }
 
@@ -72,7 +83,7 @@ impl Body {
             RecordBody::Omitted { size, .. } => Body {
                 kind: Kind::Omitted,
                 size: *size,
-                raw: String::new(),
+                raw: Arc::from(""),
             },
             RecordBody::Present {
                 encoding,
@@ -85,7 +96,7 @@ impl Body {
                     Kind::Text
                 },
                 size: *size,
-                raw: content.clone(),
+                raw: Arc::from(content.as_str()),
             },
         }
     }
@@ -313,9 +324,9 @@ mod tests {
         let body = view(utf8(13, "{\"a\":1,\"b\":[2,3]}"));
         let pretty = body.pretty(Some("application/json")).unwrap();
         assert!(pretty.contains("\n  \"a\": 1,"), "两空格缩进：{pretty}");
-        assert_eq!(body.raw, "{\"a\":1,\"b\":[2,3]}", "原文不动");
+        assert_eq!(body.raw.as_ref(), "{\"a\":1,\"b\":[2,3]}", "原文不动");
         // 复制跟随视图：美化态复制美化文本，原文态复制原文——都来自同一份输入。
-        assert_ne!(pretty, body.raw);
+        assert_ne!(pretty, body.raw.as_ref());
     }
 
     #[test]

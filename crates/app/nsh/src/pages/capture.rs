@@ -13,6 +13,8 @@
 //!
 //! 页面生命周期 = 一次进入：返回环境列表即卸载，再进来从空表重新读。
 
+use std::sync::Arc;
+
 use envboard_protocol::{
     CaptureRow, Record, RecordBody, RecordRequest, RecordResponse,
 };
@@ -77,8 +79,10 @@ enum Column {
 struct DetailView {
     detail: Detail,
     loading: bool,
-    request_shown: String,
-    response_shown: String,
+    /// 两侧当前该显示的文字。`Arc<str>` 而不是 `String`（S4）：这份 `DetailView`
+    /// 每读一次信号就克隆一份，`String` 会把整段正文复制一遍；`Arc<str>` 只是计数 +1。
+    request_shown: Arc<str>,
+    response_shown: Arc<str>,
     request_rendered: usize,
     response_rendered: usize,
     request_prettyable: bool,
@@ -89,17 +93,15 @@ struct DetailView {
 
 impl DetailView {
     fn build(detail: Detail) -> Self {
-        let request_prettyable = detail
-            .request_body
-            .can_pretty(detail.request_content_type.as_deref());
+        let request_prettyable = detail.request_body().can_pretty(detail.request_content_type());
         let response_prettyable = detail
-            .response_body
-            .can_pretty(detail.response_content_type.as_deref());
+            .response_body()
+            .can_pretty(detail.response_content_type());
         let mut view = DetailView {
             detail,
             loading: false,
-            request_shown: String::new(),
-            response_shown: String::new(),
+            request_shown: Arc::from(""),
+            response_shown: Arc::from(""),
             request_rendered: 0,
             response_rendered: 0,
             request_prettyable,
@@ -115,18 +117,16 @@ impl DetailView {
     /// 详情回来会补上；页签计数与正文都还没有，所以 `loading`。
     fn skeleton(row: &envboard_protocol::CaptureRow) -> Self {
         DetailView {
-            detail: Detail {
-                request_id: row.request_id,
-                time_ms: row.time,
-                method: row.method.clone(),
-                authority: row.authority.clone(),
-                path: row.path.clone(),
-                status: row.status,
-                ..Detail::default()
-            },
+            detail: Detail::skeleton(
+                row.time,
+                row.method.clone(),
+                row.authority.clone(),
+                row.path.clone(),
+                row.status,
+            ),
             loading: true,
-            request_shown: String::new(),
-            response_shown: String::new(),
+            request_shown: Arc::from(""),
+            response_shown: Arc::from(""),
             request_rendered: 0,
             response_rendered: 0,
             request_prettyable: false,
@@ -138,13 +138,13 @@ impl DetailView {
 
     fn refresh_texts(&mut self) {
         self.request_shown = shown_text(
-            &self.detail.request_body,
-            self.detail.request_content_type.as_deref(),
+            self.detail.request_body(),
+            self.detail.request_content_type(),
             self.request_pretty,
         );
         self.response_shown = shown_text(
-            &self.detail.response_body,
-            self.detail.response_content_type.as_deref(),
+            self.detail.response_body(),
+            self.detail.response_content_type(),
             self.response_pretty,
         );
         // 换视图就是换了一段文本：分块从头数，别拿旧长度去切新串。
@@ -164,9 +164,9 @@ impl DetailView {
     /// 现在该放进控件的正文（前 `rendered` 字节，落在字符边界）。
     fn rendered(&self, request: bool) -> String {
         let (text, limit) = if request {
-            (&self.request_shown, self.request_rendered)
+            (self.request_shown.as_ref(), self.request_rendered)
         } else {
-            (&self.response_shown, self.response_rendered)
+            (self.response_shown.as_ref(), self.response_rendered)
         };
         take_prefix(text, limit).to_owned()
     }
@@ -174,9 +174,9 @@ impl DetailView {
     /// 还没放出去多少字节（0 = 这一侧已经全在控件里了）。
     fn remaining(&self, request: bool) -> usize {
         let (text, limit) = if request {
-            (&self.request_shown, self.request_rendered)
+            (self.request_shown.as_ref(), self.request_rendered)
         } else {
-            (&self.response_shown, self.response_rendered)
+            (self.response_shown.as_ref(), self.response_rendered)
         };
         text.len().saturating_sub(limit)
     }
@@ -928,10 +928,34 @@ fn status_cell(at: Position, cap: Cap, width: f32) -> impl IntoElement {
     ui::status_cell_live(tone_of, || ui::Shape::Dot, text_of, width)
 }
 
+/// 点行的骨架延迟探针（仅 `harness` 构建）：把「进 `open_detail` → 骨架已写进信号」
+/// 的耗时追加一行到 `EB_PROBE_DETAIL`（`<unix_ms> <micros>`），给 S4 的
+/// 「点行出骨架 ≤200ms」一个可复算的数，而不是靠目测。
+#[cfg(feature = "harness")]
+fn probe_skeleton(started: std::time::Instant) {
+    use std::io::Write as _;
+    let Ok(path) = std::env::var("EB_PROBE_DETAIL") else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{now} {}", started.elapsed().as_micros());
+    }
+}
+
 fn open_detail(cap: Cap, request_id: u64) {
     if request_id == 0 {
         return;
     }
+    #[cfg(feature = "harness")]
+    let started = std::time::Instant::now();
     cap.selected.set(Some(request_id));
     cap.tab.set(0);
     let name = cap.name.get_untracked();
@@ -940,9 +964,13 @@ fn open_detail(cap: Cap, request_id: u64) {
         if crate::harness_flag("NG_CAPTURE_SKELETON") {
             cap.detail
                 .set(Some(DetailView::skeleton(&fixture_detail_row())));
+            #[cfg(feature = "harness")]
+            probe_skeleton(started);
             return;
         }
         cap.detail.set(Some(DetailView::build(fixture_detail())));
+        #[cfg(feature = "harness")]
+        probe_skeleton(started);
         return;
     }
     // 先上骨架：头部四格（方法 / 状态 / 时刻 / 地址）列表那一行就有，
@@ -952,18 +980,24 @@ fn open_detail(cap: Cap, request_id: u64) {
         .with(|rows| rows.iter().find(|row| row.request_id == request_id).cloned());
     if let Some(row) = row {
         cap.detail.set(Some(DetailView::skeleton(&row)));
+        #[cfg(feature = "harness")]
+        probe_skeleton(started);
     }
     if crate::harness_flag("NG_CAPTURE_SKELETON") {
         return;
     }
     spawn(async move {
-        match service::capture_detail_async(name, request_id).await {
+        let out = service::capture_detail_async(name, request_id).await;
+        // 结果只回填「还停在这一条」的那次：换行、关抽屉，或者这次读已经被更新的
+        // 读顶掉（S4 的读车道会把它作废，`Err` ＝取消），都当作无事发生——
+        // 取消不该弹错误，用户按下一次点击就已经表达了意图。
+        if cap.selected.get() != Some(request_id) {
+            return;
+        }
+        match out {
             Ok(Ok(Some(record))) => {
-                // 用户可能在取详情期间点了别的行或关掉抽屉：只回填还停在这一条上的那次。
-                if cap.selected.get() == Some(request_id) {
-                    cap.detail
-                        .set(Some(DetailView::build(Detail::from_record(&record))));
-                }
+                cap.detail
+                    .set(Some(DetailView::build(Detail::from_record(&record))));
             }
             Ok(Ok(None)) => {
                 cap.selected.set(None);
@@ -1040,7 +1074,7 @@ fn detail_head(cap: Cap) -> impl IntoElement {
             _ => t::ink_secondary(),
         }
     };
-    let method = move || detail_view(cap, |v| v.detail.method.clone()).unwrap_or_default();
+    let method = move || detail_view(cap, |v| v.detail.method().to_owned()).unwrap_or_default();
     let status = move || detail_view(cap, |v| v.detail.status_text()).unwrap_or_default();
     let time = move || detail_view(cap, |v| v.detail.time_text()).unwrap_or_default();
     let url = move || detail_view(cap, |v| v.detail.url()).unwrap_or_default();
@@ -1132,8 +1166,8 @@ fn skeleton_body() -> impl IntoElement {
 }
 
 fn detail_tabs(cap: Cap) -> impl IntoElement {
-    let request_count = detail_view(cap, |v| v.detail.request_headers.len()).unwrap_or(0);
-    let response_count = detail_view(cap, |v| v.detail.response_headers.len()).unwrap_or(0);
+    let request_count = detail_view(cap, |v| v.detail.request_headers().len()).unwrap_or(0);
+    let response_count = detail_view(cap, |v| v.detail.response_headers().len()).unwrap_or(0);
     let tab_button = move |index: usize, label: &'static str, count: usize| {
         view()
             .h(px(m::TAB_H))
@@ -1202,15 +1236,16 @@ fn side_panel(cap: Cap, request: bool) -> AnyElement {
     let Some(detail) = detail_view(cap, |v| v.detail.clone()) else {
         return view().into_element();
     };
-    let headers = if request {
-        detail.request_headers.clone()
+    // 头和正文都**借**着这份 `Arc<Detail>` 读，不再各拷一份出去（S4）。
+    let headers: &[(String, String)] = if request {
+        detail.request_headers()
     } else {
-        detail.response_headers.clone()
+        detail.response_headers()
     };
     let body = if request {
-        detail.request_body.clone()
+        detail.request_body()
     } else {
-        detail.response_body.clone()
+        detail.response_body()
     };
     let prettyable = detail_view(cap, |v| {
         if request {
@@ -1225,7 +1260,7 @@ fn side_panel(cap: Cap, request: bool) -> AnyElement {
     if request {
         column = column
             .child(ui::section_label("请求"))
-            .child(ui::kv("方法", detail.method.clone(), true))
+            .child(ui::kv("方法", detail.method().to_owned(), true))
             .child(ui::kv("地址", detail.url(), true))
             .child(ui::kv("时间", detail.time_text(), true))
             .child(ui::kv("体积", detail.request_size_text(), true));
@@ -1235,11 +1270,11 @@ fn side_panel(cap: Cap, request: bool) -> AnyElement {
             .child(ui::kv("状态", detail.status_text(), true))
             .child(ui::kv("体积", detail.response_size_text(), true));
     }
-    if let Some(error) = detail.error.clone() {
+    if let Some(error) = detail.error() {
         column = column.child(ui::vspacer(8.0)).child(ui::alert(
             ui::Tone::Critical,
             "这条记录以错误结束",
-            error,
+            error.to_owned(),
         ));
     }
     column
@@ -1251,7 +1286,7 @@ fn side_panel(cap: Cap, request: bool) -> AnyElement {
         .into_element()
 }
 
-fn headers_section(headers: Vec<(String, String)>) -> impl IntoElement {
+fn headers_section(headers: &[(String, String)]) -> impl IntoElement {
     if headers.is_empty() {
         return view()
             .child(
@@ -1271,7 +1306,7 @@ fn headers_section(headers: Vec<(String, String)>) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .child(
-                    text(name)
+                    text(name.clone())
                         .w(px(150.0))
                         .truncate()
                         .text_size(px(f::CAPTION))
@@ -1279,7 +1314,7 @@ fn headers_section(headers: Vec<(String, String)>) -> impl IntoElement {
                         .text_color(|| t::ink_tertiary()),
                 )
                 .child(
-                    text(value)
+                    text(value.clone())
                         .flex_1()
                         .truncate()
                         .text_size(px(f::CAPTION))
@@ -1297,7 +1332,7 @@ fn headers_section(headers: Vec<(String, String)>) -> impl IntoElement {
 /// 超过 [`CHUNK`] 的正文不整块进控件：先放前 32 KiB，底下给「继续加载剩余 …」，
 /// 每次再放 32 KiB。框里的文字、复制按钮的文案、剩余多少，全部经信号现读——
 /// 这个子树只在详情回来时建一次，快照会把切换美化态后的内容留在旧值上。
-fn body_section(cap: Cap, request: bool, body: Body, prettyable: bool) -> impl IntoElement {
+fn body_section(cap: Cap, request: bool, body: &Body, prettyable: bool) -> impl IntoElement {
     let title = if request { "请求体" } else { "响应体" };
     let size = crate::model::capture::format_bytes(body.size);
     let copyable = body.kind != Kind::Omitted;
@@ -1381,7 +1416,8 @@ fn body_section(cap: Cap, request: bool, body: Body, prettyable: bool) -> impl I
             copy_label,
             t::accent_ink,
             // 点下去那一刻**从详情里现取**当前视图的文本：闭包得是 `Copy`
-            // （按钮按帧求值），而 64 KiB 的字符串不是。
+            // （按钮按帧求值），而字符串不是。取到的 `Arc<str>` 在复制那一刻才
+            // 摊平成 `String`（S4：之前每次取都是整段克隆）。
             move || {
                 let (text, pretty_now) = cap.detail.with(|slot| {
                     slot.as_ref()
@@ -1392,9 +1428,9 @@ fn body_section(cap: Cap, request: bool, body: Body, prettyable: bool) -> impl I
                                 (view.response_shown.clone(), view.response_pretty)
                             }
                         })
-                        .unwrap_or_default()
+                        .unwrap_or((Arc::from(""), false))
                 });
-                copy_body(cap, text, pretty_now);
+                copy_body(cap, text.to_string(), pretty_now);
             },
         ));
     }
@@ -1404,7 +1440,7 @@ fn body_section(cap: Cap, request: bool, body: Body, prettyable: bool) -> impl I
         .flex_col()
         .child(head)
         .child(ui::vspacer(8.0))
-        .child(body_note(&body, prettyable))
+        .child(body_note(body, prettyable))
         .child(
             nsh_base::input()
                 .multiline(true)
@@ -1597,16 +1633,21 @@ fn thousands(value: u64) -> String {
 
 /// 正文当前该显示什么：能美化且处于美化态给美化文本，否则原文；
 /// `omitted` 给一句话（不是原文，也不给复制），二进制给 base64 原文。
-fn shown_text(body: &Body, content_type: Option<&str>, pretty: bool) -> String {
+///
+/// 返回 `Arc<str>`（S4）：原文态直接借 `Body` 里那一份（计数 +1），美化态把
+/// 重排结果建一次（≤ 64 KiB 阈值），之后 `DetailView` 每次被克隆都只是计数。
+fn shown_text(body: &Body, content_type: Option<&str>, pretty: bool) -> Arc<str> {
     match body.kind {
-        Kind::Absent => "（无正文）".to_owned(),
-        Kind::Omitted => body.note().unwrap_or_default(),
-        Kind::Binary => body.raw.clone(),
+        Kind::Absent => Arc::from("（无正文）"),
+        Kind::Omitted => Arc::from(body.note().unwrap_or_default()),
+        Kind::Binary => Arc::clone(&body.raw),
         Kind::Text => {
             if pretty {
-                body.pretty(content_type).unwrap_or_else(|| body.raw.clone())
+                body.pretty(content_type)
+                    .map(|text| Arc::from(text.as_str()))
+                    .unwrap_or_else(|| Arc::clone(&body.raw))
             } else {
-                body.raw.clone()
+                Arc::clone(&body.raw)
             }
         }
     }

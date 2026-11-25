@@ -72,6 +72,9 @@ pub fn boot() -> Result<(), Error> {
         runtime,
     };
     let _ = SERVICE.set(service);
+    // 写 / 读两条常驻 worker 线程（S4）。要在 `SERVICE` 之后：任务体里会
+    // `service()` 取 `admin` 与 `runtime`。
+    crate::worker::install();
     Ok(())
 }
 
@@ -183,11 +186,14 @@ pub fn capture_detail(name: &str, request_id: u64) -> Result<Option<Arc<Record>>
 
 /// 详情页用的异步形态：`Body` 的文本化（BASE64 解码 / JSON 重排）在线程上做，
 /// 让点击那一帧先把骨架画出来（ADR-8「点行 ≤200ms 出骨架」）。
+///
+/// 走**读车道**（S4）：连点几行时只有最后一行那一次会真的读，前面排队的那几次
+/// 在开跑前就被判过期、直接作废（sender 丢 → `Err(Canceled)`）。
 pub fn capture_detail_async(
     name: String,
     request_id: u64,
 ) -> oneshot::Receiver<Result<Option<Arc<Record>>, Error>> {
-    off_thread(move || capture_detail(&name, request_id))
+    off_thread_read(move || capture_detail(&name, request_id))
 }
 
 
@@ -249,10 +255,10 @@ pub fn export_har(name: String) -> oneshot::Receiver<Result<HarExport, Error>> {
     })
 }
 
-/// 异步动作的落点：普通线程 + `Handle::block_on` + oneshot。
+/// 异步动作的落点：**写车道**（S4）+ `Handle::block_on` + oneshot。
 ///
-/// 线程只活到这次动作结束（一秒级的 start/stop），不是线程池——M3 的写入频率
-/// 是个位数每分钟，不值得引入调度设施。
+/// 从前这里每次 `spawn` 一条临时线程；现在交给 [`crate::worker`] 的常驻写车道，
+/// 严格 FIFO —— 用户点的先后就是账本变化的先后，写动作之间不互相取消。
 fn off_engine<F, T>(future: F) -> oneshot::Receiver<Result<T, Error>>
 where
     F: std::future::Future<Output = Result<T, Error>> + Send + 'static,
@@ -266,7 +272,7 @@ where
             return rx;
         }
     };
-    std::thread::spawn(move || {
+    crate::worker::submit_write(move || {
         let out = handle.block_on(future);
         let _ = tx.send(out);
     });
@@ -401,7 +407,7 @@ pub fn ca_uninstall() -> oneshot::Receiver<Result<crate::model::Uninstall, Error
     })
 }
 
-/// 阻塞动作的落点：**普通线程**跑，结果经 oneshot 回到引擎线程。
+/// 阻塞动作的落点：**写车道**（S4）跑，结果经 oneshot 回到引擎线程。
 ///
 /// 与 [`off_engine`] 同一形状，只是这里跑的是同步的 Win32 读写（证书库、
 /// 系统偏好），不需要 tokio 上下文。
@@ -409,7 +415,18 @@ fn off_thread<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, Error> + Send + 'static,
 ) -> oneshot::Receiver<Result<T, Error>> {
     let (tx, rx) = oneshot::channel();
-    std::thread::spawn(move || {
+    crate::worker::submit_write(move || {
+        let _ = tx.send(work());
+    });
+    rx
+}
+
+/// 读动作的落点：**读车道**（S4）。带代次，连点几行只会跑最新那一次。
+fn off_thread_read<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> oneshot::Receiver<Result<T, Error>> {
+    let (tx, rx) = oneshot::channel();
+    crate::worker::submit_read(move || {
         let _ = tx.send(work());
     });
     rx
