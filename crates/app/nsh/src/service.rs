@@ -414,3 +414,49 @@ fn off_thread<T: Send + 'static>(
     });
     rx
 }
+
+// ---- 退出（T3，方案 §6.1 第 5 条） ------------------------------------------
+
+/// 一次退出收摊的记账：给日志与验收看，不给界面。
+#[derive(Debug, Default, Clone)]
+pub struct ShutdownReport {
+    /// 真正停掉的实例数（`desired` 保持原样，下次启动会照旧起来）。
+    pub stopped: usize,
+    /// 停不下来的实例（一个坏实例不拦其余，也不能把退出拖死）。
+    pub problems: Vec<String>,
+    /// `state.db-wal` 是否已经并进主库（`PRAGMA wal_checkpoint(TRUNCATE)` 成功）。
+    pub checkpointed: bool,
+    /// 合库失败的原因（成功时 `None`）。
+    pub error: Option<String>,
+}
+
+/// 退出前的收摊：**停所有在跑实例**（放端口）→ **把 WAL 合进主库**。
+///
+/// 和 `start`/`stop` 同一个形状（普通 std 线程 + oneshot 回来），但这里不能复用
+/// `off_engine`：`park_all` 与 `checkpoint` 必须在**同一条线程**上先后跑完，否则
+/// 合库可能撞上还没停干净的写者（`wal_checkpoint` 会报 busy）。
+///
+/// 没有宿主（golden / fixture / boot 失败）时立即回一份空报告：没有端口要放、
+/// 也没有 WAL 要合，调用方照常关窗。
+pub fn shutdown() -> oneshot::Receiver<ShutdownReport> {
+    let admin = service().map(|s| Arc::clone(&s.admin));
+    let handle = service().map(|s| s.runtime.handle().clone());
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(move || {
+        let mut report = ShutdownReport::default();
+        let (Some(admin), Some(handle)) = (admin, handle) else {
+            let _ = tx.send(report);
+            return;
+        };
+        let (stopped, problems) = handle.block_on(admin.park_all());
+        report.stopped = stopped;
+        report.problems = problems;
+        // 实例都停了再合库：还开着的写者会让 `wal_checkpoint` 报 busy（TRUNCATE 不合）。
+        match admin.checkpoint_state() {
+            Ok(()) => report.checkpointed = true,
+            Err(error) => report.error = Some(error.message),
+        }
+        let _ = tx.send(report);
+    });
+    rx
+}

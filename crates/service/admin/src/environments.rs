@@ -44,6 +44,16 @@ impl AdminService {
         self.manager.restart(name).await
     }
 
+    /// 退出前收摊（T3）：停掉所有在跑实例但保留 `desired`，返回 (停掉几个, 失败说明)。
+    pub async fn park_all(&self) -> (usize, Vec<String>) {
+        self.manager.park_all().await
+    }
+
+    /// 退出前把账本的 WAL 合进主库（T3）：`state.db-wal` 归零。
+    pub fn checkpoint_state(&self) -> Result<(), Error> {
+        self.manager.checkpoint_state()
+    }
+
     pub fn reallocate_port(&self, name: &str) -> Result<EnvView, Error> {
         self.manager.reallocate_port(name)
     }

@@ -331,4 +331,15 @@ impl Manager {
             .ok_or_else(|| self.not_found(name))?;
         self.view_of(&state, &raw)
     }
+
+    // ------------------------------------------------------------ 退出（T3）
+
+    /// 退出前把账本的日志合进主库（方案 §6.1 第 5 条）。
+    ///
+    /// 为什么不让 sqlite 自己合：正常关闭时它会合，但前提是进程走到 drop ——
+    /// `SERVICE` 是 `OnceLock` 静态，进程退出时不会 drop（T1 实测强杀后
+    /// `state.db-wal` 停在 2.1 MB）。所以这条路径必须在**进程还活着**时显式合。
+    pub fn checkpoint_state(&self) -> Result<(), Error> {
+        self.repo.checkpoint()
+    }
 }

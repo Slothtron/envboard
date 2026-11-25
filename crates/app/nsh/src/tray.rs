@@ -16,9 +16,10 @@
 //! 每秒的刷新循环再从 `state()` 把「外部 show（例如 N2 的二次启动激活）」
 //! 校正回来。
 //!
-//! 菜单「退出」只走**正常返回**路径（`close()` → `run_app` 返回 → 进程退出），
-//! 不碰 `process::exit`。落盘与 WAL checkpoint 是 T3 的活（§6.1 第 5 条），
-//! 这里先把入口接上，不造第二套退出。
+//! 退出只走**正常返回**路径（关窗 → `run_app` 返回 → 进程退出），不碰 `process::exit`。
+//! 收摊（停所有在跑实例 → `state.db` WAL checkpoint）由 `shutdown::quit()` 负责
+//! （方案 §6.1 第 5 条 / §6.6）：菜单「退出」与「常驻关掉后点 X」都把它当唯一入口，
+//! 这里不造第二套退出。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -130,9 +131,9 @@ mod imp {
 
     fn request_quit() {
         log::info!("托盘：退出（走正常关闭路径）");
-        QUIT.store(true, Ordering::Release);
-        // `close()`「whatever close_on_press says」——关窗处理会看到 QUIT 直接放行。
-        main_window().close();
+        // T3：这里不再自己 close。收摊（停环境 → 合库）走完之后才关窗，
+        // 否则 `run_app` 立刻返回，进程在 WAL 还没合、端口还没放的时候就没了。
+        crate::shutdown::quit();
     }
 
     /// 组一份托盘。标签里的数字是当前值，所以每次值变化都重建一次（T1 实测 ≈33ms）。
@@ -186,9 +187,11 @@ mod imp {
                 log::info!("托盘：关窗即隐藏（{reason:?}）");
                 hide_window();
             } else {
-                // 用户在设置里关掉了「常驻」：行为回到没有托盘时。
+                // 用户在设置里关掉了「常驻」：行为回到没有托盘时 —— 关窗即退。
+                // T3：也是退出，所以和菜单「退出」共用同一条收摊路径（停环境、
+                // 合库，再关窗）；这里不能直接 close，否则进程在 WAL 还没合的时候就没。
                 log::info!("托盘：常驻已关闭，关窗即退（{reason:?}）");
-                main_window().close();
+                crate::shutdown::quit();
             }
         });
 
@@ -220,6 +223,12 @@ pub use imp::install;
 
 #[cfg(not(windows))]
 pub fn install(_cx: Ctx) {}
+
+/// 把「放行关窗」拨上（T3）：收摊完成后 `close()` 进来时 `on_close_press` 直接放行。
+#[cfg(windows)]
+pub(crate) fn allow_close() {
+    QUIT.store(true, Ordering::Release);
+}
 
 #[cfg(test)]
 mod tests {

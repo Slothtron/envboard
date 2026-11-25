@@ -213,6 +213,31 @@ impl StateRepo for SqliteStateRepo {
         tx.commit().map_err(map_err)?;
         Ok(())
     }
+
+    /// `PRAGMA wal_checkpoint(TRUNCATE)`：把 WAL 全并进主库再把文件截成 0 字节。
+    ///
+    /// 为什么要显式做：单连接正常关闭时 SQLite 会自己合，但「正常关闭」依赖
+    /// 进程走到 drop —— 强杀/崩溃时 WAL 就留在盘上（T1 实测强杀后停在 2.1 MB）。
+    /// 退出路径在**还活着**的时候主动合一次，下一个实例打开时就没有待恢复的尾巴。
+    /// 返回的第一列是 `busy`（1 = 有别的连接还开着，没合干净），这里当错误报出去。
+    fn checkpoint(&self) -> Result<(), Error> {
+        let conn = self.conn.lock().unwrap();
+        let (busy, log, merged): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|error| sql_error(&self.path, error))?;
+        if busy != 0 {
+            return Err(Error::io_at(
+                "checkpoint the state database",
+                &self.path,
+                std::io::Error::other(format!(
+                    "wal_checkpoint reported busy=1 (log={log}, merged={merged})"
+                )),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// 按 ord 读一表的 doc 列并反序列化（实体形状契约不变）。

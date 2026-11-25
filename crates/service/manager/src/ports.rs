@@ -34,6 +34,13 @@ pub trait PortProbe: Send + Sync {
 pub trait StateRepo: Send + Sync {
     fn load(&self) -> Result<crate::state::PersistedState, Error>;
     fn save(&self, state: &crate::state::PersistedState) -> Result<(), Error>;
+    /// 退出前把日志合并进主库（T3，方案 §6.1 第 5 条）。
+    ///
+    /// 单文件实现没有日志可合，默认空操作；SQLite 实现要在这里把
+    /// `state.db-wal` 收成 0 字节 —— 强杀进程时 WAL 会留在磁盘上没人合。
+    fn checkpoint(&self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// 最小文件系统端口 —— 只放管理器真正需要的两件事：存在性、读取。

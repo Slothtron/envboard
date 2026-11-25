@@ -1405,3 +1405,64 @@ async fn toggling_capture_on_a_running_environment_hot_applies() {
     assert_eq!(harness.engine().capture_state("beta"), Some((false, 2)));
 }
 
+// --------------------------------------------------------------------------- //
+// 退出收摊（T3，方案 §6.1 第 5 条）：停实例但不改 desired
+// --------------------------------------------------------------------------- //
+
+/// 退出路径的**全部**意义就在这条：实例停掉（端口当场释放），`desired` 原样留着。
+/// 用 `stop()` 拼出来的退出会把 `desired` 记成 `stopped` —— 那样「关掉程序再打开」
+/// 就变成「用户主动停了这些环境」，下次启动一个都不会自己回来。
+#[tokio::test]
+async fn park_all_stops_live_instances_and_releases_ports_without_touching_desired() {
+    let harness = Harness::new();
+    let beta = create_beta(&harness);
+    let alpha = harness
+        .manager
+        .create(&serde_json::json!({"name": "alpha"}))
+        .unwrap();
+    harness.manager.start("beta").await.unwrap();
+    harness.manager.start("alpha").await.unwrap();
+
+    let (stopped, problems) = harness.manager.park_all().await;
+    assert_eq!(stopped, 2, "两个在跑的实例都要停掉");
+    assert!(problems.is_empty(), "{problems:?}");
+
+    // 端口当场释放：下一个实例不会撞 PortConflict。
+    for view in [&beta, &alpha] {
+        let addr = std::net::SocketAddr::new(
+            view.listen.host.parse().unwrap(),
+            view.listen.port,
+        );
+        assert!(
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300))
+                .is_err(),
+            "{} 的端口 {} 应该已经关掉",
+            view.name,
+            view.listen.port
+        );
+    }
+
+    // desired 不动：关程序 ≠ 用户要停这些环境。
+    for view in harness.manager.list().unwrap() {
+        assert_eq!(
+            view.desired,
+            envboard_manager::Desired::Running,
+            "{} 的 desired 必须保持 running（下次启动才会自己回来）",
+            view.name
+        );
+        assert_eq!(view.health, "stopped", "{} 的实例应已停止", view.name);
+    }
+    let saved = harness.saved();
+    assert_eq!(
+        serde_json::to_value(&saved.desired).unwrap()["beta"],
+        serde_json::json!("running"),
+        "账本里的 desired 也必须还是 running"
+    );
+
+    // 再收一次是空动作：退出路径可能被重复触发（连点 X、菜单又点退出）。
+    let (again, problems) = harness.manager.park_all().await;
+    assert_eq!(again, 0);
+    assert!(problems.is_empty());
+}
+
+

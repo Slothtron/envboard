@@ -159,3 +159,32 @@ fn newer_db_version_is_rejected_loudly() {
     assert!(error.message.contains("99"), "got {error:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T3（方案 §6.1 第 5 条）：退出前 `checkpoint()` 必须把 `state.db-wal` 收成 0 字节。
+///
+/// 这条钉的是「强杀会留尾巴、正常退出不会」：T1 实测强杀后 WAL 停在 2.1 MB。
+/// 单连接、小写入不会触发 SQLite 的自动 checkpoint（默认 1000 页），所以仓里的
+/// 常态就是「退出时 WAL 还带着一截没合并的页」——不显式合，下一个实例打开时
+/// 就要先做恢复。
+#[test]
+fn checkpoint_truncates_the_wal_and_keeps_the_data() {
+    let dir = temp_dir("checkpoint");
+    let db = dir.join("state.db");
+    let wal = dir.join("state.db-wal");
+    let repo = SqliteStateRepo::open(&db, &dir.join("state.json")).unwrap();
+    repo.save(&sample_state()).unwrap();
+
+    let before = std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
+    assert!(before > 0, "写完之后 WAL 应已有待合并的页（否则这条测试没验到东西）");
+
+    repo.checkpoint().expect("checkpoint 必须成功");
+
+    let after = std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
+    assert_eq!(after, 0, "TRUNCATE 之后 state.db-wal 必须归零");
+
+    // 合并没有丢东西：主库照样读得回完整账本。
+    let loaded = repo.load().unwrap();
+    assert_eq!(loaded.environments, sample_state().environments);
+    assert_eq!(loaded.desired, sample_state().desired);
+    let _ = std::fs::remove_dir_all(&dir);
+}

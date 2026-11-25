@@ -18,6 +18,9 @@ pub mod single_instance;
 // T2（方案 §6）：托盘是产品的常驻形态（关窗即隐藏、单击唤出、计数 tooltip），
 // 同时是隐藏态降频的判据来源（`window_visible()`）。
 mod tray;
+// T3（方案 §6.1 第 5 条）：退出走正常路径 —— 停环境（放端口）→ 合 WAL → 关窗
+// 让 `run_app` 返回；托盘「退出」与「关窗即退」共用它。
+mod shutdown;
 // T1（P6）托盘探针：只在 harness 构建里存在，产品构建不编这段代码。
 #[cfg(feature = "harness")]
 pub mod tray_probe;

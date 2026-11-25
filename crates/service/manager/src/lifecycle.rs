@@ -187,6 +187,43 @@ impl Manager {
         self.start(name).await
     }
 
+    /// 退出前收摊（T3，方案 §6.1 第 5 条）：把**所有在跑的实例**停掉，但**不动
+    /// `desired`**。
+    ///
+    /// 为什么不用 `stop()`：`stop` 会把 `desired` 记成 `stopped`，那是「用户要我停
+    /// 这个环境」的意思；而退出程序只是「这个进程要走」，用户的意图没有变。留着
+    /// `desired = running`，下次启动 reconcile 会照旧把它们拉起来，端口也在退出前
+    /// 就放掉了（下一个实例不会撞 `PortConflict`）。
+    ///
+    /// 一个实例停不下来（超时/线程不响应）时**继续停其余的**：退出路径不能因为
+    /// 一个坏实例把整台机器拖住，调用方拿到错误信息照常往下走（合库、退进程）。
+    pub async fn park_all(&self) -> (usize, Vec<String>) {
+        let names: Vec<String> = self.handles.lock().unwrap().keys().cloned().collect();
+        let mut stopped = 0usize;
+        let mut problems = Vec::new();
+        for name in names {
+            let handle = self.handles.lock().unwrap().remove(&name);
+            let Some(handle) = handle else { continue };
+            match self.engine.stop(&handle).await {
+                Ok(()) => {
+                    // 实例没了，缓冲跟着消失：让抓包页据版本号察觉「数据变了」。
+                    self.capture_watch.bump(&name);
+                    // 只记审计事件，不写账本：`desired` 保持不变是这条路径的全部意义。
+                    self.events.emit(
+                        self.clock.now_unix_ms(),
+                        ControlEvent::InstanceStopped {
+                            name: name.clone(),
+                        },
+                    );
+                    self.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    stopped += 1;
+                }
+                Err(error) => problems.push(format!("{name}: {}", error.message)),
+            }
+        }
+        (stopped, problems)
+    }
+
     pub fn remove(&self, name: &str) -> Result<(), Error> {
         {
             let state = self.state.lock().unwrap();
