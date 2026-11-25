@@ -29,9 +29,14 @@ fn entry_of(record: &Record) -> Option<Value> {
     let response = record.response.as_ref()?;
 
     // 抓包记录 v2 起 path 与 query 分存（query 不带前导 `?`）；URL 必须拼回查询串，
-    // 否则导出丢参数。
+    // 否则导出丢参数。协议照记录里的 `scheme` 写；空值（旧记录 / 夹具）沿用历史行为 `http`。
+    let scheme = if record.request.scheme.is_empty() {
+        "http"
+    } else {
+        record.request.scheme.as_str()
+    };
     let url = format!(
-        "http://{}{}{}",
+        "{scheme}://{}{}{}",
         record.request.authority,
         record.request.path,
         if record.request.query.is_empty() {
@@ -129,6 +134,7 @@ mod tests {
                 path: "/v1/orders".to_owned(),
                 query: query.to_owned(),
                 authority: "api.example.com".to_owned(),
+                scheme: "https".to_owned(),
                 headers: vec![("accept".to_owned(), "application/json".to_owned())],
                 body: None,
             },
@@ -155,11 +161,35 @@ mod tests {
         let url = with_query["log"]["entries"][0]["request"]["url"]
             .as_str()
             .unwrap_or_default();
-        assert_eq!(url, "http://api.example.com/v1/orders?page=2");
+        assert_eq!(url, "https://api.example.com/v1/orders?page=2");
         // 没有查询串时不留孤零零的 `?`
         let plain = har("proxy-a", &records(vec![record(2, "")]));
         assert_eq!(
             plain["log"]["entries"][0]["request"]["url"]
+                .as_str()
+                .unwrap_or_default(),
+            "https://api.example.com/v1/orders"
+        );
+    }
+
+    /// 导出照记录里的协议写：明文流量是 `http://`，旧记录（scheme 空）沿用 `http`。
+    #[test]
+    fn url_uses_recorded_scheme() {
+        let mut plain = record(4, "page=2");
+        plain.request.scheme = "http".to_owned();
+        let exported = har("proxy-a", &records(vec![plain]));
+        assert_eq!(
+            exported["log"]["entries"][0]["request"]["url"]
+                .as_str()
+                .unwrap_or_default(),
+            "http://api.example.com/v1/orders?page=2"
+        );
+
+        let mut legacy = record(5, "");
+        legacy.request.scheme.clear();
+        let exported = har("proxy-a", &records(vec![legacy]));
+        assert_eq!(
+            exported["log"]["entries"][0]["request"]["url"]
                 .as_str()
                 .unwrap_or_default(),
             "http://api.example.com/v1/orders"

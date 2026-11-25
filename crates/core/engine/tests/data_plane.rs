@@ -844,3 +844,87 @@ async fn plain_http_through_authed_chained_proxy_carries_the_credentials() {
     engine.stop();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 真机那条缺陷的进程内复现与收口：详情地址栏的协议由引擎按流量形态记录，
+/// 不再由界面猜。明文 absolute-URI = http，CONNECT 隧道内 = https；
+/// 清空会话时行、累计、丢弃一起归零（ADR-004 v1.11 口径）。
+#[tokio::test]
+async fn capture_records_scheme_by_traffic_form_and_clear_resets_counts() {
+    use envboard_engine::proxy::Listen;
+    use envboard_engine::{EngineBackend, EngineSpec, InstanceState, ProxyEngine};
+
+    let plain_origin = spawn_echo(false).await;
+    let tls_origin = spawn_echo(true).await;
+    let dir = temp("capture-scheme");
+    let (ca, _) = SharedCa::load_or_create(&dir).unwrap();
+    let proxy = free_port().await;
+    let backend = EngineBackend::new(CaStore::new(Arc::clone(&ca)));
+    let spec = EngineSpec {
+        listen: Listen::new(IpAddr::V4(Ipv4Addr::LOCALHOST), proxy),
+        insecure_hosts: vec!["svc.test".to_string()],
+        mitm_hosts: Vec::new(),
+        proxy_user: None,
+        proxy_password: None,
+        upstream: None,
+        rules_text: Some("127.0.0.1 svc.test".to_string()),
+        rules_source: None,
+        log: None,
+        trajectory: None,
+        capture: true,
+        capture_budget: 0,
+    };
+    let handle = backend.start("s5".into(), spec).await.unwrap();
+    for _ in 0..250 {
+        if !matches!(backend.report(&handle).state, InstanceState::Starting) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        backend.report(&handle).state,
+        InstanceState::Running,
+        "engine must reach running"
+    );
+
+    let (status, body, _) = absolute_get(
+        proxy,
+        &format!("http://svc.test:{plain_origin}/x?q=1"),
+        &format!("svc.test:{plain_origin}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "plain absolute-URI must be served: {body}");
+
+    let (established, inner, body) =
+        connect_get(proxy, &format!("svc.test:{tls_origin}"), None, &ca).await;
+    assert_eq!((established, inner), (200, 200), "CONNECT tunnel: {body}");
+
+    let rows = backend.capture_rows("s5", 10).expect("running capture session");
+    assert_eq!(
+        rows.captured as usize,
+        rows.rows.len(),
+        "尾部窗口里的行数应与累计计数一致"
+    );
+    let schemes: Vec<&str> = rows.rows.iter().map(|row| row.scheme.as_str()).collect();
+    assert!(
+        schemes.contains(&"http") && schemes.contains(&"https"),
+        "两种流量形态各带各的协议: {schemes:?}"
+    );
+    let plain_row = rows
+        .rows
+        .iter()
+        .find(|row| row.scheme == "http")
+        .expect("plain row");
+    assert_eq!(plain_row.authority, format!("svc.test:{plain_origin}"));
+    assert_eq!(plain_row.path, "/x");
+
+    // 清空即归零
+    assert!(backend.clear_capture("s5"), "clear on a running session");
+    let cleared = backend.capture_rows("s5", 10).expect("capture session");
+    assert!(cleared.rows.is_empty(), "清空后没有行");
+    assert_eq!(cleared.captured, 0, "累计计数归零");
+    assert_eq!(cleared.dropped, 0, "丢弃计数一并归零");
+
+    backend.stop(&handle).await.ok();
+    std::fs::remove_dir_all(&dir).ok();
+}

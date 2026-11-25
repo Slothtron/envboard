@@ -372,6 +372,11 @@ pub fn fixture_rows(n: usize) -> Vec<CaptureRow> {
             } else {
                 "api.example.com".to_owned()
             },
+            scheme: if index % 5 == 0 {
+                "http".to_owned()
+            } else {
+                "https".to_owned()
+            },
             path: path.to_owned(),
             status: if error { None } else { Some(status) },
             error,
@@ -401,6 +406,7 @@ mod tests {
             time: 0,
             method: "GET".to_owned(),
             authority: "example.com".to_owned(),
+            scheme: "https".to_owned(),
             path: "/x".to_owned(),
             status,
             error,

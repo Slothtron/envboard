@@ -19,6 +19,9 @@ use envboard_ui::primitives::Tone;
 use crate::model::body::Body;
 use crate::model::capture::format_bytes;
 
+/// 记录没带协议（旧记录、夹具）时的兜底：envboard 是 HTTPS 中间人，按 https 显示。
+const DEFAULT_SCHEME: &str = "https";
+
 /// 详情面板要显示的全部内容（列表的瘦行之外，外加头部与正文）。
 ///
 /// 把手只有 `inner` 一个字段；需要字段时用同名方法（借用，不搬）。
@@ -32,6 +35,8 @@ struct Inner {
     time_ms: u64,
     method: String,
     authority: String,
+    /// 协议（`http` / `https`；空串 = 未知 —— 旧记录与夹具）。
+    scheme: String,
     /// 纯路径（不含 query）。
     path: String,
     /// 原始查询串（不含 `?`；空串 = 没有）。
@@ -69,6 +74,7 @@ impl Detail {
                 time_ms: record.time,
                 method: record.request.method.clone(),
                 authority: record.request.authority.clone(),
+                scheme: record.request.scheme.clone(),
                 path: record.request.path.clone(),
                 query: record.request.query.clone(),
                 status: response.and_then(|response| response.status),
@@ -91,6 +97,7 @@ impl Detail {
         time_ms: u64,
         method: String,
         authority: String,
+        scheme: String,
         path: String,
         status: Option<u16>,
     ) -> Self {
@@ -99,6 +106,7 @@ impl Detail {
                 time_ms,
                 method,
                 authority,
+                scheme,
                 path,
                 status,
                 ..Inner::default()
@@ -138,10 +146,15 @@ impl Detail {
         self.inner.response_content_type.as_deref()
     }
 
-    /// 拼回可读的一行：`https://authority/path?query`（代理不记 scheme，
-    /// 统一按 https 展示——envboard 是 HTTPS 中间人）。
+    /// 拼回可读的一行：`scheme://authority/path?query`。协议取自记录的 `scheme`
+    /// 字段（引擎按流量形态填 http / https）；空值（旧记录、夹具）按 https 兜底。
     pub fn url(&self) -> String {
-        let mut out = format!("https://{}{}", self.inner.authority, self.inner.path);
+        let scheme = if self.inner.scheme.is_empty() {
+            DEFAULT_SCHEME
+        } else {
+            self.inner.scheme.as_str()
+        };
+        let mut out = format!("{scheme}://{}{}", self.inner.authority, self.inner.path);
         if !self.inner.query.is_empty() {
             out.push('?');
             out.push_str(&self.inner.query);
@@ -218,6 +231,7 @@ mod tests {
                 path: "/v1/orders".to_owned(),
                 query: "page=2".to_owned(),
                 authority: "api.example.com".to_owned(),
+                scheme: "https".to_owned(),
                 headers: vec![
                     ("Content-Type".to_owned(), "application/json".to_owned()),
                     ("X-Trace".to_owned(), "a".to_owned()),
@@ -312,6 +326,7 @@ mod tests {
             1_700_000_000_000,
             "GET".to_owned(),
             "a.example.com".to_owned(),
+            "https".to_owned(),
             "/x".to_owned(),
             Some(200),
         );
@@ -319,5 +334,30 @@ mod tests {
         assert_eq!(d.status_text(), "200");
         assert!(d.request_headers().is_empty(), "骨架没有头部");
         assert_eq!(d.request_body().kind, crate::model::body::Kind::Absent);
+    }
+
+    /// 明文流量显示 `http://`（真机缺陷：详情 scheme 恒 https）。
+    #[test]
+    fn plain_traffic_shows_http_scheme() {
+        let d = Detail::skeleton(
+            1_700_000_000_000,
+            "GET".to_owned(),
+            "a.example.com".to_owned(),
+            "http".to_owned(),
+            "/x".to_owned(),
+            Some(200),
+        );
+        assert_eq!(d.url(), "http://a.example.com/x");
+
+        // 空 scheme（旧记录 / 夹具）仍按 https 兜底。
+        let legacy = Detail::skeleton(
+            1_700_000_000_000,
+            "GET".to_owned(),
+            "a.example.com".to_owned(),
+            String::new(),
+            "/x".to_owned(),
+            Some(200),
+        );
+        assert_eq!(legacy.url(), "https://a.example.com/x");
     }
 }

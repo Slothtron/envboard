@@ -117,11 +117,16 @@ impl CaptureBuffer {
         }
     }
 
-    /// 手动清空：记录清零、generation +1，会话延续。
+    /// 手动清空：记录与计数一起归零，generation +1，会话延续。
+    ///
+    /// `captured` / `dropped` 也归零（ADR-004 v1.11 口径）：清空是「这一场从零开始」，
+    /// 留着历史统计会让 chip 停在「已捕获 0 · 丢弃 3」这种自相矛盾的读数上。
     pub fn clear(&self) {
         let mut records = self.records.lock().unwrap();
         records.clear();
         self.bytes.store(0, Ordering::Release);
+        self.captured.store(0, Ordering::Release);
+        self.dropped.store(0, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -378,13 +383,17 @@ mod tests {
     }
 
     #[test]
-    fn clear_keeps_session_and_bumps_generation() {
-        let buffer = buffer(0); // 0 = 无预算
+    fn clear_resets_counters_and_bumps_generation() {
+        let buffer = buffer(100); // 预算 100，下面第 2 条会被淘汰成 dropped
         push(&buffer, 1, 10);
+        push(&buffer, 2, 200); // 单条超预算 → dropped +1
+        assert_eq!(buffer.captured(), 1);
+        assert_eq!(buffer.dropped(), 1);
         buffer.clear();
         assert_eq!(buffer.tail(10).len(), 0);
         assert_eq!(buffer.generation(), 2);
-        assert_eq!(buffer.captured(), 1, "clear 不动计数——历史统计仍在");
+        assert_eq!(buffer.captured(), 0, "清空即归零——这一场从零开始");
+        assert_eq!(buffer.dropped(), 0, "丢弃计数一并归零，chip 不出现「0 · 丢弃 N」");
     }
 
     #[test]
@@ -498,6 +507,7 @@ mod tests {
                 path: "/v1/orders".to_owned(),
                 query: "page=2".to_owned(),
                 authority: "api.example.com".to_owned(),
+                scheme: "https".to_owned(),
                 headers: vec![("Accept".to_owned(), "*/*".to_owned())],
                 body: Some(RecordBody::Present {
                     encoding: "utf8".to_owned(),

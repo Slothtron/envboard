@@ -252,6 +252,9 @@ pub struct RecordRequest {
     /// 原始查询串（不含前导 `?`；空串 = 没有）。
     pub query: String,
     pub authority: String,
+    /// URL 的协议（http / https；空串 = 未知 —— 旧记录与夹具如此）。
+    /// 由引擎按流量形态填：absolute-URI 是 http，CONNECT 隧道内是 https。
+    pub scheme: String,
     /// 头部按 `[[name, value], …]` 保序留存（大小写原样，重复名不合并）。
     pub headers: Vec<(String, String)>,
     pub body: Option<RecordBody>,
@@ -353,6 +356,8 @@ pub struct CaptureRow {
     pub time: u64,
     pub method: String,
     pub authority: String,
+    /// URL 的协议（`http` / `https`）。空串 = 未知（旧记录与夹具），界面按 `https` 兜底。
+    pub scheme: String,
     /// 纯路径，不含 query（v2 起 path 与 query 分存）。
     pub path: String,
     /// 无响应（连接失败 / 进行中）→ None。
@@ -377,6 +382,7 @@ impl Record {
             time: self.time,
             method: self.request.method.clone(),
             authority: self.request.authority.clone(),
+            scheme: self.request.scheme.clone(),
             path: self.request.path.clone(),
             status: self.response.as_ref().and_then(|response| response.status),
             error: self.error.is_some(),
@@ -793,6 +799,7 @@ mod tests {
                 path: "/v1/orders".into(),
                 query: "page=2".into(),
                 authority: "api.example.com".into(),
+                scheme: "https".into(),
                 headers: vec![("Content-Type".into(), "application/json".into())],
                 body: Some(RecordBody::Present {
                     encoding: "utf8".into(),
@@ -824,6 +831,7 @@ mod tests {
             assert!(value.get(key).is_some(), "缺键 {key}");
         }
         assert_eq!(value["request"]["headers"], serde_json::json!([["Content-Type", "application/json"]]));
+        assert_eq!(value["request"]["scheme"], "https", "协议随记录留存，界面不再猜");
         assert_eq!(
             value["request"]["body"],
             serde_json::json!({"encoding": "utf8", "size": 12, "content": "{}"})

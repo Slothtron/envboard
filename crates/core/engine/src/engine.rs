@@ -857,6 +857,14 @@ async fn serve_request<W: AsyncRead + AsyncWrite + Unpin>(
                         path: capture_path,
                         query: capture_query,
                         authority: authority.clone(),
+                        // 协议由流量形态决定（见 `RequestOrigin.with_tls`）：absolute-URI
+                        // 是明文 http，CONNECT 隧道内必然 https。这是「详情地址栏恒
+                        // https://」那条真机缺陷的修法——不再由界面猜。
+                        scheme: if origin.with_tls {
+                            "https".to_owned()
+                        } else {
+                            "http".to_owned()
+                        },
                         headers: head.headers,
                         body: Some(crate::capture::encode_body(&request_body)),
                     },

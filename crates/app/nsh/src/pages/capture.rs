@@ -121,6 +121,7 @@ impl DetailView {
                 row.time,
                 row.method.clone(),
                 row.authority.clone(),
+                row.scheme.clone(),
                 row.path.clone(),
                 row.status,
             ),
@@ -1558,6 +1559,7 @@ fn fixture_detail_row() -> CaptureRow {
         time: 1_700_000_000_000,
         method: "POST".to_owned(),
         authority: "api.example.com".to_owned(),
+        scheme: "https".to_owned(),
         path: "/v1/orders".to_owned(),
         status: Some(200),
         error: false,
@@ -1598,6 +1600,7 @@ fn fixture_detail() -> Detail {
             path: "/v1/orders".to_owned(),
             query: "page=2".to_owned(),
             authority: "api.example.com".to_owned(),
+            scheme: "https".to_owned(),
             headers: vec![
                 ("content-type".to_owned(), "application/json".to_owned()),
                 ("x-trace".to_owned(), "m5".to_owned()),
