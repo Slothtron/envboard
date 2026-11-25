@@ -29,7 +29,7 @@ mod worker;
 #[cfg(feature = "harness")]
 pub mod tray_probe;
 
-pub use brand::{icon_path, APP_ID, NAME, TAGLINE, WINDOW_TITLE};
+pub use brand::{APP_ID, NAME, TAGLINE, WINDOW_TITLE, icon_path};
 pub use service::record_boot_error;
 pub use shell::App;
 

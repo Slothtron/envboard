@@ -4,9 +4,9 @@
 //! 不能因为某条记录的头字段形状怪就整块报错。正文三形状交给 `body::Body`。
 //!
 //! **S4：一个 `Arc`，不再深拷贝**（方案 §4.1 E）。这一份内容会被信号快照、
-//! 页签子树、正文块、复制按钮各取一次；早先每次取都是整段克隆（headers + 两侧正文
-//! + 美化文本）。现在 `Detail` 只是 `Arc<Inner>` 的把手：`clone` 是计数 +1，
-//! 相等按指针比（同一份实例就是同一条详情），字段走访问器借用。
+//! 页签子树、正文块、复制按钮各取一次；早先每次取都是整段克隆
+//! （headers、两侧正文、美化文本）。现在 `Detail` 只是 `Arc<Inner>` 的把手：
+//! `clone` 是计数 +1，相等按指针比（同一份实例就是同一条详情），字段走访问器借用。
 //!
 //! 物化只发生一次：`from_record` 把 `Record` 的 `String` 正文转成 `Arc<str>`（≤ 后端
 //! 256 KiB 上限），之后所有持有都是 O(1)。
@@ -78,7 +78,10 @@ impl Detail {
                 path: record.request.path.clone(),
                 query: record.request.query.clone(),
                 status: response.and_then(|response| response.status),
-                error: record.error.as_ref().map(envboard_protocol::RecordError::text),
+                error: record
+                    .error
+                    .as_ref()
+                    .map(envboard_protocol::RecordError::text),
                 request_content_type: content_type_of(&request_headers),
                 response_content_type: content_type_of(&response_headers),
                 request_body: Body::from_record(record.request.body.as_ref()),
@@ -244,7 +247,10 @@ mod tests {
             },
             response: Some(RecordResponse {
                 status: Some(502),
-                headers: vec![("content-type".to_owned(), "text/html; charset=utf-8".to_owned())],
+                headers: vec![(
+                    "content-type".to_owned(),
+                    "text/html; charset=utf-8".to_owned(),
+                )],
                 body: Some(RecordBody::Omitted {
                     omitted: true,
                     size: 400_000,

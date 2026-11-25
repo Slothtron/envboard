@@ -200,7 +200,6 @@ pub fn capture_detail_async(
     off_thread_read(move || capture_detail(&name, request_id))
 }
 
-
 /// 开启抓包：工作区级单例会话切到这个环境（环境得先在跑）。
 pub fn start_debug(name: &str) -> Result<envboard_protocol::DebugView, Error> {
     match service() {
@@ -254,7 +253,8 @@ pub fn export_har(name: String) -> oneshot::Receiver<Result<HarExport, Error>> {
         let text = serde_json::to_string_pretty(&har)
             .map_err(|error| Error::internal_error(format!("HAR 序列化失败：{error}")))?;
         let stem = format!("{name}-session-{}", view.session.id);
-        let path = crate::export::write_unique(&crate::export::downloads_dir(), &stem, "har", &text)?;
+        let path =
+            crate::export::write_unique(&crate::export::downloads_dir(), &stem, "har", &text)?;
         Ok(HarExport { path, entries })
     })
 }
@@ -343,24 +343,21 @@ fn presence(p: StorePresence) -> crate::model::Trust {
 /// 所以调用方要用 `background(...)` 放到工作线程上，别占渲染线程。
 pub fn ca_snapshot() -> Result<crate::model::Ca, Error> {
     let s = service().ok_or_else(|| Error::internal_error("宿主尚未启动"))?;
-    let control = s
-        .ca
-        .as_ref()
-        .ok_or_else(|| Error::internal_error("本宿主没有共享 CA（假引擎装配）"))?;
+    let control =
+        s.ca.as_ref()
+            .ok_or_else(|| Error::internal_error("本宿主没有共享 CA（假引擎装配）"))?;
     let trust = control.trust();
     // `info()` 是证书 DER 的结构摘要（`CertInfo` 的 JSON 形态）：字段读不全就留空，
     // 页面显示「—」，不猜。
     let info = control.info().unwrap_or(serde_json::Value::Null);
-    let text = |key: &str| {
-        info.get(key)
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    };
-    let pubkey = match (text("pubkey_alg"), text("pubkey_curve"), info.get("pubkey_bits")) {
+    let text = |key: &str| info.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    let pubkey = match (
+        text("pubkey_alg"),
+        text("pubkey_curve"),
+        info.get("pubkey_bits"),
+    ) {
         (Some(alg), Some(curve), _) => Some(format!("{alg} · {curve}")),
-        (Some(alg), None, Some(bits)) => bits
-            .as_u64()
-            .map(|bits| format!("{alg} {bits}")),
+        (Some(alg), None, Some(bits)) => bits.as_u64().map(|bits| format!("{alg} {bits}")),
         (Some(alg), None, None) => Some(alg),
         _ => None,
     };

@@ -1429,10 +1429,7 @@ async fn park_all_stops_live_instances_and_releases_ports_without_touching_desir
 
     // 端口当场释放：下一个实例不会撞 PortConflict。
     for view in [&beta, &alpha] {
-        let addr = std::net::SocketAddr::new(
-            view.listen.host.parse().unwrap(),
-            view.listen.port,
-        );
+        let addr = std::net::SocketAddr::new(view.listen.host.parse().unwrap(), view.listen.port);
         assert!(
             std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300))
                 .is_err(),
@@ -1464,5 +1461,3 @@ async fn park_all_stops_live_instances_and_releases_ports_without_touching_desir
     assert_eq!(again, 0);
     assert!(problems.is_empty());
 }
-
-

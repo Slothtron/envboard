@@ -67,7 +67,8 @@ pub fn mitm_server_config(ca: Arc<SharedCa>) -> Result<Arc<ServerConfig>, Error>
 /// 放宽必须走显式描述符，禁止用"关掉校验的全局 client config"表达。
 pub fn strict_upstream_client_config() -> Result<Arc<ClientConfig>, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = rustls_platform_verifier::Verifier::new(provider.clone()).map_err(rustls_error)?;
+    let verifier =
+        rustls_platform_verifier::Verifier::new(provider.clone()).map_err(rustls_error)?;
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(rustls_error)?

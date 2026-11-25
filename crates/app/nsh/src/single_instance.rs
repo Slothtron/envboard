@@ -12,7 +12,7 @@
 //!
 //! **为什么不是内核事件**：事件不携带调用方身份，同会话任意进程都能 `SetEvent`
 //! 触发开窗（SOP §6 的反模式）。管道能在服务端用 `GetNamedPipeClientProcessId`
-//! + `QueryFullProcessImageNameW` 取调用方 exe 路径，与本程序比对，**只有同一个
+//! 与 `QueryFullProcessImageNameW` 取调用方 exe 路径，与本程序比对，**只有同一个
 //! 可执行文件才被接受**；owner-only DACL 再挡跨用户。握手是双向的：client 写完
 //! 请求后**保持连接等回执**（保证服务端取 PID 时 client 仍活着，避开 PID 复用），
 //! 服务端写完回执后等 client 关闭再 `DisconnectNamedPipe`（避免回执被丢弃）。
@@ -23,11 +23,11 @@
 //! 非 Windows 上整套退化为 `Unavailable`，行为回到「锁被占就报错退出」。
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub use imp::{
-    Activated, Guard, Preflight, lock_held_message, activation_failed_message, preflight, prompt,
+    Activated, Guard, Preflight, activation_failed_message, lock_held_message, preflight, prompt,
     spawn_waiter,
 };
 
@@ -328,8 +328,8 @@ mod imp {
     };
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-        GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-        PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
+        GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
     };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -383,20 +383,15 @@ mod imp {
 
         /// 把句柄挪出来交给等待线程（只成功一次）。
         fn take(&self) -> Option<HANDLE> {
-            let raw = self
-                .handle
-                .swap(0, std::sync::atomic::Ordering::AcqRel);
+            let raw = self.handle.swap(0, std::sync::atomic::Ordering::AcqRel);
             (raw != 0).then_some(raw as HANDLE)
         }
     }
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            self.stop
-                .store(true, std::sync::atomic::Ordering::Release);
-            let raw = self
-                .handle
-                .swap(0, std::sync::atomic::Ordering::AcqRel);
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            let raw = self.handle.swap(0, std::sync::atomic::Ordering::AcqRel);
             if raw != 0 {
                 // SAFETY: 没有等待线程，句柄由本结构独占，只在这里关一次。
                 unsafe { CloseHandle(raw as HANDLE) };
@@ -405,10 +400,10 @@ mod imp {
             // 等待线程可能正卡在 `ConnectNamedPipe`：自连一次让它醒过来。
             // 它看到 stop 就会关句柄退出（所以这里不关，交给它关）。
             wake_pending_connect(&self.pipe);
-            if let Ok(mut slot) = self.waiter.lock() {
-                if let Some(join) = slot.take() {
-                    let _ = join.join();
-                }
+            if let Ok(mut slot) = self.waiter.lock()
+                && let Some(join) = slot.take()
+            {
+                let _ = join.join();
             }
         }
     }
@@ -556,10 +551,22 @@ mod imp {
             unsafe { AllowSetForegroundWindow(server_pid) };
         }
 
-        let request = [crate::single_instance::MAGIC, crate::single_instance::PROTO_VERSION, crate::single_instance::ACTION_OPEN];
+        let request = [
+            crate::single_instance::MAGIC,
+            crate::single_instance::PROTO_VERSION,
+            crate::single_instance::ACTION_OPEN,
+        ];
         let mut written = 0u32;
         // SAFETY: request/client 在本函数内有效。
-        let wrote = unsafe { WriteFile(client, request.as_ptr(), request.len() as u32, &mut written, null_mut()) };
+        let wrote = unsafe {
+            WriteFile(
+                client,
+                request.as_ptr(),
+                request.len() as u32,
+                &mut written,
+                null_mut(),
+            )
+        };
         if wrote == 0 || written as usize != request.len() {
             return Activated::NoResponse("写入激活请求失败（主实例可能已退出）".to_owned());
         }
@@ -780,7 +787,8 @@ mod imp {
             }
             let mut buf = [0u16; 1024];
             let mut len = buf.len() as u32;
-            let ok = QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+            let ok =
+                QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
             CloseHandle(proc);
             if ok == 0 {
                 return None;
@@ -832,16 +840,8 @@ mod imp {
     fn peek(pipe: HANDLE) -> Option<u32> {
         let mut available = 0u32;
         // SAFETY: pipe 已连接；只读计数器，不需要数据缓冲区。
-        let ok = unsafe {
-            PeekNamedPipe(
-                pipe,
-                null_mut(),
-                0,
-                null_mut(),
-                &mut available,
-                null_mut(),
-            )
-        };
+        let ok =
+            unsafe { PeekNamedPipe(pipe, null_mut(), 0, null_mut(), &mut available, null_mut()) };
         (ok != 0).then_some(available)
     }
 

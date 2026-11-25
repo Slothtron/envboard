@@ -33,6 +33,10 @@ pub const DEFAULT_CAPTURE_BUDGET: usize = 256 * 1024 * 1024;
 /// 调用点在**释放缓冲锁之后**、在代理的工作线程上，所以实现必须轻（一次加锁计数即可）。
 pub type CaptureNotify = Arc<dyn Fn(u64) + Send + Sync>;
 
+/// trait 级通知（S3）：比 [`CaptureNotify`] 多一个环境名维度，参数是 `(env, request_id)`。
+/// 后端把各环境的钩子汇到一个注册点，读侧（manager）只注册一次。
+pub type CaptureWatch = Arc<dyn Fn(&str, u64) + Send + Sync>;
+
 pub struct CaptureBuffer {
     session_id: u64,
     started_at: u64,
@@ -215,7 +219,6 @@ impl CaptureBuffer {
         rows.sort_unstable_by_key(|row| row.request_id);
         rows
     }
-
 }
 
 impl std::fmt::Debug for CaptureBuffer {
@@ -393,17 +396,17 @@ mod tests {
         assert_eq!(buffer.tail(10).len(), 0);
         assert_eq!(buffer.generation(), 2);
         assert_eq!(buffer.captured(), 0, "清空即归零——这一场从零开始");
-        assert_eq!(buffer.dropped(), 0, "丢弃计数一并归零，chip 不出现「0 · 丢弃 N」");
+        assert_eq!(
+            buffer.dropped(),
+            0,
+            "丢弃计数一并归零，chip 不出现「0 · 丢弃 N」"
+        );
     }
 
     #[test]
     fn get_prefers_the_latest_for_a_reused_request_id() {
         let buffer = buffer(0);
-        buffer.push(
-            7,
-            Arc::new(rec(7)),
-            10,
-        );
+        buffer.push(7, Arc::new(rec(7)), 10);
         let later = Record {
             request: RecordRequest {
                 path: "/later".to_owned(),
@@ -516,12 +519,12 @@ mod tests {
                 }),
             },
             response,
-            error: error.then(|| envboard_protocol::RecordError::Detail(
-                envboard_protocol::RecordErrorDetail {
+            error: error.then(|| {
+                envboard_protocol::RecordError::Detail(envboard_protocol::RecordErrorDetail {
                     kind: "connect".to_owned(),
                     message: None,
-                },
-            )),
+                })
+            }),
         }
     }
 

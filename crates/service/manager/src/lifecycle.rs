@@ -211,11 +211,10 @@ impl Manager {
                     // 只记审计事件，不写账本：`desired` 保持不变是这条路径的全部意义。
                     self.events.emit(
                         self.clock.now_unix_ms(),
-                        ControlEvent::InstanceStopped {
-                            name: name.clone(),
-                        },
+                        ControlEvent::InstanceStopped { name: name.clone() },
                     );
-                    self.generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    self.generation
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     stopped += 1;
                 }
                 Err(error) => problems.push(format!("{name}: {}", error.message)),

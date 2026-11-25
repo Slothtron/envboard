@@ -156,7 +156,7 @@ where
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_secondary()),
+                .text_color(t::ink_secondary),
         )
 }
 
@@ -185,7 +185,7 @@ fn cell_base(
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(font)
-                .text_color(move || ink()),
+                .text_color(ink),
         )
 }
 
@@ -199,7 +199,7 @@ pub fn head_cell(label: &'static str, width: f32) -> impl IntoElement {
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
 }
 
@@ -214,7 +214,7 @@ pub fn head_cell_grow(label: &'static str) -> impl IntoElement {
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
 }
 
@@ -232,7 +232,7 @@ pub fn cell_grow(label: impl IntoReactive<SharedString> + 'static) -> impl IntoE
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
 }
 
@@ -264,16 +264,16 @@ where
             .flex_row()
             .items_center()
             .border_b_1()
-            .border_color(|| t::divider())
+            .border_color(t::divider)
             .bg(move || if is_sel() { t::selection() } else { t::layer() })
             .hover(move |s| {
                 if is_sel() {
-                    s.bg(move || t::selection())
+                    s.bg(t::selection)
                 } else {
-                    s.bg(move || t::hover_fill())
+                    s.bg(t::hover_fill)
                 }
             })
-            .on_press(move || on())
+            .on_press(on)
             .child(
                 view()
                     .w(px(m::BAR_W))
@@ -288,12 +288,12 @@ where
 // ---- 线、按钮、页签 ------------------------------------------------------
 
 pub fn divider() -> impl IntoElement {
-    view().w_full().h(px(1.0)).bg(|| t::divider())
+    view().w_full().h(px(1.0)).bg(t::divider)
 }
 
 /// 比 `divider` 重一档的线，用于卡内分区（如证书页安装区与信息区之间）。
 pub fn toned_divider() -> impl IntoElement {
-    view().w_full().h(px(1.0)).bg(|| t::control_stroke())
+    view().w_full().h(px(1.0)).bg(t::control_stroke)
 }
 
 pub fn btn_primary<L, O>(label: L, on: O) -> impl IntoElement
@@ -307,14 +307,14 @@ where
         .flex_row()
         .items_center()
         .rounded(px(m::RADIUS))
-        .bg(|| t::accent())
-        .hover(|s| s.bg(|| t::accent_hover()))
-        .on_press(move || on())
+        .bg(t::accent)
+        .hover(|s| s.bg(t::accent_hover))
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::on_accent()),
+                .text_color(t::on_accent),
         )
 }
 
@@ -330,15 +330,15 @@ where
         .items_center()
         .rounded(px(m::RADIUS))
         .border_1()
-        .border_color(|| t::control_stroke())
-        .bg(|| t::control_fill())
-        .hover(|s| s.bg(|| t::hover_fill()))
-        .on_press(move || on())
+        .border_color(t::control_stroke)
+        .bg(t::control_fill)
+        .hover(|s| s.bg(t::hover_fill))
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
 }
 
@@ -365,13 +365,13 @@ where
         .flex_row()
         .items_center()
         .rounded(px(m::RADIUS))
-        .hover(|s| s.bg(|| t::hover_fill()))
-        .on_press(move || on())
+        .hover(|s| s.bg(t::hover_fill))
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(move || ink()),
+                .text_color(ink),
         )
 }
 
@@ -414,14 +414,8 @@ where
                 t::control_fill()
             }
         })
-        .hover(move |s| {
-            if is_sel() {
-                s
-            } else {
-                s.bg(move || t::hover_fill())
-            }
-        })
-        .on_press(move || on())
+        .hover(move |s| if is_sel() { s } else { s.bg(t::hover_fill) })
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::CAPTION))
@@ -478,14 +472,8 @@ where
                 t::control_fill()
             }
         })
-        .hover(move |s| {
-            if is_sel() {
-                s
-            } else {
-                s.bg(move || t::hover_fill())
-            }
-        })
-        .on_press(move || on())
+        .hover(move |s| if is_sel() { s } else { s.bg(t::hover_fill) })
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::CAPTION))
@@ -512,7 +500,7 @@ where
         .flex_col()
         .items_center()
         .justify_center()
-        .on_press(move || on())
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::BODY))
@@ -540,7 +528,7 @@ pub fn section_label(label: &'static str) -> impl IntoElement {
         text(label)
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_tertiary()),
+            .text_color(t::ink_tertiary),
     )
 }
 
@@ -559,7 +547,7 @@ pub fn kv(
                 text(k)
                     .text_size(px(f::CAPTION))
                     .font_family(f::FONT_TEXT)
-                    .text_color(|| t::ink_secondary()),
+                    .text_color(t::ink_secondary),
             ),
         )
         .child(
@@ -567,7 +555,7 @@ pub fn kv(
                 text(v)
                     .text_size(px(f::CAPTION))
                     .font_family(if mono { f::FONT_MONO } else { f::FONT_TEXT })
-                    .text_color(|| t::ink()),
+                    .text_color(t::ink),
             ),
         )
 }
@@ -590,10 +578,10 @@ pub fn alert(
         .flex_row()
         .rounded(px(m::RADIUS))
         .border_1()
-        .border_color(|| t::control_stroke())
-        .bg(|| t::control_fill())
+        .border_color(t::control_stroke)
+        .bg(t::control_fill)
         .overflow_hidden()
-        .child(view().w(px(m::BAR_W)).h_full().bg(move || bar()))
+        .child(view().w(px(m::BAR_W)).h_full().bg(bar))
         .child(
             view()
                 .flex_1()
@@ -603,14 +591,14 @@ pub fn alert(
                     text(title)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
-                        .text_color(move || ink()),
+                        .text_color(ink),
                 )
                 .child(vspacer(3.0))
                 .child(
                     text(desc)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink_tertiary()),
+                        .text_color(t::ink_tertiary),
                 ),
         )
 }
@@ -633,10 +621,10 @@ where
         .flex_row()
         .rounded(px(m::RADIUS))
         .border_1()
-        .border_color(|| t::control_stroke())
-        .bg(|| t::control_fill())
+        .border_color(t::control_stroke)
+        .bg(t::control_fill)
         .overflow_hidden()
-        .child(view().w(px(m::BAR_W)).h_full().bg(|| t::critical()))
+        .child(view().w(px(m::BAR_W)).h_full().bg(t::critical))
         .child(
             view()
                 .flex_1()
@@ -651,14 +639,14 @@ where
                             text(title)
                                 .text_size(px(f::CAPTION))
                                 .font_family(f::FONT_TEXT)
-                                .text_color(|| t::critical()),
+                                .text_color(t::critical),
                         )
                         .child(vspacer(2.0))
                         .child(
                             text(detail)
                                 .text_size(px(f::CAPTION))
                                 .font_family(f::FONT_MONO)
-                                .text_color(|| t::ink_secondary()),
+                                .text_color(t::ink_secondary),
                         ),
                 )
                 .child(btn_text("关闭", t::ink_tertiary, on_close)),
@@ -681,7 +669,7 @@ pub fn scrim() -> impl IntoElement {
         .left(px(0.0))
         .right(px(0.0))
         .bottom(px(0.0))
-        .bg(|| t::scrim())
+        .bg(t::scrim)
 }
 
 /// 对话框的壳：`width` 宽的卡片，头（标题 + 一句说明）· 体 · 脚三段。
@@ -715,10 +703,10 @@ where
                     // 对话框的卡片必须是**实色**：`card()` 是 0.8 的半透明面（页面上的
                     // 卡片压在 `page()` 上正好透一点底色），压在遮罩上就会把底下的表格
                     // 透出来 —— 模态里没有“半透”这回事。
-                    .bg(|| t::layer())
+                    .bg(t::layer)
                     .rounded(px(m::OVERLAY_RADIUS))
                     .border_1()
-                    .border_color(|| t::card_stroke())
+                    .border_color(t::card_stroke)
                     .overflow_hidden()
                     .child(
                         view()
@@ -728,19 +716,19 @@ where
                             .flex_row()
                             .items_center()
                             .border_b_1()
-                            .border_color(|| t::divider())
+                            .border_color(t::divider)
                             .child(
                                 text(title)
                                     .text_size(px(f::BODY))
                                     .font_family(f::FONT_TEXT)
-                                    .text_color(|| t::ink()),
+                                    .text_color(t::ink),
                             )
                             .child(spacer(10.0))
                             .child(
                                 text(note)
                                     .text_size(px(f::CAPTION))
                                     .font_family(f::FONT_TEXT)
-                                    .text_color(|| t::ink_tertiary()),
+                                    .text_color(t::ink_tertiary),
                             ),
                     )
                     .child(view().w_full().p(px(16.0)).flex_col().children(body))
@@ -753,7 +741,7 @@ where
                             .items_center()
                             .justify_end()
                             .border_t_1()
-                            .border_color(|| t::divider())
+                            .border_color(t::divider)
                             .children(footer),
                     )
                     .into_element(),
@@ -775,13 +763,13 @@ where
         .flex_row()
         .items_center()
         .rounded(px(m::RADIUS))
-        .bg(|| t::critical())
-        .hover(|s| s.bg(|| t::critical_hover()))
-        .on_press(move || on())
+        .bg(t::critical)
+        .hover(|s| s.bg(t::critical_hover))
+        .on_press(on)
         .child(
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::on_accent()),
+                .text_color(t::on_accent),
         )
 }

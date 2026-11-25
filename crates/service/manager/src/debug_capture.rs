@@ -36,7 +36,11 @@ impl Manager {
     }
 
     /// 单条抓包详情（全缓冲查找；被淘汰/不存在 → None）。
-    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Arc<Record>>, Error> {
+    pub fn capture_detail(
+        &self,
+        name: &str,
+        request_id: u64,
+    ) -> Result<Option<Arc<Record>>, Error> {
         self.require(name)?;
         Ok(self.engine.capture_get(name, request_id))
     }

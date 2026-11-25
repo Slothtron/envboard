@@ -15,7 +15,11 @@ impl AdminService {
     }
 
     /// 单条记录本体（`Arc` 共享：调用方拿到的是引擎缓冲里那一份，不做深拷贝）。
-    pub fn capture_detail(&self, name: &str, request_id: u64) -> Result<Option<Arc<Record>>, Error> {
+    pub fn capture_detail(
+        &self,
+        name: &str,
+        request_id: u64,
+    ) -> Result<Option<Arc<Record>>, Error> {
         self.manager.capture_detail(name, request_id)
     }
 

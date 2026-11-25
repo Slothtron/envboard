@@ -385,7 +385,12 @@ impl Record {
             path: self.request.path.clone(),
             status: self.response.as_ref().and_then(|response| response.status),
             error: self.error.is_some(),
-            request_size: self.request.body.as_ref().map(RecordBody::size).unwrap_or(0),
+            request_size: self
+                .request
+                .body
+                .as_ref()
+                .map(RecordBody::size)
+                .unwrap_or(0),
             response_size: self
                 .response
                 .as_ref()
@@ -829,8 +834,14 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "缺键 {key}");
         }
-        assert_eq!(value["request"]["headers"], serde_json::json!([["Content-Type", "application/json"]]));
-        assert_eq!(value["request"]["scheme"], "https", "协议随记录留存，界面不再猜");
+        assert_eq!(
+            value["request"]["headers"],
+            serde_json::json!([["Content-Type", "application/json"]])
+        );
+        assert_eq!(
+            value["request"]["scheme"], "https",
+            "协议随记录留存，界面不再猜"
+        );
         assert_eq!(
             value["request"]["body"],
             serde_json::json!({"encoding": "utf8", "size": 12, "content": "{}"})
@@ -867,7 +878,10 @@ mod tests {
             },
             response: Some(RecordResponse {
                 status: Some(200),
-                headers: vec![("Content-Type".into(), "application/json; charset=utf-8".into())],
+                headers: vec![(
+                    "Content-Type".into(),
+                    "application/json; charset=utf-8".into(),
+                )],
                 body: Some(RecordBody::Present {
                     encoding: "utf8".into(),
                     size: 5,
@@ -890,7 +904,10 @@ mod tests {
             Some("application/json; charset=utf-8"),
             "原值，不回炉"
         );
-        assert_eq!(record.response_content_type().as_deref(), Some("application/json; charset=utf-8"));
+        assert_eq!(
+            record.response_content_type().as_deref(),
+            Some("application/json; charset=utf-8")
+        );
     }
 
     /// 宽松读：旧记录 `body: null` / `error: "…"` 都能读进来（读侧不因畸形记录炸掉）。
@@ -906,7 +923,10 @@ mod tests {
         let record: Record = serde_json::from_value(value).unwrap();
         assert!(record.request.body.is_none());
         assert!(record.response.is_none());
-        assert_eq!(record.error.as_ref().map(RecordError::text).as_deref(), Some("connection reset"));
+        assert_eq!(
+            record.error.as_ref().map(RecordError::text).as_deref(),
+            Some("connection reset")
+        );
         let row = record.row();
         assert!(row.error);
         assert_eq!(row.status, None);

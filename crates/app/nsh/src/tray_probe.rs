@@ -22,7 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nsh_core::element::desktop::{
-    current_window, main_window, set_tray, tray, MenuItem, TrayClickEvent,
+    MenuItem, TrayClickEvent, current_window, main_window, set_tray, tray,
 };
 use nsh_core::element::perf_stats;
 use nsh_core::prelude::{spawn, timer};

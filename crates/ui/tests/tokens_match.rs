@@ -31,7 +31,10 @@ fn theme() -> serde_json::Value {
     serde_json::from_str(envboard_ui::THEME_JSON).expect("主题 JSON 可解析")
 }
 
-fn set<'a>(v: &'a serde_json::Value, appearance: &str) -> &'a serde_json::Map<String, serde_json::Value> {
+fn set<'a>(
+    v: &'a serde_json::Value,
+    appearance: &str,
+) -> &'a serde_json::Map<String, serde_json::Value> {
     v["cssVars"][appearance]
         .as_object()
         .unwrap_or_else(|| panic!("cssVars.{appearance} 缺失"))

@@ -37,12 +37,7 @@ impl CaptureWatch {
 
     /// 当前版本。读侧只比较「与上次看到的是否相同」。
     pub fn version(&self, env: &str) -> u64 {
-        self.versions
-            .lock()
-            .unwrap()
-            .get(env)
-            .copied()
-            .unwrap_or(0)
+        self.versions.lock().unwrap().get(env).copied().unwrap_or(0)
     }
 }
 

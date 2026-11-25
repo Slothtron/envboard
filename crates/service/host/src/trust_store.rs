@@ -145,7 +145,11 @@ mod imp {
     const STORE_READONLY: u32 = 0x0000_8000;
 
     /// 写操作失败的统一信封：store_failure + 系统错误原文；os error 5 按存储分档提权指路。
-    fn write_error(scope: StoreScope, action: &str, error: std::io::Error) -> envboard_engine::Error {
+    fn write_error(
+        scope: StoreScope,
+        action: &str,
+        error: std::io::Error,
+    ) -> envboard_engine::Error {
         let (label, field) = match scope {
             StoreScope::CurrentUser => ("current user", "system_trust_store.current_user"),
             StoreScope::LocalMachine => ("local machine", "system_trust_store.local_machine"),
@@ -265,8 +269,15 @@ mod imp {
     fn probe_store(cert_der: &[u8], flags: u32, detail: &mut Option<String>) -> StorePresence {
         let root = wide("ROOT");
         // SAFETY: 只传常量与自持有缓冲区；返回的句柄在函数末尾关闭。
-        let store =
-            unsafe { CertOpenStore(STORE_PROV_SYSTEM_W, 0, 0, flags | STORE_READONLY, root.as_ptr()) };
+        let store = unsafe {
+            CertOpenStore(
+                STORE_PROV_SYSTEM_W,
+                0,
+                0,
+                flags | STORE_READONLY,
+                root.as_ptr(),
+            )
+        };
         if store.is_null() {
             let code = std::io::Error::last_os_error();
             detail.get_or_insert_with(|| format!("cannot open the system ROOT store: {code}"));

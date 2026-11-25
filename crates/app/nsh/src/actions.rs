@@ -217,10 +217,10 @@ fn note(cx: Ctx, text: String) {
 pub fn set_theme(cx: Ctx, choice: ThemeChoice) {
     cx.theme.set(choice);
     set_color_scheme(choice.appearance());
-    if let Some(path) = service::ui_prefs_file() {
-        if let Err(error) = prefs::set_theme(path, choice) {
-            note(cx, format!("主题已切换，但没写进 ui.json：{error}"));
-        }
+    if let Some(path) = service::ui_prefs_file()
+        && let Err(error) = prefs::set_theme(path, choice)
+    {
+        note(cx, format!("主题已切换，但没写进 ui.json：{error}"));
     }
 }
 
@@ -228,10 +228,10 @@ pub fn set_theme(cx: Ctx, choice: ThemeChoice) {
 /// `close_to_tray`，**立刻**生效：关窗处理当场读这个信号，不等重启。
 pub fn set_close_to_tray(cx: Ctx, on: bool) {
     cx.close_to_tray.set(on);
-    if let Some(path) = service::ui_prefs_file() {
-        if let Err(error) = prefs::set_close_to_tray(path, on) {
-            note(cx, format!("开关已生效，但没写进 ui.json：{error}"));
-        }
+    if let Some(path) = service::ui_prefs_file()
+        && let Err(error) = prefs::set_close_to_tray(path, on)
+    {
+        note(cx, format!("开关已生效，但没写进 ui.json：{error}"));
     }
 }
 
@@ -321,7 +321,8 @@ pub fn export_har(cx: Ctx, name: String) {
 /// 卸载根证书：**不直接做**，先弹确认（可逆，所以确认框不印“不可撤销”、
 /// 确认键也不是胭脂）。
 pub fn ask_uninstall_ca(cx: Ctx) {
-    cx.confirm.set(Some(Confirm::uninstall_ca()));}
+    cx.confirm.set(Some(Confirm::uninstall_ca()));
+}
 
 fn uninstall_ca(cx: Ctx) {
     note(

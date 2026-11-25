@@ -59,12 +59,12 @@ pub fn env_page(
                 .flex_1()
                 .w_full()
                 .overflow_hidden()
-                .bg(|| t::layer())
+                .bg(t::layer)
                 .child(when(
                     move || section.get() == 0,
                     move || instance_table(ctx, filter, search),
                 ))
-                .child(when(move || section.get() == 1, move || rules_table())),
+                .child(when(move || section.get() == 1, rules_table)),
         )
 }
 
@@ -78,8 +78,8 @@ fn toolbar(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl Into
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
-        .bg(|| t::page())
+        .border_color(t::divider)
+        .bg(t::page)
         .child(
             nsh_base::input()
                 .placeholder("搜索环境、端口或规则")
@@ -89,12 +89,12 @@ fn toolbar(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl Into
                 .h(px(m::CONTROL_H))
                 .px(px(10.0))
                 .border_1()
-                .border_color(|| t::control_stroke())
+                .border_color(t::control_stroke)
                 .rounded(px(m::RADIUS))
-                .bg(|| t::control_fill())
+                .bg(t::control_fill)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
         .child(ui::spacer(12.0))
         .child(ui::pill_live(
@@ -140,8 +140,8 @@ fn sub_tabs(section: Signal<usize>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
-        .bg(|| t::layer())
+        .border_color(t::divider)
+        .bg(t::layer)
         .child(ui::nav_tab(
             "实例",
             move || section.get() == 0,
@@ -157,7 +157,7 @@ fn sub_tabs(section: Signal<usize>) -> impl IntoElement {
             text("按名称排序 · 端口自动分配 · 单实例")
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(ui::spacer(16.0))
 }
@@ -168,9 +168,9 @@ fn table_head() -> impl IntoElement {
         .w_full()
         .flex_row()
         .items_center()
-        .bg(|| t::page())
+        .bg(t::page)
         .border_b_1()
-        .border_color(|| t::divider())
+        .border_color(t::divider)
         .child(view().w(px(m::BAR_W)))
         .child(ui::head_cell_grow("环境"))
         .child(ui::head_cell("状态", COL_STATUS))
@@ -235,7 +235,7 @@ fn empty_state(ctx: Ctx, filter: Signal<usize>, search: Signal<String>) -> impl 
             })
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_tertiary()),
+            .text_color(t::ink_tertiary),
         )
         .child(ui::vspacer(8.0))
         .child(when(
@@ -440,9 +440,9 @@ fn rules_table() -> impl IntoElement {
                 .w_full()
                 .flex_row()
                 .items_center()
-                .bg(|| t::page())
+                .bg(t::page)
                 .border_b_1()
-                .border_color(|| t::divider())
+                .border_color(t::divider)
                 .child(view().w(px(m::BAR_W)))
                 .child(ui::head_cell_grow("规则"))
                 .child(ui::head_cell("匹配", 300.0))
@@ -456,9 +456,9 @@ fn rules_table() -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .border_b_1()
-                .border_color(|| t::divider())
-                .bg(|| t::layer())
-                .hover(|s| s.bg(|| t::hover_fill()))
+                .border_color(t::divider)
+                .bg(t::layer)
+                .hover(|s| s.bg(t::hover_fill))
                 .child(
                     view()
                         .w(px(m::BAR_W))
@@ -513,9 +513,9 @@ fn drawer_inner(ctx: Ctx, e: Env) -> impl IntoElement {
         .z_index(1)
         .w(px(m::DRAWER_W))
         .flex_col()
-        .bg(|| t::layer())
+        .bg(t::layer)
         .border_1()
-        .border_color(|| t::card_stroke())
+        .border_color(t::card_stroke)
         .rounded(px(m::OVERLAY_RADIUS))
         .overflow_hidden()
         .child(drawer_head(e.name.clone(), e.health, open))
@@ -538,12 +538,12 @@ fn drawer_head(name: String, health: Health, open: Signal<bool>) -> impl IntoEle
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
+        .border_color(t::divider)
         .child(
             text(name)
                 .text_size(px(f::BODY))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
         .child(ui::spacer(8.0))
         .child(model::status_cell_for(health, COL_STATUS))
@@ -586,13 +586,13 @@ fn drawer_body(e: &Env) -> impl IntoElement {
                 .p(px(10.0))
                 .rounded(px(m::RADIUS))
                 .border_1()
-                .border_color(|| t::control_stroke())
-                .bg(|| t::card())
+                .border_color(t::control_stroke)
+                .bg(t::card)
                 .child(
                     text(e.proxy_command.clone())
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
-                        .text_color(|| t::ink_secondary()),
+                        .text_color(t::ink_secondary),
                 ),
         )
         .child(view().flex_1())
@@ -614,7 +614,7 @@ fn drawer_footer(ctx: Ctx, name: Signal<String>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .border_t_1()
-        .border_color(|| t::divider())
+        .border_color(t::divider)
         .child(ui::btn_primary("复制地址", move || {
             actions::copy_proxy(ctx, command.get())
         }))
@@ -655,10 +655,10 @@ pub fn cert_page(ctx: Ctx) -> impl IntoElement {
     let card = view()
         .w(px(880.0))
         .flex_col()
-        .bg(|| t::card())
+        .bg(t::card)
         .rounded(px(m::OVERLAY_RADIUS))
         .border_1()
-        .border_color(|| t::card_stroke())
+        .border_color(t::card_stroke)
         .overflow_hidden()
         .child(
             view()
@@ -668,22 +668,24 @@ pub fn cert_page(ctx: Ctx) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .border_b_1()
-                .border_color(|| t::divider())
+                .border_color(t::divider)
                 .child(
                     text("证书")
                         .text_size(px(f::SUBTITLE))
                         .font_family(f::FONT_DISPLAY)
-                        .text_color(|| t::ink()),
+                        .text_color(t::ink),
                 )
                 .child(ui::spacer(10.0))
                 .child(
                     text("共享 CA · 当前用户信任库 · 免管理员")
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink_tertiary()),
+                        .text_color(t::ink_tertiary),
                 )
                 .child(view().flex_1())
-                .child(ui::btn_subtle("重新读取", move || actions::refresh_ca(ctx))),
+                .child(ui::btn_subtle("重新读取", move || {
+                    actions::refresh_ca(ctx)
+                })),
         )
         .child(when(
             move || ctx.ca_missing.get() || ctx.ca.get().is_none(),
@@ -701,16 +703,19 @@ pub fn cert_page(ctx: Ctx) -> impl IntoElement {
         .flex_col()
         .items_center()
         .pt(px(24.0))
-        .bg(|| t::page())
+        .bg(t::page)
         // 证书页也要有自己的错误条：安装/卸载失败是**这一页**的操作失败，
         // 不能只飘在环境页上方（那里用户根本看不见）。
-        .child(when(move || ctx.error.get().is_some(), move || {
-            ui::error_bar(
-                move || ctx.error_title.get(),
-                ctx.error.get().unwrap_or_default(),
-                move || ctx.error.set(None),
-            )
-        }))
+        .child(when(
+            move || ctx.error.get().is_some(),
+            move || {
+                ui::error_bar(
+                    move || ctx.error_title.get(),
+                    ctx.error.get().unwrap_or_default(),
+                    move || ctx.error.set(None),
+                )
+            },
+        ))
         .child(view().pt(px(10.0)).child(card))
 }
 
@@ -733,7 +738,8 @@ fn cert_unavailable(ctx: Ctx) -> AnyElement {
                     ctx.ca_missing.set(false);
                     actions::refresh_ca(ctx);
                 })),
-        ).into_element()
+        )
+        .into_element()
 }
 
 /// 证书详情。**只接 `ctx`，不接 `Ca` 值**：装完 / 卸完 `refresh_ca` 会把 `ctx.ca`
@@ -770,8 +776,7 @@ fn cert_detail(ctx: Ctx) -> AnyElement {
         ))
         .child(when(
             move || {
-                !ctx
-                    .ca
+                !ctx.ca
                     .get()
                     .map(|c| c.tone() == ui::Tone::Success)
                     .unwrap_or(false)
@@ -793,7 +798,7 @@ fn cert_detail(ctx: Ctx) -> AnyElement {
                         text("已信任：不需要重复安装")
                             .text_size(px(f::CAPTION))
                             .font_family(f::FONT_TEXT)
-                            .text_color(|| t::ink_secondary())
+                            .text_color(t::ink_secondary)
                     },
                 ))
                 .child(ui::spacer(8.0))
@@ -810,7 +815,7 @@ fn cert_detail(ctx: Ctx) -> AnyElement {
                     text("安装与卸载都只作用于当前用户 ROOT 存储（免管理员、可逆）。")
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink_tertiary()),
+                        .text_color(t::ink_tertiary),
                 ),
         );
 
@@ -821,12 +826,12 @@ fn cert_detail(ctx: Ctx) -> AnyElement {
             text(move || warning().unwrap_or_default())
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary())
+                .text_color(t::ink_tertiary)
         },
     ));
 
     // 计算机存储里还有一份：说清“本版本只管理当前用户”，别让人以为没删干净。
-    body_col = body_col.child(when(move || machine_installed(), move || {
+    body_col = body_col.child(when(machine_installed, move || {
         ui::alert(
             ui::Tone::Caution,
             "计算机存储里也有一份",
@@ -883,12 +888,22 @@ fn cert_detail(ctx: Ctx) -> AnyElement {
         )
         .child(ui::kv(
             "SHA-256 指纹",
-            move || ctx.ca.get().map(|c| c.fingerprint.clone()).unwrap_or_else(dash),
+            move || {
+                ctx.ca
+                    .get()
+                    .map(|c| c.fingerprint.clone())
+                    .unwrap_or_else(dash)
+            },
             true,
         ))
         .child(ui::kv(
             "文件路径",
-            move || ctx.ca.get().map(|c| c.cert_path.clone()).unwrap_or_else(dash),
+            move || {
+                ctx.ca
+                    .get()
+                    .map(|c| c.cert_path.clone())
+                    .unwrap_or_else(dash)
+            },
             true,
         ))
         .child(ui::kv(
@@ -906,16 +921,14 @@ fn cert_detail(ctx: Ctx) -> AnyElement {
             text("其他设备：把这份 PEM 拷到目标机按系统提示安装并信任；本版本不提供下载与向导。")
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
-        ).into_element()
+                .text_color(t::ink_tertiary),
+        )
+        .into_element()
 }
 
 /// 取一条可选字段，缺就写 `—`。闭包版：每次重解都读当前 `ctx.ca`。
 fn field(ctx: Ctx, pick: impl Fn(&model::Ca) -> Option<String> + Copy + 'static) -> String {
-    ctx.ca
-        .get()
-        .and_then(|c| pick(&c))
-        .unwrap_or_else(dash)
+    ctx.ca.get().and_then(|c| pick(&c)).unwrap_or_else(dash)
 }
 
 fn dash() -> String {
@@ -937,7 +950,8 @@ pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
         .map(|(name, version)| format!("{name} {version}"))
         .unwrap_or_else(dash);
 
-    let body: Vec<AnyElement> = vec![
+    let body: Vec<AnyElement> =
+        vec![
         ui::section_label("外观").into_element(),
         view()
             .flex_row()
@@ -964,7 +978,7 @@ pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
         text("跟随系统 = 用 Windows 的浅/深设置；三档换的都是同一套令牌，只有色值在换。")
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_tertiary())
+            .text_color(t::ink_tertiary)
             .into_element(),
         ui::vspacer(16.0).into_element(),
         ui::divider().into_element(),
@@ -989,7 +1003,7 @@ pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
         text("常驻 = 关窗只藏起窗口，代理与抓包继续跑，点托盘图标唤回；关窗即退 = 回到没有托盘时。")
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_tertiary())
+            .text_color(t::ink_tertiary)
             .into_element(),
         ui::vspacer(16.0).into_element(),
         ui::divider().into_element(),
@@ -1009,8 +1023,7 @@ pub fn settings_dialog(ctx: Ctx) -> impl IntoElement {
         ui::kv("界面偏好", "状态目录\\ui.json（与桌面形态共用）".to_owned(), false).into_element(),
     ];
 
-    let footer: Vec<AnyElement> =
-        vec![ui::btn_primary("完成", close).into_element()];
+    let footer: Vec<AnyElement> = vec![ui::btn_primary("完成", close).into_element()];
 
     nsh_base::dialog()
         .label("设置")
@@ -1031,11 +1044,7 @@ pub fn confirm_dialog(ctx: Ctx) -> AnyElement {
     let Some(confirm) = ctx.confirm.get() else {
         return view().into_element();
     };
-    let shell = ui::dialog_shell(
-        m::DIALOG_W,
-        confirm.title.clone(),
-        confirm.note.clone(),
-    );
+    let shell = ui::dialog_shell(m::DIALOG_W, confirm.title.clone(), confirm.note.clone());
     let cancel = move || actions::cancel_confirm(ctx);
     let go = move || actions::run_confirm(ctx);
 
@@ -1043,7 +1052,7 @@ pub fn confirm_dialog(ctx: Ctx) -> AnyElement {
         text(confirm.body.clone())
             .text_size(px(f::BODY))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_secondary())
+            .text_color(t::ink_secondary)
             .into_element(),
     ];
     if confirm.irreversible {
@@ -1052,7 +1061,7 @@ pub fn confirm_dialog(ctx: Ctx) -> AnyElement {
             text("此操作不可撤销：删掉的环境不会自己回来。")
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::critical())
+                .text_color(t::critical)
                 .into_element(),
         );
     }

@@ -37,7 +37,7 @@ mod imp {
     use super::QUIT;
     use crate::actions::Ctx;
     use nsh_core::desktop::CloseReason;
-    use nsh_core::element::desktop::{main_window, set_tray, tray, MenuItem, TrayClickEvent};
+    use nsh_core::element::desktop::{MenuItem, TrayClickEvent, main_window, set_tray, tray};
     use std::sync::atomic::Ordering;
 
     /// 显示并聚焦主窗（单击托盘、菜单「显示窗口」都走它）。

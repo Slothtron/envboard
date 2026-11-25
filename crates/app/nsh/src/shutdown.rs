@@ -24,7 +24,7 @@ static SHUTTING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(windows)]
 mod imp {
-    use super::{SHUTTING, SHUTDOWN_BUDGET};
+    use super::{SHUTDOWN_BUDGET, SHUTTING};
     use crate::service::ShutdownReport;
     use nsh_core::element::desktop::main_window;
     use nsh_core::prelude::spawn;

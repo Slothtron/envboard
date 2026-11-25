@@ -15,10 +15,10 @@ use envboard_engine::Error;
 /// 写到哪：优先 `%USERPROFILE%\Downloads`（真实存在才用），否则 `%TEMP%`。
 pub fn downloads_dir() -> PathBuf {
     let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
-    if let Some(dir) = home.map(|dir| dir.join("Downloads")) {
-        if dir.is_dir() {
-            return dir;
-        }
+    if let Some(dir) = home.map(|dir| dir.join("Downloads"))
+        && dir.is_dir()
+    {
+        return dir;
     }
     std::env::var_os("TEMP")
         .map(PathBuf::from)
@@ -38,9 +38,11 @@ pub fn write_unique(dir: &Path, stem: &str, ext: &str, text: &str) -> Result<Pat
         if path.exists() {
             continue;
         }
-        return fs::write(&path, text).map(|()| path.clone()).map_err(|error| {
-            Error::internal_error(format!("写文件失败：{}（{error}）", path.display()))
-        });
+        return fs::write(&path, text)
+            .map(|()| path.clone())
+            .map_err(|error| {
+                Error::internal_error(format!("写文件失败：{}（{error}）", path.display()))
+            });
     }
     Err(Error::internal_error(format!(
         "{} 里同名文件已有 99 个，先清理一下再导出",
@@ -64,12 +66,20 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("建测试目录失败");
 
-        let first = write_unique(&dir, "proxy-a-session-7", "har", "{\"one\":1}").expect("第一次写失败");
-        let second = write_unique(&dir, "proxy-a-session-7", "har", "{\"two\":2}").expect("第二次写失败");
+        let first =
+            write_unique(&dir, "proxy-a-session-7", "har", "{\"one\":1}").expect("第一次写失败");
+        let second =
+            write_unique(&dir, "proxy-a-session-7", "har", "{\"two\":2}").expect("第二次写失败");
         assert!(first.ends_with("proxy-a-session-7.har"));
         assert!(second.ends_with("proxy-a-session-7-2.har"));
-        assert_eq!(fs::read_to_string(&first).unwrap_or_default(), "{\"one\":1}");
-        assert_eq!(fs::read_to_string(&second).unwrap_or_default(), "{\"two\":2}");
+        assert_eq!(
+            fs::read_to_string(&first).unwrap_or_default(),
+            "{\"one\":1}"
+        );
+        assert_eq!(
+            fs::read_to_string(&second).unwrap_or_default(),
+            "{\"two\":2}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

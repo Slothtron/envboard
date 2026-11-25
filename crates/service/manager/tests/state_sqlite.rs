@@ -175,7 +175,10 @@ fn checkpoint_truncates_the_wal_and_keeps_the_data() {
     repo.save(&sample_state()).unwrap();
 
     let before = std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
-    assert!(before > 0, "写完之后 WAL 应已有待合并的页（否则这条测试没验到东西）");
+    assert!(
+        before > 0,
+        "写完之后 WAL 应已有待合并的页（否则这条测试没验到东西）"
+    );
 
     repo.checkpoint().expect("checkpoint 必须成功");
 

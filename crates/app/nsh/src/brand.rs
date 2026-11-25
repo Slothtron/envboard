@@ -37,12 +37,14 @@ pub fn icon_path() -> Option<PathBuf> {
     let beside_exe = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(ICON_FILE)));
-    if let Some(path) = beside_exe {
-        if path.is_file() {
-            return Some(path);
-        }
+    if let Some(path) = beside_exe
+        && path.is_file()
+    {
+        return Some(path);
     }
-    let in_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets").join(ICON_FILE);
+    let in_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join(ICON_FILE);
     in_crate.is_file().then_some(in_crate)
 }
 
@@ -52,6 +54,10 @@ mod tests {
     #[test]
     fn mark_is_32x32_rgba() {
         let expected = (super::MARK_PX * super::MARK_PX * 4) as usize;
-        assert_eq!(super::MARK_RGBA.len(), expected, "brand-mark-32.rgba 长度不对，重跑 pack-icon.ps1");
+        assert_eq!(
+            super::MARK_RGBA.len(),
+            expected,
+            "brand-mark-32.rgba 长度不对，重跑 pack-icon.ps1"
+        );
     }
 }

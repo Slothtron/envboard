@@ -149,11 +149,13 @@ pub enum Lang {
 pub fn language_of(content: &str, content_type: Option<&str>) -> Option<Lang> {
     let ct = content_type.unwrap_or("").to_ascii_lowercase();
     let trimmed = content.trim_start();
-    if ct.contains("json") || (ct.is_empty() && (trimmed.starts_with('{') || trimmed.starts_with('[')))
+    if ct.contains("json")
+        || (ct.is_empty() && (trimmed.starts_with('{') || trimmed.starts_with('[')))
     {
         return Some(Lang::Json);
     }
-    if ct.contains("html") || trimmed.to_ascii_lowercase().starts_with("<!doctype html")
+    if ct.contains("html")
+        || trimmed.to_ascii_lowercase().starts_with("<!doctype html")
         || trimmed.to_ascii_lowercase().starts_with("<html")
     {
         return Some(Lang::Html);
@@ -381,11 +383,16 @@ mod tests {
             &format!("{{\"pad\":\"{}\"}}", "x".repeat(PRETTY_LIMIT as usize)),
         );
         let body = view(big);
-        assert!(body.pretty(Some("application/json")).is_none(), "超过 64 KiB 不美化");
+        assert!(
+            body.pretty(Some("application/json")).is_none(),
+            "超过 64 KiB 不美化"
+        );
         // 边界内（64 KiB 整）仍可美化：阈值按 `size` 与内容长度的较大者算，这里是 size 超了
-        assert!(view(utf8(1024, "{\"a\":1}"))
-            .pretty(Some("application/json"))
-            .is_some());
+        assert!(
+            view(utf8(1024, "{\"a\":1}"))
+                .pretty(Some("application/json"))
+                .is_some()
+        );
     }
 
     #[test]

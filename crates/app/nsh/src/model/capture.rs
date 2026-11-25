@@ -146,7 +146,11 @@ impl ResFilter {
 /// 资源类型判定：先看响应 content-type，缺了再看路径扩展名（与桌面版同口径）。
 /// 抓包记录没有浏览器的 initiator type，Fetch/XHR 只能按「接口数据」近似。
 pub fn resource_of(row: &CaptureRow) -> ResFilter {
-    let ct = row.content_type.as_deref().unwrap_or("").to_ascii_lowercase();
+    let ct = row
+        .content_type
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if ct.starts_with("text/html") || ct == "application/xhtml+xml" {
         return ResFilter::Doc;
     }
@@ -175,7 +179,9 @@ pub fn resource_of(row: &CaptureRow) -> ResFilter {
         ResFilter::Css
     } else if ends(&[".js", ".mjs", ".cjs", ".jsx", ".ts"]) {
         ResFilter::Js
-    } else if ends(&[".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp", ".avif"]) {
+    } else if ends(&[
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp", ".avif",
+    ]) {
         ResFilter::Img
     } else if ends(&[".mp3", ".mp4", ".webm", ".ogg", ".wav", ".flac", ".m4a"]) {
         ResFilter::Media
@@ -210,7 +216,10 @@ pub fn merge_rows(
     let cutoff = oldest.unwrap_or(0);
     // 引擎里已经没有的（比 oldest 更老）不该继续挂在表上。
     let kept = std::mem::take(rows);
-    let mut left = kept.into_iter().filter(|row| row.request_id >= cutoff).peekable();
+    let mut left = kept
+        .into_iter()
+        .filter(|row| row.request_id >= cutoff)
+        .peekable();
     let mut right = incoming
         .into_iter()
         .filter(|row| row.request_id >= cutoff)
@@ -281,11 +290,7 @@ pub fn counts(rows: &[CaptureRow]) -> Counts {
 
 /// 过滤结果给**下标**而不是克隆行：一行的字符串是拥有的，35k 行克隆一次就是几 MB，
 /// 换一次筛选就白拷一遍。虚拟列表拿下标回原表取行即可。
-pub fn filtered_indexes(
-    rows: &[CaptureRow],
-    status: StatusFilter,
-    res: ResFilter,
-) -> Vec<usize> {
+pub fn filtered_indexes(rows: &[CaptureRow], status: StatusFilter, res: ResFilter) -> Vec<usize> {
     rows.iter()
         .enumerate()
         .filter(|(_, row)| status.matches(row) && res.matches(row))
@@ -297,7 +302,11 @@ pub fn filtered_indexes(
 
 /// 方法列：记录缺方法时给「—」，不留空白。
 pub fn method_text(row: &CaptureRow) -> &str {
-    if row.method.is_empty() { "—" } else { &row.method }
+    if row.method.is_empty() {
+        "—"
+    } else {
+        &row.method
+    }
 }
 
 /// 状态列：错误记 `ERR`；还没响应给「—」；其余给状态码。
@@ -349,13 +358,27 @@ pub fn format_bytes(size: u64) -> String {
 /// golden 才能把状态颜色与类型分组一次拍全。
 pub fn fixture_rows(n: usize) -> Vec<CaptureRow> {
     let base = [
-        (200u16, "/v1/orders", "application/json", 0u64, 512u64, false),
+        (
+            200u16,
+            "/v1/orders",
+            "application/json",
+            0u64,
+            512u64,
+            false,
+        ),
         (201, "/v1/orders", "application/json", 128, 640, false),
         (301, "/old", "text/html", 0, 0, false),
         (404, "/v1/users/9", "application/json", 0, 188, false),
         (500, "/v1/checkout", "text/plain", 32, 96, false),
         (204, "/assets/app.css", "text/css", 0, 0, false),
-        (200, "/assets/app.js", "application/javascript", 0, 214_048, false),
+        (
+            200,
+            "/assets/app.js",
+            "application/javascript",
+            0,
+            214_048,
+            false,
+        ),
         (200, "/assets/logo.png", "image/png", 0, 8_192, false),
         (200, "/fonts/inter.woff2", "font/woff2", 0, 65_536, false),
         (200, "/media/loop.mp4", "video/mp4", 0, 3_145_728, false),
@@ -419,7 +442,10 @@ mod tests {
     #[test]
     fn status_segments_have_exclusive_boundaries() {
         assert!(StatusFilter::S2.matches(&row(Some(200), false)));
-        assert!(!StatusFilter::S2.matches(&row(Some(204), true)), "错误记录不算 2xx");
+        assert!(
+            !StatusFilter::S2.matches(&row(Some(204), true)),
+            "错误记录不算 2xx"
+        );
         assert!(StatusFilter::S3.matches(&row(Some(301), false)));
         assert!(StatusFilter::S4.matches(&row(Some(404), false)));
         assert!(StatusFilter::S5.matches(&row(Some(503), false)));
@@ -460,7 +486,12 @@ mod tests {
         // 每段计数都等于该段过滤出来的行数（同一判据的两处用法）
         for status in StatusFilter::ALL {
             let n = filtered_indexes(&rows, status, ResFilter::All).len();
-            assert_eq!(c.status(status), n, "状态段 {} 计数与过滤不一致", status.label());
+            assert_eq!(
+                c.status(status),
+                n,
+                "状态段 {} 计数与过滤不一致",
+                status.label()
+            );
         }
         for res in ResFilter::ALL {
             let n = filtered_indexes(&rows, StatusFilter::All, res).len();
@@ -504,7 +535,12 @@ mod tests {
     fn merge_inserts_late_small_ids_in_id_order() {
         let mut rows = vec![row_at(21, "/a"), row_at(23, "/c")];
         // 这一拍：22 是刚完成的（比 21 晚跑完、id 更大）；20 是慢请求迟到。
-        merge_rows(&mut rows, vec![row_at(20, "/slow"), row_at(22, "/b")], None, 4000);
+        merge_rows(
+            &mut rows,
+            vec![row_at(20, "/slow"), row_at(22, "/b")],
+            None,
+            4000,
+        );
         assert_eq!(ids(&rows), vec![20, 21, 22, 23], "按 id 升序，五条一条不少");
     }
 
@@ -521,7 +557,12 @@ mod tests {
     #[test]
     fn merge_drops_rows_older_than_the_buffer_window() {
         let mut rows = vec![row_at(1, "/gone"), row_at(5, "/kept"), row_at(9, "/kept")];
-        merge_rows(&mut rows, vec![row_at(9, "/kept"), row_at(12, "/new")], Some(5), 4000);
+        merge_rows(
+            &mut rows,
+            vec![row_at(9, "/kept"), row_at(12, "/new")],
+            Some(5),
+            4000,
+        );
         assert_eq!(ids(&rows), vec![5, 9, 12], "比 oldest(5) 老的 1 丢掉");
         // 一整拍都比 oldest 老（缓冲刚被清空重填）：表也该空
         let mut rows = vec![row_at(1, "/gone")];

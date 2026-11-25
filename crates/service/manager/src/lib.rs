@@ -127,9 +127,9 @@ mod proxies;
 mod reconcile_health;
 mod rules_store;
 
+pub use capture_watch::CaptureWatch;
 pub use envboard_protocol::{DebugView, Desired, EnvView, ProxyView, ReconcileReport};
 pub use manager::Manager;
-pub use capture_watch::CaptureWatch;
 pub use ports::{FilePort, MemoryFiles, MemoryPortProbe, MemoryStateRepo, PortProbe, StateRepo};
 pub use state::{
     InstanceLock, JsonFileStateRepo, ManagerConfig, PersistedState, STATE_VERSION, StoredError,

@@ -75,7 +75,7 @@ fn selected_from_env(envs: &[Env]) -> Option<String> {
     }
     // 旧口径是“选中第 3 行”，现在行随数据变，改成按名字选：proxy-c 是 fixture 里
     // 那个不健康的环境，抽屉基线就是它。
-    envs.iter().nth(2).map(|e| e.name.clone())
+    envs.get(2).map(|e| e.name.clone())
 }
 
 fn drawer_from_env() -> bool {
@@ -134,11 +134,11 @@ fn apply_snapshot(
             generation.set(cursor);
             let envs: Vec<Env> = views.into_iter().map(Env::from_view).collect();
             // 抽屉选中的环境被删了：顺手关掉，不留一个空抽屉。
-            if let Some(sel) = cx.selected.get() {
-                if !envs.iter().any(|e| e.name == sel) {
-                    cx.drawer.set(false);
-                    cx.selected.set(None);
-                }
+            if let Some(sel) = cx.selected.get()
+                && !envs.iter().any(|e| e.name == sel)
+            {
+                cx.drawer.set(false);
+                cx.selected.set(None);
             }
             cx.envs.set(envs);
             cx.error.set(None);
@@ -191,15 +191,13 @@ pub fn App() -> impl IntoElement {
     let theme = signal(initial_theme(synthetic));
     // 「关闭窗口时退出程序」：默认常驻（方案 §6.1 第 6 条）。有宿主时读用户的
     // `ui.json`；没有宿主（golden / 压力）时不碰文件，取默认。
-    let close_to_tray = signal(
-        if synthetic {
-            true
-        } else {
-            service::ui_prefs_file()
-                .and_then(prefs::close_to_tray)
-                .unwrap_or(true)
-        },
-    );
+    let close_to_tray = signal(if synthetic {
+        true
+    } else {
+        service::ui_prefs_file()
+            .and_then(prefs::close_to_tray)
+            .unwrap_or(true)
+    });
 
     let cx = Ctx {
         envs,
@@ -270,7 +268,7 @@ pub fn App() -> impl IntoElement {
         .flex_col()
         // The window declares Mica (`backdrop: Window`), so the page fill is
         // translucent: 缟 at 0.80, 乌黑 at 0.80.
-        .bg(|| t::page())
+        .bg(t::page)
         .overflow_hidden()
         // B1：只在窗口真的可见时挂载的「活体」子树。它不画任何东西（0×0、脱离
         // 流），只承载环境快照循环；隐藏即卸载，循环与定时器一起消失。
@@ -295,10 +293,7 @@ pub fn App() -> impl IntoElement {
                     move || page.get() == 0 && capture_env.get().is_some(),
                     move || pages::capture::page(cx),
                 ))
-                .child(when(
-                    move || page.get() == 1,
-                    move || pages::cert_page(cx),
-                ))
+                .child(when(move || page.get() == 1, move || pages::cert_page(cx)))
                 .child(when(
                     move || page.get() == 0 && cx.drawer.get(),
                     move || pages::drawer(cx),
@@ -312,12 +307,14 @@ pub fn App() -> impl IntoElement {
         .child(status_bar(cx, page))
         // 两个模态：平台原生的模态层（焦点隔离、Esc 走 `on_cancel`），
         // 遮罩与卡片由 `ui::dialog_shell` 画。挂在最外层，遮罩才盖得住状态条。
-        .child(when(move || cx.settings.get(), move || {
-            pages::settings_dialog(cx)
-        }))
-        .child(when(move || cx.confirm.get().is_some(), move || {
-            pages::confirm_dialog(cx)
-        }))
+        .child(when(
+            move || cx.settings.get(),
+            move || pages::settings_dialog(cx),
+        ))
+        .child(when(
+            move || cx.confirm.get().is_some(),
+            move || pages::confirm_dialog(cx),
+        ))
 }
 
 /// 环境快照的「活体」循环（B1，EB-DESIGN-006 §6.1）。
@@ -359,13 +356,13 @@ fn toast_pill(message: String) -> impl IntoElement {
                 .items_center()
                 .rounded(px(m::OVERLAY_RADIUS))
                 .border_1()
-                .border_color(|| t::card_stroke())
-                .bg(|| t::card())
+                .border_color(t::card_stroke)
+                .bg(t::card)
                 .child(
                     text(message)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink()),
+                        .text_color(t::ink),
                 ),
         )
 }
@@ -398,21 +395,21 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
             text(brand::NAME)
                 .text_size(px(f::BODY))
                 .font_family(f::FONT_DISPLAY)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
         .child(ui::spacer(8.0))
         .child(
             text(brand::TAGLINE)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(view().flex_1())
         .child(
             text(core_line())
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(ui::spacer(12.0))
         // 连接状态：轮询失败时这里立刻变橙并换字，不用等状态条被看见。
@@ -424,7 +421,7 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
                 .items_center()
                 .rounded(px(10.0))
                 .border_1()
-                .border_color(|| t::control_stroke())
+                .border_color(t::control_stroke)
                 .child(view().w(px(5.0)).h(px(5.0)).rounded(px(2.5)).bg(move || {
                     if cx.error.get().is_some() {
                         t::caution()
@@ -443,7 +440,7 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
                     })
                     .text_size(px(f::CAPTION))
                     .font_family(f::FONT_TEXT)
-                    .text_color(|| t::ink_secondary()),
+                    .text_color(t::ink_secondary),
                 ),
         )
         .child(ui::spacer(8.0))
@@ -454,14 +451,14 @@ fn title_bar(cx: Ctx) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .rounded(px(10.0))
-                .bg(|| t::hover_fill())
+                .bg(t::hover_fill)
                 .child(
                     // 主题名随切随变（V-1）：标题栏报的是“现在是什么外观”，
                     // 不是启动时是什么外观。入口在顶栏的「设置」上，这条只是回显。
                     text(move || cx.theme.get().label())
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_TEXT)
-                        .text_color(|| t::ink_tertiary()),
+                        .text_color(t::ink_tertiary),
                 ),
         )
         .child(ui::spacer(12.0))
@@ -479,8 +476,8 @@ fn app_header(page: Signal<usize>, cx: Ctx) -> impl IntoElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
-        .bg(|| t::layer())
+        .border_color(t::divider)
+        .bg(t::layer)
         .child(ui::nav_tab(
             "环境",
             move || page.get() == 0,
@@ -497,7 +494,7 @@ fn app_header(page: Signal<usize>, cx: Ctx) -> impl IntoElement {
             text("数据面 IPC 直调 AdminService · 不起监听端口")
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(ui::spacer(10.0))
         // 设置入口放顶栏而不是标题栏：标题栏整条是拖动区，放在那里的按钮会被拖拽吃掉。
@@ -522,8 +519,8 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
         .items_center()
         .px(px(14.0))
         .border_t_1()
-        .border_color(|| t::divider())
-        .bg(|| t::layer())
+        .border_color(t::divider)
+        .bg(t::layer)
         .child(
             text(move || {
                 if page.get() == 0 {
@@ -539,7 +536,7 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
             })
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_secondary()),
+            .text_color(t::ink_secondary),
         )
         .child(view().flex_1())
         .child(
@@ -591,7 +588,7 @@ fn status_bar(cx: Ctx, page: Signal<usize>) -> impl IntoElement {
             })
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_MONO)
-            .text_color(|| t::ink_tertiary()),
+            .text_color(t::ink_tertiary),
         )
 }
 

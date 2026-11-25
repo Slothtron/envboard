@@ -16,7 +16,7 @@
 //! 行为不变，只是少了队列与取消。这样 worker 不做成硬依赖。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{OnceLock, mpsc};
 
 /// 一个待执行的任务。`tag` 只有读车道会用。
 struct Task {
@@ -55,12 +55,12 @@ pub fn install() {
 
 fn run_lane(rx: mpsc::Receiver<Task>, latest: Option<&'static AtomicU64>) {
     for task in rx {
-        if let (Some(tag), Some(latest)) = (task.tag, latest) {
-            if is_stale(tag, latest) {
-                // 已经有人提交了更新的读：这条不跑，sender 随任务一起落地，
-                // UI 侧收到的是一个 Err（＝这次读取被取消）。
-                continue;
-            }
+        if let (Some(tag), Some(latest)) = (task.tag, latest)
+            && is_stale(tag, latest)
+        {
+            // 已经有人提交了更新的读：这条不跑，sender 随任务一起落地，
+            // UI 侧收到的是一个 Err（＝这次读取被取消）。
+            continue;
         }
         (task.run)();
     }
@@ -105,7 +105,7 @@ fn is_stale(tag: u64, latest: &AtomicU64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
     #[test]

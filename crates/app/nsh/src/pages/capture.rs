@@ -15,16 +15,14 @@
 
 use std::sync::Arc;
 
-use envboard_protocol::{
-    CaptureRow, Record, RecordBody, RecordRequest, RecordResponse,
-};
+use envboard_protocol::{CaptureRow, Record, RecordBody, RecordRequest, RecordResponse};
 use nsh_core::prelude::*;
 
 use envboard_ui::primitives as ui;
 use envboard_ui::{font as f, metrics as m, tokens as t};
 
 use crate::actions::{self, Ctx};
-use crate::model::body::{take_prefix, Body, Kind, CHUNK};
+use crate::model::body::{Body, CHUNK, Kind, take_prefix};
 use crate::model::capture::{self as cap, Counts, ResFilter, StatusFilter};
 use crate::model::detail::Detail;
 use crate::service;
@@ -93,7 +91,9 @@ struct DetailView {
 
 impl DetailView {
     fn build(detail: Detail) -> Self {
-        let request_prettyable = detail.request_body().can_pretty(detail.request_content_type());
+        let request_prettyable = detail
+            .request_body()
+            .can_pretty(detail.request_content_type());
         let response_prettyable = detail
             .response_body()
             .can_pretty(detail.response_content_type());
@@ -306,7 +306,7 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
         .flex_1()
         .w_full()
         .h_full()
-        .bg(|| t::page())
+        .bg(t::page)
         // B1：抓包循环也挂在受可见性门控的子树里（非 fixture 口径才挂）。
         // 隐藏即卸载 → `spawn` 取消 → 定时器被取回，隐藏态零唤醒。
         .child(when(
@@ -330,11 +330,12 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
                 .w_full()
                 .relative()
                 .overflow_hidden()
-                .bg(|| t::layer())
+                .bg(t::layer)
                 .child(list(cap_info))
-                .child(when(move || cap_info.detail.get().is_some(), move || {
-                    detail_panel(cap_info)
-                })),
+                .child(when(
+                    move || cap_info.detail.get().is_some(),
+                    move || detail_panel(cap_info),
+                )),
         )
 }
 
@@ -476,8 +477,8 @@ fn toolbar(cap: Cap) -> impl IntoElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
-        .bg(|| t::page())
+        .border_color(t::divider)
+        .bg(t::page)
         .child(ui::btn_text("← 环境", t::ink_secondary, move || {
             cap.ctx.capture_env.set(None)
         }))
@@ -486,14 +487,14 @@ fn toolbar(cap: Cap) -> impl IntoElement {
             text(move || cap.name.get())
                 .text_size(px(f::BODY))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
         .child(ui::spacer(8.0))
         .child(
             text(listen)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(ui::spacer(12.0))
         // 会话 chip：会话号 · 已捕获 · 丢弃。数字全部来自数据面，不在这里自己数。
@@ -505,7 +506,7 @@ fn toolbar(cap: Cap) -> impl IntoElement {
                 .items_center()
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(|| t::control_stroke())
+                .border_color(t::control_stroke)
                 .child(
                     text(move || {
                         let meta = cap.meta.get();
@@ -518,14 +519,15 @@ fn toolbar(cap: Cap) -> impl IntoElement {
                     })
                     .text_size(px(f::CAPTION))
                     .font_family(f::FONT_MONO)
-                    .text_color(|| t::ink_secondary()),
+                    .text_color(t::ink_secondary),
                 ),
         )
         .child(view().flex_1())
-        .child(when(move || !running(), move || {
-            ui::btn_primary("开启抓包", move || toggle_capture(cap, false))
-        }))
-        .child(when(move || running(), move || {
+        .child(when(
+            move || !running(),
+            move || ui::btn_primary("开启抓包", move || toggle_capture(cap, false)),
+        ))
+        .child(when(running, move || {
             ui::btn_subtle("停止抓包", move || toggle_capture(cap, true))
         }))
         .child(ui::spacer(6.0))
@@ -585,9 +587,9 @@ fn table_head(cap: Cap) -> impl IntoElement {
         .w_full()
         .flex_row()
         .items_center()
-        .bg(|| t::page())
+        .bg(t::page)
         .border_b_1()
-        .border_color(|| t::divider())
+        .border_color(t::divider)
         .child(view().w(px(m::BAR_W)))
         .child(head_cell("#", COL_ID))
         .child(head_cell("方法", COL_METHOD))
@@ -609,7 +611,7 @@ fn head_cell(label: &'static str, width: f32) -> impl IntoElement {
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
 }
 
@@ -624,7 +626,7 @@ fn head_cell_grow(label: &'static str) -> impl IntoElement {
             text(label)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
 }
 
@@ -691,8 +693,8 @@ fn panel_bar(cap: Cap) -> impl IntoElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
-        .bg(|| t::page())
+        .border_color(t::divider)
+        .bg(t::page)
         .overflow_hidden()
         .child(when(
             move || cap.panel.get() == Some(Column::Status),
@@ -801,7 +803,7 @@ fn empty_state(cap: Cap) -> impl IntoElement {
             })
             .text_size(px(f::CAPTION))
             .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_tertiary()),
+            .text_color(t::ink_tertiary),
         )
         .child(ui::vspacer(8.0))
         .child(when(
@@ -866,7 +868,10 @@ fn row_at(at: Position, cap: Cap) -> impl IntoElement {
         let id = cap.indexes.with(|indexes| {
             indexes
                 .get(at_index)
-                .and_then(|row_index| cap.rows.with(|rows| rows.get(*row_index).map(|row| row.request_id)))
+                .and_then(|row_index| {
+                    cap.rows
+                        .with(|rows| rows.get(*row_index).map(|row| row.request_id))
+                })
                 .unwrap_or(0)
         });
         open_detail(cap, id);
@@ -900,7 +905,7 @@ fn cell_with(
                 .truncate()
                 .text_size(px(f::CAPTION))
                 .font_family(font)
-                .text_color(move || ink()),
+                .text_color(ink),
         )
 }
 
@@ -910,7 +915,10 @@ fn path_cell(at: Position, cap: Cap) -> impl IntoElement {
         cap.indexes.with(|indexes| {
             indexes
                 .get(at.index())
-                .and_then(|row_index| cap.rows.with(|rows| rows.get(*row_index).map(|row| row.path.clone())))
+                .and_then(|row_index| {
+                    cap.rows
+                        .with(|rows| rows.get(*row_index).map(|row| row.path.clone()))
+                })
                 .unwrap_or_default()
         })
     };
@@ -927,7 +935,7 @@ fn path_cell(at: Position, cap: Cap) -> impl IntoElement {
                 .truncate()
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
 }
 
@@ -937,7 +945,10 @@ fn status_cell(at: Position, cap: Cap, width: f32) -> impl IntoElement {
         cap.indexes.with(|indexes| {
             indexes
                 .get(at.index())
-                .and_then(|row_index| cap.rows.with(|rows| rows.get(*row_index).map(cap::status_text)))
+                .and_then(|row_index| {
+                    cap.rows
+                        .with(|rows| rows.get(*row_index).map(cap::status_text))
+                })
                 .unwrap_or_else(|| "—".to_owned())
         })
     };
@@ -945,7 +956,10 @@ fn status_cell(at: Position, cap: Cap, width: f32) -> impl IntoElement {
         cap.indexes.with(|indexes| {
             indexes
                 .get(at.index())
-                .and_then(|row_index| cap.rows.with(|rows| rows.get(*row_index).map(cap::status_tone)))
+                .and_then(|row_index| {
+                    cap.rows
+                        .with(|rows| rows.get(*row_index).map(cap::status_tone))
+                })
                 .unwrap_or(ui::Tone::Neutral)
         })
     };
@@ -999,9 +1013,11 @@ fn open_detail(cap: Cap, request_id: u64) {
     }
     // 先上骨架：头部四格（方法 / 状态 / 时刻 / 地址）列表那一行就有，
     // 不必等完整记录（headers + 两侧正文）拷过来才让面板出现。
-    let row = cap
-        .rows
-        .with(|rows| rows.iter().find(|row| row.request_id == request_id).cloned());
+    let row = cap.rows.with(|rows| {
+        rows.iter()
+            .find(|row| row.request_id == request_id)
+            .cloned()
+    });
     if let Some(row) = row {
         cap.detail.set(Some(DetailView::skeleton(&row)));
         #[cfg(feature = "harness")]
@@ -1064,15 +1080,16 @@ fn detail_panel(cap: Cap) -> AnyElement {
         .z_index(1)
         .w(px(m::DRAWER_W))
         .flex_col()
-        .bg(|| t::layer())
+        .bg(t::layer)
         .border_1()
-        .border_color(|| t::card_stroke())
+        .border_color(t::card_stroke)
         .rounded(px(m::OVERLAY_RADIUS))
         .overflow_hidden()
         .child(detail_head(cap))
-        .child(when(move || detail_view(cap, |v| v.loading).unwrap_or(false), {
-            move || skeleton_body()
-        }))
+        .child(when(
+            move || detail_view(cap, |v| v.loading).unwrap_or(false),
+            skeleton_body,
+        ))
         .child(when(
             move || detail_view(cap, |v| !v.loading).unwrap_or(false),
             move || detail_tabs(cap),
@@ -1106,7 +1123,7 @@ fn detail_head(cap: Cap) -> impl IntoElement {
         .w_full()
         .flex_col()
         .border_b_1()
-        .border_color(|| t::divider())
+        .border_color(t::divider)
         .child(
             view()
                 .h(px(m::BAR_H))
@@ -1119,7 +1136,7 @@ fn detail_head(cap: Cap) -> impl IntoElement {
                     text(method)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
-                        .text_color(|| t::ink()),
+                        .text_color(t::ink),
                 )
                 .child(ui::spacer(10.0))
                 .child(
@@ -1133,7 +1150,7 @@ fn detail_head(cap: Cap) -> impl IntoElement {
                     text(time)
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
-                        .text_color(|| t::ink_tertiary()),
+                        .text_color(t::ink_tertiary),
                 )
                 .child(view().flex_1())
                 .child(ui::btn_text("✕", t::ink_secondary, move || {
@@ -1148,7 +1165,7 @@ fn detail_head(cap: Cap) -> impl IntoElement {
                     .truncate()
                     .text_size(px(f::CAPTION))
                     .font_family(f::FONT_MONO)
-                    .text_color(|| t::ink_secondary()),
+                    .text_color(t::ink_secondary),
             ),
         )
 }
@@ -1160,7 +1177,7 @@ fn skeleton_body() -> impl IntoElement {
             .w(px(width))
             .h(px(height))
             .rounded(px(m::RADIUS))
-            .bg(|| t::divider())
+            .bg(t::divider)
     };
     view()
         .flex_1()
@@ -1171,7 +1188,7 @@ fn skeleton_body() -> impl IntoElement {
             text("正在读取这条记录…")
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(ui::vspacer(14.0))
         .child(bar(120.0, 14.0))
@@ -1185,7 +1202,7 @@ fn skeleton_body() -> impl IntoElement {
                 .w_full()
                 .h(px(200.0))
                 .rounded(px(m::RADIUS))
-                .bg(|| t::control_fill()),
+                .bg(t::control_fill),
         )
 }
 
@@ -1224,7 +1241,7 @@ fn detail_tabs(cap: Cap) -> impl IntoElement {
                 text(count.to_string())
                     .text_size(px(f::CAPTION))
                     .font_family(f::FONT_MONO)
-                    .text_color(|| t::ink_tertiary()),
+                    .text_color(t::ink_tertiary),
             )
     };
     view()
@@ -1234,8 +1251,8 @@ fn detail_tabs(cap: Cap) -> impl IntoElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(|| t::divider())
-        .bg(|| t::layer())
+        .border_color(t::divider)
+        .bg(t::layer)
         .child(tab_button(0, "请求", request_count))
         .child(tab_button(1, "响应", response_count))
         .child(view().flex_1())
@@ -1248,12 +1265,26 @@ fn detail_body(cap: Cap) -> impl IntoElement {
         .flex_1()
         .w_full()
         .overflow_hidden()
-        .child(when(move || cap.tab.get() == 0, move || {
-            scroll().scrollbar(true).flex_1().w_full().child(side_panel(cap, true))
-        }))
-        .child(when(move || cap.tab.get() == 1, move || {
-            scroll().scrollbar(true).flex_1().w_full().child(side_panel(cap, false))
-        }))
+        .child(when(
+            move || cap.tab.get() == 0,
+            move || {
+                scroll()
+                    .scrollbar(true)
+                    .flex_1()
+                    .w_full()
+                    .child(side_panel(cap, true))
+            },
+        ))
+        .child(when(
+            move || cap.tab.get() == 1,
+            move || {
+                scroll()
+                    .scrollbar(true)
+                    .flex_1()
+                    .w_full()
+                    .child(side_panel(cap, false))
+            },
+        ))
 }
 
 fn side_panel(cap: Cap, request: bool) -> AnyElement {
@@ -1303,7 +1334,11 @@ fn side_panel(cap: Cap, request: bool) -> AnyElement {
     }
     column
         .child(ui::vspacer(14.0))
-        .child(ui::section_label(if request { "请求头" } else { "响应头" }))
+        .child(ui::section_label(if request {
+            "请求头"
+        } else {
+            "响应头"
+        }))
         .child(headers_section(headers))
         .child(ui::vspacer(14.0))
         .child(body_section(cap, request, body, prettyable))
@@ -1317,7 +1352,7 @@ fn headers_section(headers: &[(String, String)]) -> impl IntoElement {
                 text("（没有记录到头部）")
                     .text_size(px(f::CAPTION))
                     .font_family(f::FONT_TEXT)
-                    .text_color(|| t::ink_tertiary()),
+                    .text_color(t::ink_tertiary),
             )
             .into_element();
     }
@@ -1335,7 +1370,7 @@ fn headers_section(headers: &[(String, String)]) -> impl IntoElement {
                         .truncate()
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
-                        .text_color(|| t::ink_tertiary()),
+                        .text_color(t::ink_tertiary),
                 )
                 .child(
                     text(value.clone())
@@ -1343,7 +1378,7 @@ fn headers_section(headers: &[(String, String)]) -> impl IntoElement {
                         .truncate()
                         .text_size(px(f::CAPTION))
                         .font_family(f::FONT_MONO)
-                        .text_color(|| t::ink_secondary()),
+                        .text_color(t::ink_secondary),
                 ),
         );
     }
@@ -1369,7 +1404,11 @@ fn body_section(cap: Cap, request: bool, body: &Body, prettyable: bool) -> impl 
             }
         })
         .unwrap_or(false);
-        SharedString::from(if pretty { "复制美化" } else { "复制原文" })
+        SharedString::from(if pretty {
+            "复制美化"
+        } else {
+            "复制原文"
+        })
     };
 
     let mut head = view()
@@ -1380,14 +1419,14 @@ fn body_section(cap: Cap, request: bool, body: &Body, prettyable: bool) -> impl 
             text(title)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_TEXT)
-                .text_color(|| t::ink_secondary()),
+                .text_color(t::ink_secondary),
         )
         .child(ui::spacer(8.0))
         .child(
             text(size)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
-                .text_color(|| t::ink_tertiary()),
+                .text_color(t::ink_tertiary),
         )
         .child(view().flex_1());
 
@@ -1398,7 +1437,13 @@ fn body_section(cap: Cap, request: bool, body: &Body, prettyable: bool) -> impl 
                 move || {
                     cap.detail.with(|view| {
                         view.as_ref()
-                            .map(|view| if request { view.request_pretty } else { view.response_pretty })
+                            .map(|view| {
+                                if request {
+                                    view.request_pretty
+                                } else {
+                                    view.response_pretty
+                                }
+                            })
                             .unwrap_or(false)
                     })
                 },
@@ -1476,18 +1521,22 @@ fn body_section(cap: Cap, request: bool, body: &Body, prettyable: bool) -> impl 
                 .px(px(10.0))
                 .py(px(8.0))
                 .border_1()
-                .border_color(|| t::control_stroke())
+                .border_color(t::control_stroke)
                 .rounded(px(m::RADIUS))
-                .bg(|| t::control_fill())
+                .bg(t::control_fill)
                 .text_size(px(f::CAPTION))
                 .font_family(f::FONT_MONO)
-                .text_color(|| t::ink()),
+                .text_color(t::ink),
         )
         .child(when(
             move || detail_view(cap, |v| v.remaining(request) > 0).unwrap_or(false),
             move || {
-                view().w_full().pt(px(8.0)).flex_row().items_center().child(
-                    ui::btn_text(
+                view()
+                    .w_full()
+                    .pt(px(8.0))
+                    .flex_row()
+                    .items_center()
+                    .child(ui::btn_text(
                         move || {
                             let rest = detail_view(cap, |v| v.remaining(request)).unwrap_or(0);
                             SharedString::from(format!(
@@ -1503,8 +1552,7 @@ fn body_section(cap: Cap, request: bool, body: &Body, prettyable: bool) -> impl 
                                 }
                             });
                         },
-                    ),
-                )
+                    ))
             },
         ))
 }
@@ -1534,12 +1582,15 @@ fn body_note(body: &Body, prettyable: bool) -> impl IntoElement {
         }
     };
     let note = line.clone();
-    view().child(when(move || !line.is_empty(), move || {
-        text(note.clone())
-            .text_size(px(f::CAPTION))
-            .font_family(f::FONT_TEXT)
-            .text_color(|| t::ink_tertiary())
-    }))
+    view().child(when(
+        move || !line.is_empty(),
+        move || {
+            text(note.clone())
+                .text_size(px(f::CAPTION))
+                .font_family(f::FONT_TEXT)
+                .text_color(t::ink_tertiary)
+        },
+    ))
 }
 
 fn copy_body(cap: Cap, text: String, pretty: bool) {
@@ -1635,7 +1686,6 @@ fn big_body() -> String {
     format!("{{\"items\":[{}]}}", items.join(","))
 }
 
-
 /// 压力口径的抓包行数（`NG_STRESS=35000`）：与列表压测同一个开关，
 /// 量的是抓包表的首帧与每格成本。
 fn stress_rows() -> usize {
@@ -1649,7 +1699,7 @@ fn thousands(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

@@ -899,7 +899,9 @@ async fn capture_records_scheme_by_traffic_form_and_clear_resets_counts() {
         connect_get(proxy, &format!("svc.test:{tls_origin}"), None, &ca).await;
     assert_eq!((established, inner), (200, 200), "CONNECT tunnel: {body}");
 
-    let rows = backend.capture_rows("s5", 10).expect("running capture session");
+    let rows = backend
+        .capture_rows("s5", 10)
+        .expect("running capture session");
     assert_eq!(
         rows.captured as usize,
         rows.rows.len(),

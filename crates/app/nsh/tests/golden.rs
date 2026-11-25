@@ -38,7 +38,10 @@ const CASES: [(&str, &[(&str, &str)]); 8] = [
     ("env-dark", &[("NG_PAGE", "env"), ("NG_DARK", "1")]),
     ("drawer-light", &[("NG_PAGE", "env"), ("NG_DRAWER", "1")]),
     ("cert-light", &[("NG_PAGE", "cert")]),
-    ("settings-light", &[("NG_PAGE", "env"), ("NG_SETTINGS", "1")]),
+    (
+        "settings-light",
+        &[("NG_PAGE", "env"), ("NG_SETTINGS", "1")],
+    ),
     ("confirm-light", &[("NG_PAGE", "env"), ("NG_CONFIRM", "1")]),
     ("capture-light", &[("NG_PAGE", "capture")]),
     (
@@ -167,7 +170,12 @@ extern "system" fn probe(hwnd: isize, lp: isize) -> i32 {
             return 1;
         }
         // NSH 会先建一个约 199×34 的辅助顶层窗口：按“可见 + 够大 + 标题带 envboard”挑。
-        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if GetWindowRect(hwnd, &mut rect) == 0 {
             return 1;
         }
@@ -246,8 +254,16 @@ fn focus(found: &Found) {
 /// 会在圆角与边框上给出不同的像素 —— 一次抓图只能有一条路径，否则基线自己就不稳。
 fn capture(found: &Found) -> (u32, u32, Vec<u8>) {
     unsafe {
-        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-        assert!(GetWindowRect(found.hwnd, &mut rect) != 0, "GetWindowRect 失败");
+        let mut rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        assert!(
+            GetWindowRect(found.hwnd, &mut rect) != 0,
+            "GetWindowRect 失败"
+        );
         let w = (rect.right - rect.left).max(1);
         let h = (rect.bottom - rect.top).max(1);
 
@@ -360,7 +376,11 @@ fn load_png(path: &Path) -> (u32, u32, Vec<u8>) {
 fn diff_report(expected: &[u8], actual: &[u8], w: u32) -> (usize, Option<(u32, u32, u32, u32)>) {
     let mut count = 0;
     let mut bbox: Option<(u32, u32, u32, u32)> = None;
-    for (i, (a, b)) in expected.chunks_exact(4).zip(actual.chunks_exact(4)).enumerate() {
+    for (i, (a, b)) in expected
+        .chunks_exact(4)
+        .zip(actual.chunks_exact(4))
+        .enumerate()
+    {
         if a == b {
             continue;
         }
@@ -388,7 +408,9 @@ fn golden_pages_match_baselines() {
         SetProcessDpiAwarenessContext(-4); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
     }
 
-    let update = std::env::var("UPDATE_GOLDEN").map(|v| v == "1").unwrap_or(false);
+    let update = std::env::var("UPDATE_GOLDEN")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let dir = golden_dir();
     fs::create_dir_all(&dir).expect("建 tests/golden 失败");
 

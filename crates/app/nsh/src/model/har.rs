@@ -7,11 +7,14 @@
 use std::sync::Arc;
 
 use envboard_protocol::{Record, RecordBody};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 拼一整个 HAR：`log.version` 固定 1.2，creator 写本进程版本。
 pub fn har(env: &str, records: &[Arc<Record>]) -> Value {
-    let entries: Vec<Value> = records.iter().filter_map(|record| entry_of(record)).collect();
+    let entries: Vec<Value> = records
+        .iter()
+        .filter_map(|record| entry_of(record))
+        .collect();
     json!({
         "log": {
             "version": "1.2",
@@ -254,7 +257,10 @@ mod tests {
         };
         let exported = har("proxy-a", &records(vec![omitted, failed]));
         assert_eq!(exported["log"]["entries"].as_array().map(Vec::len), Some(1));
-        assert_eq!(exported["log"]["entries"][0]["response"]["content"]["size"], 300_000);
+        assert_eq!(
+            exported["log"]["entries"][0]["response"]["content"]["size"],
+            300_000
+        );
         assert_eq!(
             exported["log"]["entries"][0]["response"]["content"]["text"],
             Value::Null

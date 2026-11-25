@@ -58,7 +58,7 @@ pub struct EngineBackend {
     /// 再 start，seq/request_id 仍要续着上一次的走（否则轨迹文件断档）。
     recorders: Mutex<BTreeMap<String, (Arc<TrajectoryRecorder>, u64)>>,
     /// 抓包入队通知（S3）。注册晚于实例启动时，下一次 start 才带上——如实，不追认。
-    capture_notify: Mutex<Option<Arc<dyn Fn(&str, u64) + Send + Sync>>>,
+    capture_notify: Mutex<Option<crate::capture::CaptureWatch>>,
 }
 
 impl EngineBackend {
@@ -275,7 +275,7 @@ impl ProxyEngine for EngineBackend {
         true
     }
 
-    fn watch_capture(&self, notify: std::sync::Arc<dyn Fn(&str, u64) + Send + Sync>) {
+    fn watch_capture(&self, notify: crate::capture::CaptureWatch) {
         *self.capture_notify.lock().unwrap() = Some(notify);
     }
 
