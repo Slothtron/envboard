@@ -4,7 +4,7 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## Unreleased
+## 0.3.0 — 2026-11-25
 
 - **交付形态切换（Tauri 下线）**：唯一发布物改为 NSH 0.6.1 原生壳 `envboard.exe`
   （无 WebView2、无内嵌 SPA）；`crates/app/desktop` 与 `frontend/` 删除。状态目录

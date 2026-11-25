@@ -108,7 +108,7 @@ mise run dev                            # 开发运行（真宿主，RUST_LOG=in
 
 ## 版本与许可
 
-当前版本 **0.2.4**（根 `Cargo.toml` 的 `[workspace.package]`），与 git tag 一致是
+当前版本 **0.3.0**（根 `Cargo.toml` 的 `[workspace.package]`），与 git tag 一致是
 发布前置条件。版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 [MIT](LICENSE) © Slothtron
