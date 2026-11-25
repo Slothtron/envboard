@@ -403,6 +403,12 @@ fn pull_once(cap: Cap, name: &str, limit: usize) -> bool {
             });
             if session_changed {
                 cap.rows.update(|rows| rows.clear());
+                // 会话换代（清空 / 换成另一个环境 / 实例重启）：抽屉里那条已经不在缓冲里了，
+                // 一起收掉——否则表格空了、抽屉还挂着一条点不出详情的记录（真机缺陷 ③ 的一半）。
+                if cap.selected.get_untracked().is_some() {
+                    cap.selected.set(None);
+                    cap.detail.set(None);
+                }
             }
             cap.meta.update(|meta| {
                 meta.session = batch.session.id;
@@ -423,6 +429,16 @@ fn pull_once(cap: Cap, name: &str, limit: usize) -> bool {
             saturated
         }
         Ok(None) => {
+            // 没有会话（停止抓包后 / 环境没在跑）：引擎那边缓冲已经没了，本地行与抽屉
+            // 也要跟着下台，别留一张表指着取不到的记录。
+            if !cap.rows.with_untracked(|rows| rows.is_empty()) {
+                cap.rows.update(|rows| rows.clear());
+            }
+            if cap.selected.get_untracked().is_some() {
+                cap.selected.set(None);
+                cap.detail.set(None);
+            }
+            cap.ctx.captured.set(0);
             cap.meta.update(|meta| {
                 meta.loaded = true;
                 meta.error = None;
@@ -523,7 +539,9 @@ fn toggle_capture(cap: Cap, running: bool) {
         match service::stop_debug() {
             Ok(_) => {
                 actions::refresh(cap.ctx);
-                actions::succeed(cap.ctx, "已停止抓包，已捕获的记录保留");
+                // 文案对齐实现：`Manager::stop_debug` 会顺手 `clear_capture`（缓冲一起清掉、
+                // 代次 +1），所以停完之后表格本来就是空的 —— 原文写「记录保留」是错的。
+                actions::succeed(cap.ctx, "已停止抓包，缓冲已清空");
             }
             Err(error) => {
                 actions::fail(cap.ctx, error);

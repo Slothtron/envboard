@@ -396,8 +396,11 @@ impl Confirm {
             ask: Ask::DeleteEnv(name.to_owned()),
             title: format!("删除环境 {name}？"),
             note: "不可撤销".to_owned(),
+            // 文案对齐实现：`Manager::remove` 对「desired=running」或「还有活实例」的环境
+            // 直接报 Conflict，**不会**代你停掉（停环境有账本副作用，不该由一次删除顺手做）。
             body: format!(
-                "环境 {name} 的配置与规则绑定会一并从账本里移除；正在运行的实例会先停掉。"
+                "环境 {name} 的配置与规则绑定会一并从账本里移除。\
+                 正在运行的环境不能直接删除：请先在抽屉里「停止」，再来删除。"
             ),
             irreversible: true,
             confirm_label: "删除".to_owned(),
