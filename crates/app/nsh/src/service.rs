@@ -6,7 +6,7 @@
 //! 1. **只有本文件知道 host/admin 的存在**。`pages` / `shell` 只认 `model::Env`
 //!    与 `Ctx`，换实现（假数据、只读演示）不用动界面；
 //! 2. **状态目录是产品身份**：`HostOptions::app_dir_name` 取 `brand::NAME`
-//!    （`envboard`），默认状态目录因此与 Tauri 侧、与将来 `nsh package` 的发行物
+//!    （`envboard`），默认状态目录因此与旧 Tauri 版、与将来 `nsh package` 的发行物
 //!    是同一份（`%LOCALAPPDATA%\envboard`）。可用 `ENVBOARD_STATE_DIR` 覆盖；
 //! 3. **异步门面不能就地 await**：`spawn` 的 future 被 NSH 引擎线程轮询，那已经在
 //!    tokio 上下文里，`Handle::block_on` 会 panic。所以 `start`/`stop` 交给一条

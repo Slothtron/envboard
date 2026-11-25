@@ -3,10 +3,10 @@
 //! 为什么要有这个 crate
 //!
 //! 组合根本来写在宿主二进制里（一个界面形态一个 `main.rs`）。一旦界面形态不止一种
-//! （今天的 web 控制台、将来的 Tauri 壳），或者测试要起一个真管理器，这份装配就得
+//! （历史上的 GPUI / web / Tauri，今天的 NSH），或者测试要起一个真管理器，这份装配就得
 //! 被复制第二遍 —— 而它是全仓最容易漂的一段：引擎选择、共享 CA 物化、单实例锁、
 //! reconcile 顺序、日志照看循环，每一项都是"漏了就出问题"的编排职责。
-//! 历次形态迁移（GPUI → web → Tauri）本 crate 一行未改，是这份拆分的直接兑现。
+//! 历次形态迁移（GPUI → web → Tauri → NSH）本 crate 一行未改，是这份拆分的直接兑现。
 //!
 //! 分层（依赖单向）
 //!
@@ -22,7 +22,7 @@
 //!   `EngineInstance` / `EngineConfig` / `CompiledConfig`），其他 crate 经
 //!   [`Prepared`] 拿装配好的成品；
 //! - **不认识传输**：没有 axum / HTTP / SSE，也没有任何界面类型；唯一的入口
-//!   （桌面宿主 `envboard-desktop` 的 `lib.rs::boot`）只负责把命令行翻译成
+//!   （NSH 宿主 `envboard-nsh` 的 `service.rs::boot`）只负责把启动选择翻译成
 //!   [`HostOptions`]，再把 [`Prepared`] 交给自己的界面；
 //! - **不做领域判定**：配置合法性由 [`ManagerConfig::validate`](envboard_manager::ManagerConfig::validate) 与 domain 裁决，
 //!   这里只负责按既定顺序装配与编排。

@@ -1,4 +1,4 @@
-# envboard —— Rust workspace 根（界面在 frontend/，node/pnpm 只在那个边界内）。
+# envboard —— Rust workspace 根。
 #
 # 分层即架构，crates/ 按依赖方向分四层，层内平铺：
 #   core/     领域内核：protocol、events（叶子词汇）+ engine（规则/领域/代理引擎）
@@ -7,9 +7,8 @@
 #             → host（唯一组合根，引擎装配只住这里）
 #   ui/       设计系统：24 个颜色角色、度量、字号、8 个原语 + 主题 JSON
 #             （**不依赖任何业务 crate**，由 Cargo.toml 保证，见 ADR-1）
-#   app/      交付形态：desktop（Tauri 壳，IPC 直调门面；自成 workspace，见其 Cargo.toml）
-#             + nsh（NSH 0.6.1 壳，迁移中的候选形态）
-# 依赖方向单向：protocol/events ← engine ← manager ← admin ← host ← desktop；
+#   app/      交付形态：nsh（NSH 0.6.1 原生壳，唯一发布物；进程内直调门面）
+# 依赖方向单向：protocol/events ← engine ← manager ← admin ← host ← nsh；
 # ui 是叶子，app/nsh ← ui（ui 不许反向依赖，也不许依赖 admin/manager）。
 # tests/ 是纯测试 crate（contract-tests 消费 fixtures 的可执行契约）。
 #
@@ -17,9 +16,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/core/*", "crates/service/*", "crates/app/*", "crates/ui", "tests/*"]
-# desktop 自成 workspace（tauri-build 静态 CRT 隔离，见其 Cargo.toml）——
-# members 的 glob 会扫到它，必须显式排除，否则「multiple workspace roots」。
-exclude = ["crates/app/desktop"]
 
 [workspace.package]
 version = "0.2.4"
@@ -48,11 +44,9 @@ nsh-core = "=0.6.1"
 #
 # 两条纪律：
 #   1. `Cargo.lock` 必须入库，`cargo build --offline` 是验收项 —— 依赖要克制；
-#   2. **本仓只有一个可执行形态**：Tauri 桌面（`crates/app/desktop`，ADR-006）。
-#      界面在 `frontend/`（pnpm + HeroUI），数据面走 IPC 直调门面，不起监听端口。
-#      web 控制台（axum/HTTP/SSE）与 GPUI 桌面均已退场；desktop 自成 workspace
-#      （tauri-build 的静态 CRT 会毒化根工作区 doctest，见其 Cargo.toml 注释），
-#      故 tauri 系依赖不在本清单登记。
+#   2. **本仓只有一个可执行形态**：NSH 原生桌面（`crates/app/nsh`）。
+#      数据面进程内直调门面，不起监听端口、不带 webview。
+#      web 控制台（axum/HTTP/SSE）、GPUI 桌面与 Tauri 壳均已退场（git 历史可查）。
 async-trait = "0.1.92"
 # HTTP 请求目标解析（抓包记录拆 path/query）：Uri 原生支持 origin-form 与 absolute-form，
 # 比手写 split_once('?') 稳；本地两套 registry 源缓存均已暖，离线可解析。
@@ -65,9 +59,8 @@ serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 # 成员可以再追加 features（如 envboard-engine 给 rustls 追加 ring/std）。
-# clap **只许出现在宿主二进制 crate**（envboard-desktop）：状态目录与端口区间
-# 是启动方式，不是界面设置（见 envboard-admin 门面文档「不在门面上的东西」）。
-clap = { version = "4.6.6", features = ["derive"] }
+# 启动方式（状态目录 / 端口区间）走环境变量与便携标记，经 `HostOptions` 入参；
+# 本仓没有命令行解析库（clap 随 Tauri 壳退场）。
 
 # 引擎（envboard-engine）的 TLS 栈：rustls 用 ring provider（不用 aws-lc-rs，
 # 避免 C 构建链），rcgen 只做签发（其 ring 后端不支持生成 RSA 密钥，因此新生成的 CA

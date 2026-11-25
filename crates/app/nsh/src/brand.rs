@@ -1,7 +1,7 @@
 //! 品牌只有一个源：这三处显示（自绘标题栏、窗口标题、任务栏/Alt-Tab）都从这里取。
 //!
-//! 图标沿用 Tauri 2 侧的同一枚（`crates/app/desktop/icons/icon.png`：深色圆角方、
-//! 绿色 `>` 加青色光标），不另画一枚——换框架不该换品牌。它在这里有两种形态：
+//! 图标是产品自己的那一枚（原图 `assets/icon.png`：深色圆角方、
+//! 绿色 `>` 加青色光标，沿用 Tauri 时代的品牌，换框架不换品牌）。它在这里有两种形态：
 //!
 //! - `assets/envboard.ico`：9 个尺寸 16–256 的 PNG-in-ICO，喂 `AppOptions.icon`；
 //! - `assets/brand-mark-32.rgba`：32×32 直通 RGBA，标题栏 16pt 记号直接喂

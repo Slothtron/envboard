@@ -4,6 +4,25 @@ envboard 只发一个产物：`envboard.exe`（桌面工作台 + 进程内引擎
 标签发布，与根 `Cargo.toml` 的 `[workspace.package]` 一致。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## Unreleased
+
+- **交付形态切换（Tauri 下线）**：唯一发布物改为 NSH 0.6.1 原生壳 `envboard.exe`
+  （无 WebView2、无内嵌 SPA）；`crates/app/desktop` 与 `frontend/` 删除。状态目录
+  与旧版同一份（`%LOCALAPPDATA%\envboard`），账本 / 规则 / CA / 主题偏好原样保留，
+  升级即迁移。
+- **后台与托盘**：关窗默认隐藏进托盘（设置可改关窗即退）；托盘菜单只有
+  「显示窗口 / 退出」两项；隐藏态页面循环卸载、近零 CPU，代理照常服务，唤出即新鲜；
+  「退出」停所有实例 → WAL 合库 → 关窗。
+- **抓包**：列表 + 详情面板（版本订阅 + 尾部窗口，变了才读），状态/类型筛选，
+  导出 HAR 到下载目录。
+- **单实例**：命名管道握手 + 调用方进程校验，二次启动把已有窗口拉到前台。
+- **发布链**：NSIS 安装包与预览渠道暂停（NSH 侧暂无形态标签隔离）；产物为
+  免安装 exe + 便携 zip，SHA256SUMS / cosign 签名不变。
+- **升级注意**：旧 Tauri 版与新版共用账本，**不要同时运行**（单实例锁会提示）；
+  dev/preview 形态标签（`ENVBOARD_PROFILE`）与启动旗标（`--state-dir` 等）随壳退场，
+  多副本改用 `$ENVBOARD_STATE_DIR` 或便携标记；规则导入/编辑、上游代理管理、
+  环境配置编辑的界面入口暂缺（门面能力完备，后续在 NSH 侧补齐，见 docs/limitations.md）。
+
 ## 0.2.4 — 2026-11-20
 
 - **抓包·后端拆字段**：`http::Uri` 在序列化点拆 `path`/`query`（记录 v2，转发/日志/轨迹零改动）；

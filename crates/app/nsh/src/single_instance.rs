@@ -5,8 +5,9 @@
 //! N1 只判「谁是主」；N2 补上握手、调用方校验与前台化：
 //!
 //! 通道是 `\\.\pipe\envboard-nsh-activate-<FNV1a(state_dir)>`（`Local\` 作用域，
-//! 前缀带 `nsh`，**故意与 desktop 的 `envboard-activate-` 不同名**——迁移期两者
-//! 可能同机共存）。主实例以 `FILE_FLAG_FIRST_PIPE_INSTANCE` + owner-only DACL 建
+//! 前缀带 `nsh`，与旧 Tauri 版的 `envboard-activate-` 不同名——两版共用账本但
+//! 激活通道各自独立，旧版占锁时由 `lock_held_message` 给出人话提示）。主实例以
+//! `FILE_FLAG_FIRST_PIPE_INSTANCE` + owner-only DACL 建
 //! 命名管道；次实例连上它握手，被接受就 `exit 0`，主实例把窗口拉到前台。
 //!
 //! **为什么不是内核事件**：事件不携带调用方身份，同会话任意进程都能 `SetEvent`
@@ -30,7 +31,7 @@ pub use imp::{
     spawn_waiter,
 };
 
-/// 管道名前缀。与 desktop 的 `envboard-activate-` 刻意不同名。
+/// 管道名前缀。与旧 Tauri 版的 `envboard-activate-` 不同名（历史身份，不改）。
 const PIPE_PREFIX: &str = "envboard-nsh-activate-";
 
 /// 握手字节：client → server 的请求是 `[MAGIC, VERSION, action]`，

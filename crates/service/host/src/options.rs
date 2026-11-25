@@ -2,16 +2,16 @@
 //!
 //! 纪律：**读环境变量是适配器的职责**（core 禁止直接读环境变量），所以
 //! `ENVBOARD_STATE_DIR` / 用户主目录的回退链落在本文件，而不是渗进 manager 或
-//! domain。命令行翻译是宿主二进制（`crates/app/desktop/src/lib.rs`）的事：它把
-//! `--state-dir` 等旗标翻成这里的字段；本文件自己只认环境变量、平台约定，
-//! 以及调用方（测试、示例）直接填的字段。
+//! domain。启动选择的翻译是宿主二进制（`crates/app/nsh/src/service.rs`）的事：
+//! 它把产品身份（`brand::NAME`）填进 `app_dir_name`；本文件自己只认环境变量、
+//! 平台约定，以及调用方（测试、示例）直接填的字段。
 //!
 //! ## 状态目录怎么定下来（这里是唯一的裁决点）
 //!
 //! 回退链有四级，顺序不可换：
 //!
-//! 1. [`HostOptions::state_dir`] —— 调用方直接给目录（web 宿主经 `--state-dir`
-//!    暴露它；不给则走下面三级）；
+//! 1. [`HostOptions::state_dir`] —— 调用方直接给目录（测试 / 示例用它；
+//!    不给则走下面三级）；
 //! 2. `$ENVBOARD_STATE_DIR` —— 机器级环境变量（CI、容器、临时实验用它指到别处；
 //!    空值等同未设置）；
 //! 3. **便携模式** —— exe 同目录存在 `<exe 名>.portable` 标记时，数据落到同目录的
@@ -60,8 +60,7 @@ pub const PORTABLE_DATA_SUFFIX: &str = "-data";
 pub struct HostOptions {
     /// 调用方**直接指定**的状态目录（回退链第 1 级）。
     ///
-    /// 桌面宿主（`envboard-desktop`）经 `--state-dir` 暴露它；组合根本身不读
-    /// 命令行 —— 翻译是宿主二进制的事。`None` 时走回退链：
+    /// 测试 / 示例直接填它；NSH 宿主不暴露命令行旗标，走回退链：
     /// `$ENVBOARD_STATE_DIR` → 便携标记 → 平台默认目录。
     pub state_dir: Option<PathBuf>,
     /// **应用自己的目录名**（平台默认目录里 `<基础目录>/<这个名字>` 的那一层）。
@@ -75,7 +74,7 @@ pub struct HostOptions {
     /// `Default` 的值 —— 宁可让 `HostOptions::default()` 缺少默认目录，也不要
     /// 凭空编一个名字把账本写进 `%LOCALAPPDATA%\unknown`。
     pub app_dir_name: Option<String>,
-    /// 随机分配端口的区间（`--port-range 16000-16999` 的翻译结果）。
+    /// 随机分配端口的区间（缺省 `16000-16999`，由 `ManagerConfig` 定）。
     pub port_range: Option<(u16, u16)>,
     /// 抓包缓冲字节预算（每环境；`0` = 引擎默认）。
     pub capture_budget: usize,

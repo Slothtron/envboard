@@ -1,11 +1,8 @@
 name: release
 
-# 两个渠道，同一个二进制来源：
-# - stable：`vX.Y.Z` 标签 → NSIS 安装包（perMachine，去 Program Files）+ 免安装 exe；
-# - preview：`vX.Y.Z-preview.N` 标签 → 只出免安装 exe（`envboard-preview.exe`），发
-#   prerelease。**不发 NSIS**：安装包会装到同一个 `C:\Program Files\envboard`，覆盖正式版。
-# 版本号里的预发布段就是渠道身份（ADR-014）：preview 二进制自带 `envboard-preview`
-# 数据目录，可与正式版同时运行。
+# 单一渠道：`vX.Y.Z` 标签 → 免安装 exe（`envboard.exe`）+ 便携包 zip。
+# NSH 原生壳没有 Tauri 时代的形态标签隔离（ADR-014 随壳退场），**预览渠道暂停**：
+# 版本号带预发布段（`-preview.N` 等）直接失败，避免预览二进制与正式版共用账本。
 # 触发：推 `v*` 标签，或手动 workflow_dispatch（只出构建产物，不建 Release）。
 on:
   push:
@@ -30,17 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 版本号是唯一真源：tag、Cargo.toml、渠道（有无预发布段）都从它推。
-      - name: Resolve version and channel
+      # 版本号是唯一真源：tag 与 Cargo.toml 都从它推。
+      - name: Resolve version
         id: version
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$version" == *-* ]]; then
-            echo "channel=preview" >> "$GITHUB_OUTPUT"
-          else
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "版本号 $version 带预发布段：NSH 形态暂无预览身份隔离，预览渠道暂停（见 docs/building.md）" >&2
+            exit 1
           fi
 
       - name: Verify tag matches workspace version
@@ -54,85 +50,38 @@ jobs:
             exit 1
           }
 
-      # 前端工具链版本与 mise.toml / frontend/package.json 的 packageManager 对齐。
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.2
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.16.0
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
       # 与 rust-toolchain.toml 钉死的版本一致。
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/app/desktop
 
-      # tauri-cli 不进 mise、也不进依赖树：单独安装，版本在此钉住。
-      - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2.11" --locked
-
-      # `cargo tauri build` 在调用 cargo **之前**就要求 frontendDist 存在，而 dist/
-      # 不入库，所以先单独构建前端；随后让 build.rs 跳过它自己那次 pnpm，避免跑两遍。
-      - name: Build frontend
-        run: |
-          pnpm --dir frontend install --frozen-lockfile
-          pnpm --dir frontend build
-
-      - name: Build stable (NSIS bundle)
-        if: steps.version.outputs.channel == 'stable'
-        working-directory: crates/app/desktop
-        env:
-          ENVBOARD_SKIP_FRONTEND_BUILD: "1"
-        run: cargo tauri build --bundles nsis
-
-      # preview 只出裸 exe：NSIS 是 perMachine，装到同一个 Program Files\envboard，
-      # 会把用户装着的正式版覆盖掉。
-      - name: Build preview (portable exe only)
-        if: steps.version.outputs.channel == 'preview'
-        working-directory: crates/app/desktop
-        env:
-          ENVBOARD_SKIP_FRONTEND_BUILD: "1"
-        run: cargo tauri build --no-bundle
+      # 唯一发布物：NSH 壳（默认特征，harness 探针不进发布构建）。
+      - name: Build NSH release
+        run: cargo build -p envboard-nsh --release --locked
 
       - name: Collect artifacts
         shell: bash
-        env:
-          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           mkdir -p dist
-          if [[ "$CHANNEL" == "preview" ]]; then
-            cp crates/app/desktop/target/release/envboard.exe dist/envboard-preview.exe
-            exe=envboard-preview.exe
-            zip=envboard-preview-portable.zip
-          else
-            cp crates/app/desktop/target/release/envboard.exe dist/
-            cp crates/app/desktop/target/release/bundle/nsis/*.exe dist/
-            exe=envboard.exe
-            zip=envboard-portable.zip
-          fi
+          # 发布名是产品身份 envboard.exe；crate 二进制名 envboard-nsh 只是构建产物名。
+          cp target/release/envboard-nsh.exe dist/envboard.exe
 
           # 便携版不是另一种编译产物，而是「同一个 exe + 同目录的 envboard.portable
-          # 标记」：标记决定数据落在 exe 旁的 envboard-data，并把 WebView2 profile、
-          # 标题与端口段切成 portable 形态（ADR-014）。裸 exe 不带标记，保持正式版
-          # 身份（数据在 %LOCALAPPDATA%\envboard），所以便携形态必须单独打包。
+          # 标记」：标记决定数据落在 exe 旁的 envboard-data。裸 exe 不带标记，
+          # 数据在 %LOCALAPPDATA%\envboard，所以便携形态必须单独打包。
           mkdir -p dist/portable
-          cp "dist/$exe" dist/portable/
+          cp dist/envboard.exe dist/portable/
           printf '%s\n' \
             'envboard 便携标记（不要删除本文件）' \
             '数据目录：本目录下的 envboard-data/' \
-            '删除本文件即回到该形态的平台默认目录；详见 docs/usage.md「便携形态」。' \
+            '删除本文件即回到平台默认目录；详见 docs/usage.md「便携形态」。' \
             > dist/portable/envboard.portable
-          powershell -NoProfile -Command "Compress-Archive -Path dist/portable/* -DestinationPath dist/$zip -Force"
+          powershell -NoProfile -Command "Compress-Archive -Path dist/portable/* -DestinationPath dist/envboard-portable.zip -Force"
           rm -rf dist/portable
           ls -lh dist
-          powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'dist/$zip')).Entries | ForEach-Object { \$_.FullName }"
+          powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'dist/envboard-portable.zip')).Entries | ForEach-Object { \$_.FullName }"
 
       # 完整性 + 供应链可审计（SOP §5）：SHA256SUMS 覆盖全部产物，cosign keyless
       # 逐个签名（含 SHA256SUMS 本身）。.sigstore 随 dist/* 进 artifact 与 Release。
@@ -157,12 +106,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: envboard-windows-x64-${{ steps.version.outputs.channel }}
+          name: envboard-windows-x64
           path: dist/*
           if-no-files-found: error
 
-      - name: Publish GitHub Release (stable)
-        if: startsWith(github.ref, 'refs/tags/v') && steps.version.outputs.channel == 'stable'
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -170,36 +119,12 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            Windows x64 构建（只支持 Windows）。
+            Windows x64 构建（只支持 Windows）。NSH 原生壳，**不需要 WebView2**。
 
-            - `envboard.exe`：单文件免安装，双击即用（需要 WebView2，Windows 10/11 通常已带）。
-              数据在 `%LOCALAPPDATA%\envboard`，与安装版共用 —— 要与已安装版本并存请用下面的便携包。
+            - `envboard.exe`：单文件免安装，双击即用。数据在 `%LOCALAPPDATA%\envboard`
+              （与旧 Tauri 版同一份账本，升级即迁移；两版不要同时运行）。
             - `envboard-portable.zip`：便携包（`envboard.exe` + `envboard.portable` 标记），
               解压即用，数据落在解压目录的 `envboard-data\`，可与正式版同时运行。
-            - `*_x64-setup.exe`：NSIS 安装包（perMachine，安装/卸载各一次 UAC），
-              装到 `C:\Program Files\envboard`；数据在 `%LOCALAPPDATA%\envboard`。
-
-            未做 Authenticode 签名：首次运行仍会撞 SmartScreen，点「更多信息 → 仍要运行」。
-            产物附 SHA256SUMS 校验和与 cosign keyless 签名（`.sigstore`），可验证完整性与来源：
-            `sha256sum -c SHA256SUMS`；`cosign verify-blob --bundle <产物>.sigstore <产物>`。
-
-      - name: Publish GitHub Release (preview)
-        if: startsWith(github.ref, 'refs/tags/v') && steps.version.outputs.channel == 'preview'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          draft: false
-          prerelease: true
-          generate_release_notes: true
-          body: |
-            Windows x64 **预览版**（版本号带 `-preview.N`），可与正式版同时运行。
-
-            - `envboard-preview.exe`：单文件免安装，不写 Program Files，不覆盖正式版安装。
-            - `envboard-preview-portable.zip`：便携包（exe + `envboard.portable` 标记），
-              数据落在解压目录的 `envboard-data\`。
-            - 裸 exe 的数据与配置在 `%LOCALAPPDATA%\envboard-preview`，WebView2 profile 也在
-              独立目录；正式版的 `%LOCALAPPDATA%\envboard` 不受影响。
-            - 默认端口段 `17000-17999`（正式版 `16000-16999`），两套环境可以同时跑。
 
             未做 Authenticode 签名：首次运行仍会撞 SmartScreen，点「更多信息 → 仍要运行」。
             产物附 SHA256SUMS 校验和与 cosign keyless 签名（`.sigstore`），可验证完整性与来源：

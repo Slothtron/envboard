@@ -36,8 +36,6 @@ envboard.json
 # mise.toml 是仓库交付的一部分（本地开发环境：工具版本锁定 + 任务入口）：
 # 全局 gitignore 把它当本机配置忽略，这里显式豁免。
 !mise.toml
-# Tauri 壳的可再生 schema（tauri-build 产出）
-crates/app/desktop/gen/
 
 # 全局 gitignore（~/.gitignore）把 `.github/` 当本机配置忽略：
 # CI 工作流是仓库交付的一部分，这里解除（父目录 + 内容两行都要）。

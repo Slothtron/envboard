@@ -1,9 +1,9 @@
 //! envboard 的 UI 边界词汇：**跨界面形态复用的数据形状，本 crate 文档即契约**。
 //!
-//! 工作台不止一种界面形态（今天的 web 控制台、将来的 Tauri 壳），它们消费的是
-//! 同一份词汇：环境/代理/抓包的视图 DTO、推送流的帧形状、游标与错误信封。
-//! 本 crate 把这些形状收拢到唯一定义处 —— 纯 serde 数据结构，零传输依赖；
-//! HTTP/SSE 只是 web 形态对它们的绑定，不在这份词汇里。
+//! 今天的唯一交付形态是 NSH 原生壳（`envboard-nsh`），它消费的是这份词汇：
+//! 环境/代理/抓包的视图 DTO、帧形状、游标与错误信封。历次界面形态
+//! （GPUI → web → Tauri → NSH）消费的都是同一份词汇 —— 形状收拢在唯一定义处，
+//! 纯 serde 数据结构，零传输依赖；传输绑定不在这份词汇里。
 //!
 //! 分层：叶子 crate（不依赖任何内部 crate）。`envboard-engine` 与
 //! `envboard-manager` 在服务端构造这些类型，界面形态 crate 消费它们。
@@ -36,7 +36,9 @@
 //!
 //! ## 快照与增量：帧语义与游标域
 //!
-//! 两条推送流（Tauri Channel，ADR-006）共用帧名 `snapshot / events`：
+//! 帧名 `snapshot / events` 是词汇的一部分（契约 fixture 钉住形状）；历史上的
+//! 推送流绑定（Tauri Channel）已随壳退场，当前 NSH 形态进程内直调
+//! `snapshot()` / `capture_rows()` / `capture_version()` 取数，不再走推送流：
 //!
 //! | 帧名 | 语义 | 用在哪路数据 |
 //! |---|---|---|
@@ -49,8 +51,8 @@
 //!
 //! | 路 | 取数方式 | 游标域 | 续传语义 |
 //! |---|---|---|---|
-//! | 快照 | `watch_environments`（Tauri Channel，1s 节拍推 snapshot） | 控制面账本代次（每次 commit +1） | **advisory**：健康变化不经控制面写入，同代次内容仍可能不同，界面不得据此跳过渲染 |
-//! | 调试实时 | `debug_delta(after, limit)` | 抓包记录的 `request_id` | 淘汰只移除游标之前的记录，增量无缺口；换代或目标消失 → 重收 snapshot，不续传 |
+//! | 快照 | `snapshot()`（全量 + 账本代次；NSH 按可见性门控节拍） | 控制面账本代次（每次 commit +1） | **advisory**：健康变化不经控制面写入，同代次内容仍可能不同，界面不得据此跳过渲染 |
+//! | 调试实时 | `capture_rows(name, limit)` 尾部窗口 + `capture_version` 订阅 | 抓包记录的 `request_id` | 淘汰只移除游标之前的记录，增量无缺口；换代或目标消失 → 重收 snapshot，不续传 |
 //!
 //! 帧形状明细：[`SnapshotFrame`]
 //! `{ok, cursor, environments, error?}`（ok:false 时 environments 为空）；
@@ -58,17 +60,14 @@
 //! cursor 为 0；会话换代即 `session.id`/`generation` 变化 → 重发 snapshot）；
 //! [`DebugEvents`] `{cursor, records, captured, dropped, oldest}`。
 //!
-//! ## 安全约定（桌面形态，ADR-006）
+//! ## 安全约定（NSH 形态）
 //!
-//! 数据面走 Tauri commands-IPC（`envboard-desktop`），**不起监听端口**：
+//! 数据面**进程内直调** `AdminService` 门面（`envboard-nsh` 的 `service.rs`），
+//! **不起监听端口、不带 webview**：没有网络管理面，外部进程与网页够不着；
+//! 二次启动经命名管道激活已有实例，服务端校验调用方进程 image 路径。
 //!
-//! - **IPC 面由 capabilities 圈禁**：命令只对主窗开放（capabilities/default.json），
-//!   页面 origin 是 `tauri://localhost`，外部进程与网页够不着；
-//! - **严格 CSP** 钉在 tauri.conf.json：无 unsafe-inline、资产必须外置、
-//!   react-aria 注入样式按 hash 豁免、`connect-src` 含 `ipc: http://ipc.localhost`。
-//!
-//! 旧 web 形态的三档（回环免鉴权 / `--token` / CSRF 头 / Host 校验）随 HTTP 面
-//! 退场（git 历史可查）。配套纪律不变：**单实例锁**（同一状态目录只许一个宿主，
+//! 旧形态的传输圈禁（web 三档鉴权、Tauri capabilities/CSP）随各自绑定退场
+//! （git 历史可查）。配套纪律不变：**单实例锁**（同一状态目录只许一个宿主，
 //! `envboard-host`）；**凭据只进不出**；**CA 私钥不出组合根**
 //! （`envboard-host::CaControl` 只暴露证书公开面与按需签发的叶子）。
 //!

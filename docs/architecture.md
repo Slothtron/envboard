@@ -33,14 +33,11 @@ crate 文档的「引擎能力矩阵」为准。
 
 ## 分层与目录
 
-依赖单向：`protocol/events ← engine ← manager ← admin ← host ← desktop`。契约不住在
+依赖单向：`protocol/events ← engine ← manager ← admin ← host ← nsh`。契约不住在
 独立文档里，住在各 crate 的文档注释（rustdoc）与 `tests/contract-tests/fixtures/` 的
 84 个 golden fixture 里。
 
 ```
-frontend/        工作台 SPA（Vite 7 + React 19 + HeroUI 3 + Tailwind 4，pnpm）：
-                 唯一的界面真相；数据层走 @tauri-apps/api（invoke/Channel）；
-                 dist/ 不入库，由 cargo build 自动产出并内嵌
 crates/
   core/          领域内核
     protocol         UI 边界词汇：视图 DTO、类型化请求 DTO、帧形状、游标、错误信封
@@ -52,25 +49,28 @@ crates/
                      EngineSpec 编译与热装配
     admin            Admin 管理门面：类型化入口校验 + 用例编排，传输无关
     host             唯一组合根：引擎装配 + 共享 CA 物化 + 管理器构造（含单实例锁）
+  ui/            设计系统：24 个颜色角色、度量、字阶、八原语、themes/default.json
+                 （不依赖任何业务 crate，守门测试在 ui/tests/）
   app/           交付形态
-    desktop          Tauri 2 壳 = 唯一入口与发布物（自成 workspace）：
-                     clap 翻译 + 启动编排 + 41 个 IPC 命令 + 两条 Channel 推送流 +
-                     严格 CSP + WebView2 加固
+    nsh              NSH 0.6.1 原生壳 = 唯一入口与发布物：model（业务语义）/
+                     pages（布局）/ shell（标题栏与状态条）/ service（数据面唯一入口）/
+                     tray · single_instance · shutdown（托盘 / 单实例 / 退出）
 tests/
   contract-tests   可执行契约：84 个 fixture 的形状与语义消费
-mise.toml        本地开发环境：node/pnpm 版本锁定 + 任务入口
+mise.toml        本地开发环境：Rust 工具链锁定 + 任务入口
 ```
 
 分层纪律（结构与评审承载，不设机械门禁）：protocol / events 是叶子；engine 的
-domain / rules 是纯逻辑；**引擎装配只住 `crates/service/host`**；**命令行解析库只许
-出现在 `envboard-desktop`**；**GUI 框架只用 Tauri 2**；全部 crate 显式
-`publish = false`（发布物是二进制，不是 crate）。
+domain / rules 是纯逻辑；**引擎装配只住 `crates/service/host`**；**本仓没有命令行
+解析库**（启动方式走环境变量与便携标记）；**GUI 框架只用 NSH 0.6.1**（只许出现在
+`crates/ui` 与 `crates/app/nsh`）；全部 crate 显式 `publish = false`（发布物是
+二进制，不是 crate）。
 
 ## 契约住在哪
 
 - 视图 DTO / 帧 / 游标 / 安全约定 → `envboard-protocol` crate 文档；
-- 错误码表 / 可重试性 / 界面三层呈现 → `envboard-engine::api::error`（界面映射唯一
-  定义在 `frontend/src/errors.ts`）；
+- 错误码表 / 可重试性 / 界面呈现 → `envboard-engine::api::error`（界面翻译唯一
+  定义在 `crates/app/nsh/src/actions.rs`）；
 - 方法语义 / 生效方式 / 传输绑定 → `envboard-admin` crate 文档；
 - 规则语法 BNF / 归一化 / 确定性渲染 → `envboard-engine::rules`；
 - 环境字段不变量 / PATCH 语义 → `envboard-engine::domain::environment`；

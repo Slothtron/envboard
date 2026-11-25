@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="crates/app/desktop/icons/128x128.png" alt="envboard" width="96">
+  <img src="crates/app/nsh/assets/icon.png" alt="envboard" width="96">
 </p>
 
 <h1 align="center">envboard</h1>
@@ -34,8 +34,8 @@
   新配置**；没有收敛窗口、没有"等下一个心跳"。
 - **只改"连到哪"。** 规则是 hosts 风格的静态覆盖表，在建连时改写上连目标 —— 请求
   内容、`Host` 头、SNI 基准都不动。
-- **单二进制桌面形态。** Tauri 2 壳 + 编译期内嵌 SPA，管理面走 IPC 直调门面，**不起
-  任何监听端口**。发布物只有一颗 `envboard.exe`。
+- **单二进制桌面形态。** NSH 原生壳（无 webview、无内嵌 SPA），管理面进程内直调
+  门面，**不起任何监听端口**。发布物只有一颗 `envboard.exe`。
 
 ## 为什么需要它
 
@@ -55,8 +55,8 @@
 | **TLS 与证书** | `insecure_hosts` 精确域名放宽校验；`mitm_hosts` 白名单只解密点名的域名；自有 `envboard` 共享 CA：证书页一键安装 / 卸载到当前用户信任库（免管理员） |
 | **上游代理与鉴权** | 代理账本按名绑定到环境；环境级 `proxy_user` / `proxy_password` → 407 门，凭据只进不出 |
 | **抓包** | 环境子页的单例会话：实时增量推送、方法 / 状态 / 主机筛选、请求响应详情、导出 HAR |
-| **桌面工作台** | 环境 / 证书两视图，搜索、状态过滤、排序；双击行打开悬浮详情（概览 / 配置 / 规则）；顶栏指标聚合 |
-| **后台运行 / 托盘** | 关窗销毁窗口与 WebView、进程与引擎线程常驻；托盘重建窗口；窗口几何与主题跨会话记忆；boot 自检屏只在进程首个窗口播放 |
+| **桌面工作台** | 环境 / 证书两页，状态过滤 chips、排序；点行开详情抽屉（概览 / 规则 / 代理地址）；抓包子页（列表 + 详情面板） |
+| **后台运行 / 托盘** | 关窗默认隐藏进托盘（可设关窗即退），进程与引擎线程常驻、代理照常服务；托盘「显示窗口 / 退出」两项；隐藏态近零 CPU，唤出即新鲜；窗口几何与主题跨会话记忆 |
 | **账本与自愈** | SQLite + WAL 单事务原子写；引擎线程 panic 后按期望状态自动重启 |
 
 不提供的能力（跨环境对比、远程管理面、HTTP/2、PAC / 透明代理 / SOCKS、开机自启）
@@ -67,34 +67,31 @@
 数据面是纯 Rust 的进程内代理：一个环境一个线程、一个 current-thread runtime、一个
 监听端口；`ConnectTarget` 是唯一接缝（只改"连到哪"，不动请求内容与 SNI）；配置经
 `ArcSwap` 原子换入快照，失败整套拒绝、旧快照继续服务；数据面写日志走有界总线，
-永不阻塞。界面是 Tauri 2 壳，管理动作走 IPC 直调 `AdminService` 门面，与传输无关。
+永不阻塞。界面是 NSH 0.6.1 原生壳，管理动作进程内直调 `AdminService` 门面，与传输无关。
 
-依赖单向：`protocol/events ← engine ← manager ← admin ← host ← desktop`；契约住在
+依赖单向：`protocol/events ← engine ← manager ← admin ← host ← nsh`；契约住在
 各 crate 的 rustdoc 与 `tests/contract-tests/` 的 84 个 golden fixture 里，不在独立
 文档层。分层、状态目录与契约位置见 [架构](docs/architecture.md)。
 
 ## 安装
 
 从 [Releases](https://github.com/Slothtron/envboard/releases) 下载 Windows 构建：
-`envboard.exe`（免安装）、`envboard-portable.zip`（便携包，数据跟着目录走，可与安装版并存）
-或 `*_x64-setup.exe`（NSIS，perMachine，需要一次 UAC）。目标机器只需要
-WebView2（Windows 10/11 通常已带）。未签名，首次运行按 SmartScreen 提示「仍要运行」。
+`envboard.exe`（免安装）或 `envboard-portable.zip`（便携包，数据跟着目录走，可与
+正式版并存）。NSH 原生壳，**不需要 WebView2**。未签名，首次运行按 SmartScreen
+提示「仍要运行」。
 
 从源码构建：
 
 ```bash
-mise run dev                        # 开发：Tauri 壳 + vite HMR
-cd crates/app/desktop && cargo tauri build   # 发布产物 + NSIS 安装包
+cargo build -p envboard-nsh --release   # target/release/envboard-nsh.exe（发布名 envboard.exe）
+mise run dev                            # 开发运行（真宿主，RUST_LOG=info 看装配日志）
 ```
 
-开发构建与已安装的正式版**互不干扰**：debug 构建自动带 `dev` 标签——状态目录
-`%LOCALAPPDATA%\envboard-dev`、WebView2 profile `com.envboard.desktop-dev`、默认端口段
-`17000-17999`，窗口标题与托盘提示都带「（dev）」，两套可以同时开着。
-便携副本（exe 旁放 `envboard.portable`）与预览渠道（版本号 `X.Y.Z-preview.N`）同样是
-独立形态：各自的数据目录 / WebView2 profile / 端口段，都能与正式版并存。
-标签可用 `$ENVBOARD_PROFILE=<tag>` 覆盖（`release` / `none` = 恢复正式版身份）。
+状态目录与旧 Tauri 版是同一份（`%LOCALAPPDATA%\envboard`），升级即迁移，两版不要
+同时运行。要多开互不干扰的副本：`$ENVBOARD_STATE_DIR` 指到别处，或 exe 旁放
+`envboard.portable` 标记（数据落在 exe 旁的 `envboard-data\`）。
 
-前置工具链、三步入网、便携形态、启动参数与状态目录见 [使用](docs/usage.md)；
+前置工具链、三步入网、便携形态与状态目录见 [使用](docs/usage.md)；
 发布链路与分发形态见 [构建与发布](docs/building.md)。
 
 ## 文档

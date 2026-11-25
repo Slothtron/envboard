@@ -6,15 +6,15 @@
 //! ```text
 //! envboard-protocol（词汇） ← envboard-manager（账本与装配编排） ← envboard-admin（本 crate）
 //!                                                      ↑
-//!                                        envboard-desktop（Tauri IPC 传输绑定）
+//!                                        envboard-nsh（NSH 壳，进程内直调）
 //! ```
 //!
 //! ## 全局约定
 //!
 //! - **门面不认识传输；圈禁在传输层**：[`AdminService`] 只在同进程内被
-//!   `envboard-desktop` 的 IPC 命令调用。capabilities 圈禁与 CSP 是 Tauri 绑定的
-//!   职责（安全约定见 `envboard-protocol` crate 文档）。历次换传输
-//!   （GPUI → web → Tauri）门面零漂移，是这条拆分的直接兑现。
+//!   `envboard-nsh` 的 `service.rs` 直调（无监听端口、无 webview，安全约定见
+//!   `envboard-protocol` crate 文档）。历次换传输
+//!   （GPUI → web → Tauri → NSH）门面零漂移，是这条拆分的直接兑现。
 //! - **入参出参都是 typed DTO，不是 JSON `Value`**：写动作收 `envboard-protocol`
 //!   的请求结构（`EnvCreateReq` / `EnvPatchReq` / `ProxyPutReq` / `DebugStartReq`，
 //!   `deny_unknown_fields`，未知字段响亮拒绝 → `invalid_config` + `field` 指向
@@ -84,7 +84,7 @@
 //! | `start_debug(body)` / `stop_debug()` | 收 `DebugStartReq {env}`；切换即换代（原目标停止并清空） |
 //! | `debug_delta(after, limit)` | 增量 `(最新游标, DebugEvents)`；游标域 = 会话内 request_id |
 //! | `captures(name, limit)` / `capture_detail(name, request_id)` | 无活会话 → None；单条记录 |
-//! | `capture_rows(name, after, limit)` | 列表读原语：瘦行（id/方法/状态/域名/路径/大小/content-type），不搬正文 |
+//! | `capture_rows(name, limit)` | 列表读原语：尾部窗口瘦行（id/方法/状态/域名/路径/大小/content-type），不搬正文；配合 `capture_version` 订阅，变了才读 |
 //! | `clear_capture(name)` | 清空当前会话记录（generation +1） |
 //! | `inject_fault(name, reason)` | **测试探针**，只给验收用；引擎不支持 → false |
 //!
@@ -106,16 +106,16 @@
 //!
 //! ## 传输绑定
 //!
-//! 方法契约到 IPC 命令的映射住在 `envboard-desktop` 的 ops.rs（纯函数核，
-//! 命令级契约测试直接打它）+ commands.rs（薄壳）：一方法一命令，两路取数走
-//! Tauri Channel（`watch_environments`、`watch_debug`），CA 操作面绑定为
-//! `ca_*` 命令。**命令名不是方法契约的一部分**：换传输可以重新绑定，
-//! 方法语义不动（旧 HTTP 端点映射随 web 形态退场，git 历史可查）。
+//! 方法契约到界面的绑定住在 `envboard-nsh` 的 `service.rs`（进程内直调，
+//! 异步动作经写车道 + `Handle::block_on` 回传）与 `actions.rs`（用例编排）；
+//! CA 操作面由组合根交付（`Prepared::ca`），证书页直调 `CaControl`。
+//! **绑定不是方法契约的一部分**：换传输可以重新绑定，方法语义不动
+//! （旧 IPC 命令 / HTTP 端点映射随各自形态退场，git 历史可查）。
 //!
 //! ## 修订规则
 //!
 //! 方法增删改必须同提交改本 crate（实现）、`envboard-protocol`（形状）与
-//! `envboard-desktop` 的 ops.rs/commands.rs（绑定）；请求 DTO 字段清单与
+//! `envboard-nsh` 的 service.rs/model.rs（绑定与消费）；请求 DTO 字段清单与
 //! `envboard-engine::domain::KNOWN_FIELDS` 对齐；返回值的裸数组 / 裸对象 /
 //! 包装对象形状是既有形状，统一化重构属破坏性变更。
 

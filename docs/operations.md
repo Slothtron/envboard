@@ -6,11 +6,9 @@
 Rust 测试里，任务只做编排，遇错即停：
 
 ```bash
-mise run verify            # 全量：Rust 层 + 契约层 + 桌面层
+mise run verify            # 全量：Rust 层 + 契约层
 mise run verify-rust       # fmt / clippy / check / build / test / doc
 mise run verify-contract   # 84 个 fixture
-mise run verify-desktop    # 桌面三套：smoke / artifact / 命令级契约
-mise run verify-frontend   # pnpm install + build（tsc 内含）
 mise run verify-live       # 实机层：引擎直驱（只需 openssl 与 curl）
 ```
 
@@ -20,13 +18,11 @@ mise run verify-live       # 实机层：引擎直驱（只需 openssl 与 curl�
 | --- | --- | --- |
 | rust | `cargo fmt --check` / `clippy -D warnings` / `check` / `build` / `test --workspace` / `doc` | 编译、lint、单测 + 冒烟（单实例锁、端口分配、reconcile、健康判定、日志轮转、环境编辑热/停机）+ rustdoc 可构建 |
 | contract | `cargo test -p envboard-contract-tests` | **84 个 fixture** 的形状与语义；失败用例钉错误码；能力注册表 ↔ fixture 目录一致 |
-| desktop | `cargo test --locked --offline`（crates/app/desktop） | smoke（help 面 / 坏参数退出码 / 二次启动激活）+ artifact（引擎标记、产品身份、dist 底线、IPC 接线、导航三集合、CSP hash）+ 命令级契约 **14 条** |
-| frontend | `pnpm install --frozen-lockfile` + `pnpm build` | tsc 零错 + Vite 产出 dist |
-| live | `live_manager` `--ignored` + CDP 真机走查 | 引擎直驱（真端口 / 真 TLS）；桌面全链路（真窗口 + IPC 流 + 真代理流量） |
+| nsh 界面 | `cargo test -p envboard-nsh --features harness --test golden --offline -- --ignored` | 八张基线逐像素（Anode 座席 2560×1440@125%）；数据面 `--test data_path`：真组合根建→起→停→删一条链 |
+| live | `live_manager` `--ignored` + 座席真机走查 | 引擎直驱（真端口 / 真 TLS）；NSH 全链路（托盘 / 单实例 / 隐藏态 / 退出，工作区 tools/envboard-p3-check/） |
 
-发布物内容判据住在 `crates/app/desktop/tests/artifact.rs`：二进制里真的带着进程内
-引擎与内嵌前端（引擎线程名标记、产品身份、dist 体积下限、外链资产、IPC 命令接线、
-导航 ↔ 视图一一对应、CSP 严格档）。界面侧的验收是**命令级契约 + CDP 真机走查**。
+发布物按**默认特征**构建（`harness` 探针不进发布物）。界面侧的验收是
+**golden 八例 + 数据面测试 + 座席真机走查**。
 
 ## 健康与错误码
 
