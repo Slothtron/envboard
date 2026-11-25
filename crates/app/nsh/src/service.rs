@@ -47,6 +47,10 @@ pub struct Service {
 /// 界面照常起窗、在错误槽里显示，而不是启动即自杀。
 pub fn boot() -> Result<(), Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        // B3（EB-DESIGN-006 §6.5）：宿主这条 runtime 只跑账本读写与快照，
+        // 2 条 worker 够用；代理转发在各实例自己的 current-thread runtime 上
+        // （`engine.rs:315`），不受这里影响。默认值 = 核数，隐藏态白占线程栈。
+        .worker_threads(2)
         .enable_all()
         .thread_name("envboard-host")
         .build()

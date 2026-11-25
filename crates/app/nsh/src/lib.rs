@@ -15,9 +15,11 @@ mod shell;
 // N1（方案 §5.3 单实例）：preflight 是产品行为，不在 harness 后面 —— 发布物也要
 // 拦住第二个写者。
 pub mod single_instance;
-// T2（方案 §6）：托盘是产品的常驻形态（关窗即隐藏、单击唤出、计数 tooltip），
-// 同时是隐藏态降频的判据来源（`window_visible()`）。
+// T2（方案 §6）：托盘是产品的常驻形态（关窗即隐藏、单击唤出、计数 tooltip）。
 mod tray;
+// B1（EB-DESIGN-006 §6.1）：可见性门读 NSH 的 `lifecycle()`（平台真值、零轮询），
+// 页面循环挂在它门控的子树里 —— 隐藏即卸载，定时器随 future drop 一起消失。
+mod live;
 // T3（方案 §6.1 第 5 条）：退出走正常路径 —— 停环境（放端口）→ 合 WAL → 关窗
 // 让 `run_app` 返回；托盘「退出」与「关窗即退」共用它。
 mod shutdown;

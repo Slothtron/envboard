@@ -5,9 +5,10 @@
 //! `tokens.rs`（→ `crates/ui/themes/default.json`），页面里没有 hex；
 //! 状态条的计数一律经 `model`，不手写“8 环境 · 3 运行”这种会漂的字符串。
 //!
-//! M3：`envs` 是一个信号，初值来自 `AdminService::snapshot()`，之后每 800ms 轮询一次；
-//! 写操作自己刷一次（`actions`），所以点完立刻变，不靠下一拍。`NG_GOLDEN=1` 时
-//! 不启宿主、用 `model::fixture()`——golden 要的是**像素**，不是账本内容。
+//! M3：`envs` 是一个信号，初值来自 `AdminService::snapshot()`；B1 起循环挂在
+//! `env_sync` 那棵受 `live::visible()` 门控的子树里，可见时 800ms 兜底一拍、
+//! 隐藏时整个卸载。写操作自己刷一次（`actions`），所以点完立刻变，不靠下一拍。
+//! `NG_GOLDEN=1` 时不启宿主、用 `model::fixture()`——golden 要的是**像素**，不是账本内容。
 
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -17,6 +18,7 @@ use envboard_ui::{font as f, metrics as m, tokens as t};
 
 use crate::actions::{self, Ctx};
 use crate::brand;
+use crate::live;
 use crate::model::{self, Env};
 use crate::pages;
 use crate::prefs::{self, ThemeChoice};
@@ -239,22 +241,10 @@ pub fn App() -> impl IntoElement {
         }
     }
 
-    if !synthetic && service::service().is_some() {
-        // 第一拍同步读，窗口第一帧就有内容；之后在引擎线程上按定时器轮询。
-        // 间隔不是常数：窗口隐藏时 800 → 2000（T1 实测「隐藏不省 CPU」，
-        // 降频才有那 10 分钟的结论）。
-        let generation = std::cell::Cell::new(0u64);
-        poll_once(cx, &generation, true);
-        spawn(async move {
-            loop {
-                timer(crate::tray::snapshot_interval()).await;
-                match background(async { service::snapshot() }).await {
-                    Ok(snap) => poll_snapshot(cx, &generation, snap),
-                    Err(error) => cx.error.set(Some(format!("轮询任务失败：{error}"))),
-                }
-            }
-        });
-    }
+    // B1：环境快照的循环不再挂在 `App()` 上，而是挂进 `env_sync` 那棵受可见性
+    // 门控的子树（见下面的 `when(live::visible, ...)`）。隐藏时子树卸载，
+    // `spawn` 随 owner 结束、定时器被 `TimerKey` 取回 —— 隐藏态零唤醒。
+    let live_data = !synthetic && service::service().is_some();
 
     // T1（P6）托盘探针优先：它要测的是「托盘行为能不能成立」，与产品托盘
     // 同时挂会各挂一份图标。只在 `NG_TRAY_PROBE=1` 的 harness 构建里生效。
@@ -270,8 +260,8 @@ pub fn App() -> impl IntoElement {
         crate::tray::install(cx);
     }
 
-    // N2（方案 §5.2）：二次启动的激活请求由等待线程记数，界面这边轮询取走并把
-    // 窗口拉到前台。产品代码，不在 harness 后面 —— 否则发布物里「双击唤出」
+    // N2（方案 §5.2）：二次启动的激活请求由等待线程**推**给界面（B3 起不再轮询），
+    // 界面把窗口拉到前台。产品代码，不在 harness 后面 —— 否则发布物里「双击唤出」
     // 就只剩 N1 的「请自己找窗口」。
     crate::single_instance::install();
 
@@ -284,6 +274,12 @@ pub fn App() -> impl IntoElement {
         // translucent: 缟 at 0.80, 乌黑 at 0.80.
         .bg(|| t::page())
         .overflow_hidden()
+        // B1：只在窗口真的可见时挂载的「活体」子树。它不画任何东西（0×0、脱离
+        // 流），只承载环境快照循环；隐藏即卸载，循环与定时器一起消失。
+        .child(when(
+            move || live_data && live::visible(),
+            move || env_sync(cx),
+        ))
         .child(title_bar(cx))
         .child(app_header(page, cx))
         .child(
@@ -324,6 +320,29 @@ pub fn App() -> impl IntoElement {
         .child(when(move || cx.confirm.get().is_some(), move || {
             pages::confirm_dialog(cx)
         }))
+}
+
+/// 环境快照的「活体」循环（B1，EB-DESIGN-006 §6.1）。
+///
+/// 只在 `live::visible()` 为真时被 `when` 挂载。挂载即同步读一次 —— 从托盘唤回
+/// 的第一帧就是新鲜数据，不等下一拍；之后按可见态兜底拍轮询，代次没变不动信号。
+///
+/// 卸载（隐藏 / 最小化 / 锁屏 / 切虚拟桌面）时 owner 结束，`spawn` 取消，
+/// NSH 把这条 `timer` 从队列里取回。**所以这里不需要任何「暂停」代码。**
+fn env_sync(cx: Ctx) -> impl IntoElement {
+    let generation = std::cell::Cell::new(0u64);
+    poll_once(cx, &generation, true);
+    spawn(async move {
+        loop {
+            timer(std::time::Duration::from_millis(live::SNAPSHOT_FALLBACK_MS)).await;
+            match background(async { service::snapshot() }).await {
+                Ok(snap) => poll_snapshot(cx, &generation, snap),
+                Err(error) => cx.error.set(Some(format!("轮询任务失败：{error}"))),
+            }
+        }
+    });
+    // 不占位、不参与布局：它只是个承载循环的挂载点。
+    view().absolute().w(px(0.0)).h(px(0.0))
 }
 
 fn toast_pill(message: String) -> impl IntoElement {

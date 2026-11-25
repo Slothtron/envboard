@@ -23,6 +23,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 pub use imp::{
     Activated, Guard, Preflight, lock_held_message, activation_failed_message, preflight, prompt,
@@ -47,11 +48,23 @@ const RESP_ACK: u8 = 0x06;
 ///
 /// 为什么是计数而不是回调：命名管道在 std 线程里读写，而 NSH 的窗口操作要走
 /// 组件作用域的命令队列（`main_window().show()/focus()` 只能在 UI 线程发命令）。
-/// 计数 + UI 侧 `spawn`+`timer` 轮询是最短的桥，代价是一次 120ms 的唤醒。
 static PENDING: AtomicU32 = AtomicU32::new(0);
+
+/// B3（EB-DESIGN-006 §6.3）：等待线程 → UI 的**推送**桥，取代 120ms 轮询。
+///
+/// 能这么桥的依据：NSH 任务的 waker（`nsh-core/src/element/task.rs:39-60` 的
+/// `TaskWaker`）持 `Arc<Ready>`（`Mutex<Vec<u64>>` + `Mutex<Option<Notify>>`），
+/// `wake_by_ref` 可从**任意线程**调用 —— `background()` 就是这么把 tokio 线程上
+/// 完成的活唤回引擎线程的。所以引擎线程上的任务可以直接 `await` 一个 tokio
+/// 通道，等待线程 `send` 即唤醒，**空闲期零唤醒**（旧口径是 8.3 次/秒）。
+static ACTIVATE: OnceLock<tokio::sync::mpsc::UnboundedSender<()>> = OnceLock::new();
 
 fn bump_pending() {
     PENDING.fetch_add(1, Ordering::Release);
+    if let Some(tx) = ACTIVATE.get() {
+        // 收端已经没了（应用正在退）：丢弃即可，计数还留着给测试读。
+        let _ = tx.send(());
+    }
 }
 
 /// UI 线程调用：取走至今累计的激活请求数（0 表示没有）。
@@ -92,46 +105,51 @@ pub fn same_executable(a: &Path, b: &Path) -> bool {
     normalize(a) == normalize(b)
 }
 
-/// UI 侧安装：轮询激活请求并把窗口拉到前台。在组件作用域里调一次
+/// UI 侧安装：等激活请求推过来，把窗口拉到前台。在组件作用域里调一次
 /// （`shell.rs` 的 `App()`）。非 Windows 上什么也不做。
+///
+/// B3：不再每 120ms 问一次。等待线程 `bump_pending()` 时直接往通道里投一条，
+/// 这里的任务 `await` 在通道上 —— **没有激活请求时零唤醒**。
 #[cfg(windows)]
 pub fn install() {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use nsh_core::element::desktop::main_window;
     use nsh_core::prelude::{spawn, timer};
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    if ACTIVATE.set(tx).is_err() {
+        // 已经装过一次（不该发生）：不重复起任务，避免两条循环抢焦点。
+        log::warn!("单实例：激活通道已安装，跳过");
+        return;
+    }
+
     spawn(async move {
-        // 焦点校验的时间点：`focus()` 之后隔一拍再读 `state()`——真机上
-        // `WindowRef::state()` 读的是上一拍（T1 实测），立刻读必然读到旧值。
-        let mut verify_at: Option<Instant> = None;
-        loop {
-            timer(Duration::from_millis(120)).await;
+        while rx.recv().await.is_some() {
+            // 一次唤出合并掉积压的请求：用户连点三次图标只要上来一次。
+            while rx.try_recv().is_ok() {}
+            let _ = pending_activations();
 
-            if pending_activations() > 0 {
-                // focus() 的文档承诺「显示 + 到本层最前 + 聚焦」，最小化与隐藏
-                // 都由它一并处理（`show()` 也会 restore）。这里不自己拼
-                // ShowWindow/SetForegroundWindow：窗口归 NSH 管，绕过去会让它的
-                // 内部状态与平台真值分叉。
-                main_window().focus();
-                verify_at = Some(Instant::now() + Duration::from_millis(300));
-                log::info!("单实例：已唤出主窗口");
-            }
+            // focus() 的文档承诺「显示 + 到本层最前 + 聚焦」，最小化与隐藏
+            // 都由它一并处理（`show()` 也会 restore）。这里不自己拼
+            // ShowWindow/SetForegroundWindow：窗口归 NSH 管，绕过去会让它的
+            // 内部状态与平台真值分叉。
+            main_window().focus();
+            log::info!("单实例：已唤出主窗口");
 
-            if let Some(at) = verify_at {
-                if Instant::now() < at {
-                    continue;
-                }
-                verify_at = None;
-                let focused = main_window().state().map(|s| s.focused).unwrap_or(false);
-                if !focused {
-                    // SetForegroundWindow 在真机常被前台锁挡住（方案 §5.2 已写
-                    // 明）。退一步用系统级的「要注意力」：任务栏按钮闪，用户一点
-                    // 就上来，不抢焦点。
-                    main_window().request_attention(true);
-                    log::info!("单实例：聚焦未生效，改请任务栏闪烁");
-                }
+            // 焦点校验：`focus()` 之后隔一拍再读 `state()`——真机上
+            // `WindowRef::state()` 读的是上一拍（T1 实测），立刻读必然读到旧值。
+            // **这个 timer 只在真收到激活时存在**，空闲期没有它。
+            timer(Duration::from_millis(300)).await;
+            let focused = main_window().state().map(|s| s.focused).unwrap_or(false);
+            if !focused {
+                // SetForegroundWindow 在真机常被前台锁挡住（方案 §5.2 已写
+                // 明）。退一步用系统级的「要注意力」：任务栏按钮闪，用户一点
+                // 就上来，不抢焦点。
+                main_window().request_attention(true);
+                log::info!("单实例：聚焦未生效，改请任务栏闪烁");
             }
+            while rx.try_recv().is_ok() {}
         }
     });
 }
@@ -608,7 +626,7 @@ mod imp {
     ///
     /// 在 `preflight` 之后立刻起（不等窗口）：这样次实例在开机自启/双击撞上
     /// 「主实例正在 boot」时也能马上拿到回执，而不是傻等到窗口出来。真正的
-    /// 开窗由 UI 线程轮询 `pending_activations()` 完成。
+    /// 开窗由 UI 线程的任务等 `ACTIVATE` 通道推送完成（B3，不再轮询）。
     pub fn spawn_waiter(guard: &Guard) {
         /// 管道句柄不实现 `Send`（它是裸指针），包一层交出去。
         /// # Safety

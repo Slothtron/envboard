@@ -301,22 +301,6 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
         });
         // 托盘上要显示这个数，和界面里的 chip 同源（T2，方案 §6.1 第 1 条）。
         cap_info.ctx.captured.set(count as u64);
-    } else {
-        // 首拍同步读（窗口第一帧就有内容），之后可见时 80ms 一拍只看版本号：
-        // 版本没变（空闲）就什么都不做，变了才去读一段尾部窗口。
-        // `spawn` 归当前 owner：返回环境列表时页面卸载，循环随之取消。
-        spawn(async move {
-            pull(cap_info);
-            loop {
-                // 间隔不是常数：窗口隐藏时 80 → 1000（T1 硬要求，见 `tray.rs`）。
-                // 版本号机制保证「有变化才读」，降频只推迟「后台新记录上屏」，
-                // 而窗口本来不可见。
-                timer(crate::tray::capture_poll_interval()).await;
-                if due(cap_info) {
-                    pull(cap_info);
-                }
-            }
-        });
     }
 
     view()
@@ -325,6 +309,12 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
         .w_full()
         .h_full()
         .bg(|| t::page())
+        // B1：抓包循环也挂在受可见性门控的子树里（非 fixture 口径才挂）。
+        // 隐藏即卸载 → `spawn` 取消 → 定时器被取回，隐藏态零唤醒。
+        .child(when(
+            move || !synthetic && crate::live::visible(),
+            move || capture_sync(cap_info),
+        ))
         .child(toolbar(cap_info))
         .child(when(
             move || cap_info.meta.get().error.is_some(),
@@ -348,6 +338,27 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
                     detail_panel(cap_info)
                 })),
         )
+}
+
+/// 抓包的「活体」循环（B1，EB-DESIGN-006 §6.1）。
+///
+/// 只在 `live::visible()` 为真时挂载。挂载即拉一次（唤出第一帧就有内容），
+/// 之后 80ms 兜底一拍、只看版本号：没变就什么都不做，变了才读一段尾部窗口。
+/// 卸载时 owner 结束、`spawn` 取消、定时器被 `TimerKey` 取回 —— 不需要「停」的代码。
+fn capture_sync(cap: Cap) -> impl IntoElement {
+    pull(cap);
+    spawn(async move {
+        loop {
+            timer(std::time::Duration::from_millis(
+                crate::live::CAPTURE_FALLBACK_MS,
+            ))
+            .await;
+            if due(cap) {
+                pull(cap);
+            }
+        }
+    });
+    view().absolute().w(px(0.0)).h(px(0.0))
 }
 
 // ---- 数据：尾部窗口合并 ---------------------------------------------------
