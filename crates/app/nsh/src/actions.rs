@@ -43,11 +43,6 @@ pub struct Ctx {
     pub theme: Signal<ThemeChoice>,
     /// 抓包子页正在看哪个环境（`None` = 在环境列表上）。
     pub capture_env: Signal<Option<String>>,
-    /// 顶层页（0 环境 / 1 证书）。托盘菜单「环境」「抓包」要能直接跳过去。
-    pub page: Signal<usize>,
-    /// 最近一次抓包会话累计多少条（托盘 tooltip / 菜单的「捕获 N」）。
-    /// 抓包页每次读到元数据就写一次；没开过抓包会话时是 0。
-    pub captured: Signal<u64>,
     /// 关窗后常驻托盘（`ui.json` 的 `close_to_tray`，默认开）。
     pub close_to_tray: Signal<bool>,
 }

@@ -299,8 +299,6 @@ pub fn page(ctx: Ctx) -> impl IntoElement {
             loaded: true,
             error: None,
         });
-        // 托盘上要显示这个数，和界面里的 chip 同源（T2，方案 §6.1 第 1 条）。
-        cap_info.ctx.captured.set(count as u64);
     }
 
     view()
@@ -430,9 +428,6 @@ fn pull_once(cap: Cap, name: &str, limit: usize) -> bool {
                 meta.loaded = true;
                 meta.error = None;
             });
-            // 托盘的「捕获 N」跟着这个数走（T2，方案 §6.1 第 1 条）：只写信号，
-            // 托盘侧自己判断值变没变、变了才重建菜单。
-            cap.ctx.captured.set(batch.captured);
             let saturated = batch.rows.len() >= limit;
             // 缓冲按字节淘汰：比 `oldest` 老的行已经不在引擎里了，本地也不该留着。
             cap.rows.update(|rows| {
@@ -450,7 +445,6 @@ fn pull_once(cap: Cap, name: &str, limit: usize) -> bool {
                 cap.selected.set(None);
                 cap.detail.set(None);
             }
-            cap.ctx.captured.set(0);
             cap.meta.update(|meta| {
                 meta.loaded = true;
                 meta.error = None;

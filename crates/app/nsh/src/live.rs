@@ -27,9 +27,6 @@ use nsh_core::prelude::lifecycle;
 pub const CAPTURE_FALLBACK_MS: u64 = 80;
 /// 环境页的兜底拍：代次没变不动信号。
 pub const SNAPSHOT_FALLBACK_MS: u64 = 800;
-/// 托盘重建的合并窗口：计数在变时最多每秒重建一次（T1 实测一次 `set_tray` ≈33ms）。
-/// **只在真有变化时排这个 timer**，空闲期不存在。
-pub const TRAY_COALESCE_MS: u64 = 1000;
 
 /// 窗口此刻真的看得见吗？读它会订阅。
 pub fn visible() -> bool {
@@ -45,6 +42,5 @@ mod tests {
         // 可见态的两拍是 S3/T1 验过的口径，钉住免得被人随手改大。
         assert_eq!(CAPTURE_FALLBACK_MS, 80);
         assert_eq!(SNAPSHOT_FALLBACK_MS, 800);
-        assert_eq!(TRAY_COALESCE_MS, 1000);
     }
 }

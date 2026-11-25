@@ -214,8 +214,6 @@ pub fn App() -> impl IntoElement {
         confirm,
         theme,
         capture_env,
-        page,
-        captured: signal(0u64),
         close_to_tray,
     };
 
